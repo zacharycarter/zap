@@ -28,7 +28,8 @@ data CGenError = UnsupportedType IRType
 type Codegen = ExceptT CGenError (State CodegenState)
 
 data CodegenState = CodegenState
-  { varEnv :: M.Map Text IRType
+  { varEnv :: M.Map T.Text IRType            -- For variables
+  , funcEnv :: M.Map T.Text (IRType, [IRType]) -- (return type, parameter types)
   , blockCounter :: Int
   , structDefs :: [Text]
   }
@@ -81,7 +82,7 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
     return program
     ) initState
   where
-    initState = CodegenState M.empty 0 []
+    initState = CodegenState M.empty M.empty 0 []
 
 generateTypedExpr :: IRExpr -> Codegen (Text, IRType)
 generateTypedExpr expr = do
@@ -118,7 +119,31 @@ generateTypedExpr expr = do
                     return (T.concat ["_mm_dp_ps(", lval, ", ", rval, ", 0xFF)"], IRTypeNum IRFloat32)
                 _ -> throwError $ UnsupportedOperation op ltyp rtyp
 
-        _ -> throwError $ UnsupportedType IRTypeString
+        IRCall name args -> do
+            traceM $ "Generating function call: " ++ show name
+            state <- get
+            -- Generate argument expressions
+            argVals <- mapM generateTypedExpr args
+            let argStrs = map fst argVals
+                argTypes = map snd argVals
+
+            -- Look up function signature
+            (returnType, paramTypes) <- case M.lookup name (funcEnv state) of
+                Just sig -> return sig
+                Nothing -> do
+                    traceM $ "Function " ++ show name ++ " not found in environment"
+                    throwError $ UnsupportedOperation IRAdd IRTypeString IRTypeString
+
+            -- Verify argument types match parameters
+            when (length argTypes /= length paramTypes) $
+                throwError $ UnsupportedOperation IRAdd IRTypeString IRTypeString
+
+            forM_ (zip argTypes paramTypes) $ \(argType, paramType) ->
+                when (argType /= paramType) $
+                    throwError $ UnsupportedOperation IRAdd argType paramType
+
+            return (T.concat [name, "(", T.intercalate ", " argStrs, ")"],
+                    returnType)
 
 getPrintfFormat :: IRType -> Codegen Text
 getPrintfFormat typ = do

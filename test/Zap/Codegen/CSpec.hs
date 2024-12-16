@@ -25,7 +25,7 @@ spec = do
               , (IRTypeNum IRFloat64, "double")
               ]
         forM_ testCases $ \(irType, expected) -> do
-          evalState (runExceptT $ irTypeToCType irType) (CodegenState M.empty 0 [])
+          evalState (runExceptT $ irTypeToCType irType) (CodegenState M.empty M.empty 0 [])
             `shouldBe` Right expected
 
       it "generates correct C types for vector types" $ do
@@ -36,7 +36,7 @@ spec = do
               , (IRTypeVec (IRVec2 IRFloat64), "v2f64")
               ]
         forM_ testCases $ \(irType, expected) -> do
-          evalState (runExceptT $ irTypeToCType irType) (CodegenState M.empty 0 [])
+          evalState (runExceptT $ irTypeToCType irType) (CodegenState M.empty M.empty 0 [])
             `shouldBe` Right expected
 
     describe "Struct Generation" $ do
@@ -51,7 +51,7 @@ spec = do
               , "    float y;"
               , "} Point_t;"
               ]
-        evalState (runExceptT $ generateStructDef structDecl) (CodegenState M.empty 0 [])
+        evalState (runExceptT $ generateStructDef structDecl) (CodegenState M.empty M.empty 0 [])
           `shouldBe` Right expected
 
       it "handles nested struct types" $ do
@@ -65,7 +65,7 @@ spec = do
               , "    Point_t end;"
               , "} Line_t;"
               ]
-        evalState (runExceptT $ generateStructDef lineDecl) (CodegenState M.empty 0 [])
+        evalState (runExceptT $ generateStructDef lineDecl) (CodegenState M.empty M.empty 0 [])
           `shouldBe` Right expected
 
     describe "Vector Operations" $ do
@@ -77,7 +77,7 @@ spec = do
               (IRVec (IRVec4 IRFloat32)
                 [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
                  IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
-        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty 0 [])
+        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
         case result of
           Right (val, _) -> T.isInfixOf "_mm_add_ps" val `shouldBe` True
           Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
@@ -90,7 +90,7 @@ spec = do
             (IRVec (IRVec4 IRFloat32)
               [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
                IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
-      let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty 0 [])
+      let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
       case result of
         Right (val, _) -> T.isInfixOf "_mm_dp_ps" val `shouldBe` True
         Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
@@ -136,3 +136,42 @@ spec = do
                 [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
                  IRNum IRFloat32 "7.0"])
         generateC (IRProgram [] [expr]) `shouldSatisfy` isLeft
+
+    describe "Function Call Generation" $ do
+      it "generates code for simple function calls" $ do
+        let expr = IRCall "add"
+                    [ IRNum IRInt32 "1"
+                    , IRNum IRInt32 "2"
+                    ]
+        let initialState = CodegenState
+              { varEnv = M.empty
+              , funcEnv = M.singleton "add" (IRTypeNum IRInt32, [IRTypeNum IRInt32, IRTypeNum IRInt32])
+              , blockCounter = 0
+              , structDefs = []
+              }
+        let result = evalState (runExceptT $ generateTypedExpr expr) initialState
+        case result of
+          Right (val, _) -> val `shouldBe` "add(1, 2)"
+          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "propagates correct return types for function calls" $ do
+        let expr = IRCall "vector_add"
+                    [ IRVec (IRVec4 IRFloat32)
+                        [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
+                         IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"]
+                    , IRVec (IRVec4 IRFloat32)
+                        [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
+                         IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"]
+                    ]
+        let initialState = CodegenState
+              { varEnv = M.empty
+              , funcEnv = M.singleton "vector_add"
+                  (IRTypeVec (IRVec4 IRFloat32),
+                   [IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)])
+              , blockCounter = 0
+              , structDefs = []
+              }
+        let result = evalState (runExceptT $ generateTypedExpr expr) initialState
+        case result of
+          Right (_, retType) -> retType `shouldBe` IRTypeVec (IRVec4 IRFloat32)
+          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
