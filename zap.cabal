@@ -37,6 +37,7 @@ library
       Zap.Compiler
       Zap.Compiler.OptConfig
       Zap.IR.Allocator
+      Zap.IR.Conversion
       Zap.IR.Core
       Zap.IR.Types
       Zap.Parser.Core
@@ -101,6 +102,7 @@ test-suite zap-test
       Zap.Analysis.AllocationSpec
       Zap.Analysis.LexicalSpec
       Zap.Codegen.CSpec
+      Zap.IR.ConversionSpec
       Zap.Parser.ParserSpec
       Paths_zap
   autogen-modules:

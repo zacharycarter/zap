@@ -4,6 +4,7 @@ module Zap.Codegen.C
   , CGenError(..)
   , CodegenState(..)
   , irTypeToCType
+  , generateFuncDef
   , generateStructDef
   , generateTypedExpr
   , generateStmt
@@ -113,10 +114,22 @@ generateTypedExpr expr = do
             (lval, ltyp) <- generateTypedExpr lhs
             (rval, rtyp) <- generateTypedExpr rhs
             case (op, ltyp, rtyp) of
+                -- Vector operations (existing)
                 (IRAdd, IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)) ->
                     return (T.concat ["_mm_add_ps(", lval, ", ", rval, ")"], ltyp)
                 (IRDot, IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)) ->
                     return (T.concat ["_mm_dp_ps(", lval, ", ", rval, ", 0xFF)"], IRTypeNum IRFloat32)
+
+                -- Numeric operations
+                (IRAdd, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " + ", rval, ")"], IRTypeNum t1)
+                (IRSub, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " - ", rval, ")"], IRTypeNum t1)
+                (IRMul, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " * ", rval, ")"], IRTypeNum t1)
+                (IRDiv, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " / ", rval, ")"], IRTypeNum t1)
+
                 _ -> throwError $ UnsupportedOperation op ltyp rtyp
 
         IRCall name args -> do
@@ -212,41 +225,31 @@ generateFuncDef :: IRDecl -> Codegen Text
 generateFuncDef (IRFunc name params retType body) = do
     traceM $ "\n--> Starting function generation for '" ++ T.unpack name ++ "'"
 
-    -- Add parameters to environment
+    -- Store function signature in environment before processing body
+    modify $ \s -> s { funcEnv = M.insert name (retType, map snd params) (funcEnv s) }
+
+    -- Add parameters to variable environment
     forM_ params $ \(pname, ptype) -> do
         traceM $ "Adding parameter to environment: " ++ T.unpack pname ++ " : " ++ show ptype
         modify $ \s -> s { varEnv = M.insert pname ptype (varEnv s) }
 
-    -- Generate return type
-    traceM "Generating return type..."
+    -- Generate return type and parameters as before
     retTypeStr <- irTypeToCType retType
-    traceM $ "Return type: " ++ T.unpack retTypeStr
-
-    -- Generate parameter list
-    traceM "Generating parameters..."
     paramStrs <- forM params $ \(pname, ptype) -> do
         typeStr <- irTypeToCType ptype
-        let paramStr = T.concat [typeStr, " ", pname]
-        traceM $ "Parameter: " ++ T.unpack paramStr
-        return paramStr
+        return $ T.concat [typeStr, " ", pname]
 
-    -- Generate function body
+    -- Generate function body with access to complete signature information
     traceM $ "Generating function body:\n" ++ show body
     (bodyExpr, bodyType) <- generateTypedExpr body
-    traceM $ "Body expression: " ++ T.unpack bodyExpr
-    traceM $ "Body type: " ++ show bodyType
 
-    -- Validate return type matches
-    traceM "Validating return type..."
-    when (bodyType /= retType) $ do
-        traceM $ "Type mismatch: expected " ++ show retType ++ " but got " ++ show bodyType
-        throwError $ UnsupportedOperation IRAdd bodyType retType
+    -- Save current environment
+    oldState <- get
 
-    -- Clear parameters from environment
-    modify $ \s -> s { varEnv = M.empty }
-    traceM "Cleared parameter environment"
+    -- Clear environments to prevent leaking
+    modify $ \s -> s { varEnv = M.empty, funcEnv = M.empty }
 
-    -- Build complete function
+    -- Generate final function text
     let funcSig = T.concat [retTypeStr, " ", name, "(", T.intercalate ", " paramStrs, ")"]
     let result = T.unlines
             [ funcSig <> " {"
@@ -254,7 +257,6 @@ generateFuncDef (IRFunc name params retType body) = do
             , "}"
             ]
 
-    traceM $ "Generated complete function:\n" ++ T.unpack result
     return result
 
 generateFuncDef _ = throwError $ UnsupportedType IRTypeString

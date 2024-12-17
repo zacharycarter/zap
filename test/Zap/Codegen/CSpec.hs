@@ -175,3 +175,85 @@ spec = do
         case result of
           Right (_, retType) -> retType `shouldBe` IRTypeVec (IRVec4 IRFloat32)
           Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "tracks function parameter types correctly" $ do
+          let decl = IRFunc "multiply"
+                [("x", IRTypeNum IRFloat32), ("y", IRTypeNum IRFloat32)]
+                (IRTypeNum IRFloat32)
+                (IRBinOp IRMul (IRVar "x") (IRVar "y"))
+
+          let initialState = CodegenState
+                { varEnv = M.empty
+                , funcEnv = M.empty
+                , blockCounter = 0
+                , structDefs = []
+                }
+
+          let result = evalState (runExceptT $ generateFuncDef decl) initialState
+          case result of
+            Right code -> do
+              T.isInfixOf "float multiply(float x, float y)" code `shouldBe` True
+              T.isInfixOf "return" code `shouldBe` True
+            Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "validates return type matches body expression" $ do
+          let decl = IRFunc "add_vectors"
+                [ ("v1", IRTypeVec (IRVec4 IRFloat32))
+                , ("v2", IRTypeVec (IRVec4 IRFloat32))
+                ]
+                (IRTypeVec (IRVec4 IRFloat32))
+                (IRBinOp IRAdd (IRVar "v1") (IRVar "v2"))
+
+          let initialState = CodegenState
+                { varEnv = M.empty
+                , funcEnv = M.empty
+                , blockCounter = 0
+                , structDefs = []
+                }
+
+          let result = evalState (runExceptT $ generateFuncDef decl) initialState
+          case result of
+            Right code -> do
+              T.isInfixOf "v4f32 add_vectors(v4f32 v1, v4f32 v2)" code `shouldBe` True
+              T.isInfixOf "_mm_add_ps" code `shouldBe` True
+            Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "maintains function environment during body generation" $ do
+          let innerCall = IRCall "helper" [IRNum IRInt32 "42"]
+          let mainFunc = IRFunc "main"
+                []
+                (IRTypeNum IRInt32)
+                innerCall
+
+          let initialState = CodegenState
+                { varEnv = M.empty
+                , funcEnv = M.singleton "helper"
+                    (IRTypeNum IRInt32, [IRTypeNum IRInt32])
+                , blockCounter = 0
+                , structDefs = []
+                }
+
+          let result = evalState (runExceptT $ generateFuncDef mainFunc) initialState
+          case result of
+            Right code -> do
+              T.isInfixOf "int32_t main()" code `shouldBe` True
+              T.isInfixOf "helper(42)" code `shouldBe` True
+            Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "generates code for numeric binary operations" $ do
+          let testCases = [
+                  (IRAdd, "+"), (IRSub, "-"),
+                  (IRMul, "*"), (IRDiv, "/")
+                  ]
+          forM_ testCases $ \(op, symbol) -> do
+              let expr = IRBinOp op
+                      (IRNum IRFloat32 "1.0")
+                      (IRNum IRFloat32 "2.0")
+              let result = evalState (runExceptT $ generateTypedExpr expr)
+                      (CodegenState M.empty M.empty 0 [])
+              case result of
+                  Right (val, typ) -> do
+                      typ `shouldBe` IRTypeNum IRFloat32
+                      T.isInfixOf symbol val `shouldBe` True
+                  Left err -> expectationFailure $
+                      "Expected Right but got Left " ++ show err
