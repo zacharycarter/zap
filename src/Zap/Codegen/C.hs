@@ -234,22 +234,21 @@ generateFuncDef (IRFunc name params retType body) = do
     -- Store function signature in environment before processing body
     modify $ \s -> s { funcEnv = M.insert name (retType, map snd params) (funcEnv s) }
 
-    -- Add parameters to variable environment
+    -- Add parameters to variable environment with proper types
     forM_ params $ \(pname, ptype) -> do
         traceM $ "Adding parameter to environment: " ++ T.unpack pname ++ " : " ++ show ptype
         modify $ \s -> s { varEnv = M.insert pname ptype (varEnv s) }
 
-    -- Generate return type and parameters as before
+    -- Generate return type and parameters
     retTypeStr <- irTypeToCType retType
     paramStrs <- forM params $ \(pname, ptype) -> do
         typeStr <- irTypeToCType ptype
         return $ T.concat [typeStr, " ", pname]
 
-    -- Generate function body with access to complete signature information
-    traceM $ "Generating function body:\n" ++ show body
+    -- Generate function body
     (bodyExpr, bodyType) <- generateTypedExpr body
 
-    -- Save current environment
+    -- Save current environment state
     oldState <- get
 
     -- Clear environments to prevent leaking
@@ -262,6 +261,9 @@ generateFuncDef (IRFunc name params retType body) = do
             , "    return " <> bodyExpr <> ";"
             , "}"
             ]
+
+    -- Restore previous environment
+    put oldState
 
     return result
 

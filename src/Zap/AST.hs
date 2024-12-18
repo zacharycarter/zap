@@ -44,6 +44,7 @@ data Op
   | Gt
   | And
   | Or
+  | Dot
   deriving (Show, Eq)
 
 data Param = Param String Type

@@ -79,21 +79,38 @@ spec = do
                  IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
         let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
         case result of
-          Right (val, _) -> T.isInfixOf "_mm_add_ps" val `shouldBe` True
+          Right (val, _) -> do
+            T.isInfixOf "_mm_add_ps" val `shouldBe` True
+            T.isInfixOf "_mm_set_ps" val `shouldBe` True
           Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
-    it "generates SIMD code for dot product" $ do
-      let expr = IRBinOp IRDot
-            (IRVec (IRVec4 IRFloat32)
-              [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-               IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
-            (IRVec (IRVec4 IRFloat32)
-              [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
-               IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
-      let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
-      case result of
-        Right (val, _) -> T.isInfixOf "_mm_dp_ps" val `shouldBe` True
-        Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+      it "generates SIMD code for dot product" $ do
+        let expr = IRBinOp IRDot
+              (IRVec (IRVec4 IRFloat32)
+                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
+                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
+              (IRVec (IRVec4 IRFloat32)
+                [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
+                 IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
+        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
+        case result of
+          Right (val, typ) -> do
+            T.isInfixOf "_mm_dp_ps" val `shouldBe` True
+            typ `shouldBe` IRTypeNum IRFloat32
+          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+
+      it "generates efficient SIMD component access" $ do
+        let expr = IRFieldAccess
+              (IRVec (IRVec4 IRFloat32)
+                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
+                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
+              "x"
+        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
+        case result of
+          Right (val, typ) -> do
+            T.isInfixOf "_mm_extract_ps" val `shouldBe` True
+            typ `shouldBe` IRTypeNum IRFloat32
+          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
     describe "Complete Program Generation" $ do
       it "generates a complete program with vector math" $ do
