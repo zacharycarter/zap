@@ -204,6 +204,12 @@ generateStmt expr = do
                     traceM $ "Generated: " ++ T.unpack result
                     return result
 
+        IRBlockAlloc name exprs mResult -> do
+            -- Generate statements for all expressions in the block
+            stmts <- mapM generateStmt exprs
+            -- Return the statements joined together
+            return $ T.unlines stmts
+
         IRBinOp op lhs rhs -> do
             traceM $ "Generating binary operation: " ++ show op
             (lval, ltyp) <- generateTypedExpr lhs

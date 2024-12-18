@@ -21,13 +21,15 @@ Basic Expressions:
 - Block expressions with proper scope management
 - Break statements with label validation
 - Result expressions for block return values
+- Basic arithmetic operations (addition, subtraction, multiplication, division) with type checking
 
 Type System:
-- Multiple numeric types (Int32, Int64, Float32, Float64)
+- Multiple numeric types (Int32, Int64, Float32, Float64) 
 - Vector types with SIMD alignment
 - Structured data with proper field access
 - Array types with bounds checking
 - Basic type inference and checking
+- Type safety for binary operations
 
 Memory Management:
 - Stack allocation for simple types
@@ -50,15 +52,12 @@ The following areas should be prioritized for future development:
 ### 1. Complete End-to-End Testing
 
 While we have made progress in testing individual components, we need to implement comprehensive end-to-end tests that verify the entire compilation pipeline. This includes:
-- Tests that compile and execute complete programs
-- Verification of generated code correctness
 - Performance benchmarking infrastructure
 - Test coverage for error conditions and edge cases
 
 ### 2. Expression Support Enhancement
 
 The IR conversion layer needs to be expanded to support more expression types:
-- Binary operations for arithmetic and logic
 - Variable declarations and assignments
 - Function calls and definitions
 - Control flow structures (if/else, loops)
@@ -89,15 +88,36 @@ Error handling can be improved in several areas:
 - Suggestions for fixing common errors
 - Better location information in error messages
 
+### Recent Progress
+
+The compiler has recently gained support for:
+- Complete block expression handling with proper scope management
+- Type-safe binary arithmetic operations
+- Improved error handling for type mismatches
+- Enhanced test coverage for expression handling
+
+### Current Development Status
+
+Work is currently underway to implement control flow structures, starting with if/else expressions. The initial test case has been written to verify proper handling of conditional expressions with boolean conditions and type-safe branches. This will serve as the foundation for implementing more complex control flow structures.
+
 ### Next Steps
 
-For developers continuing work on the project, the immediate priorities should be:
+The immediate priorities for continuing development are:
 
-1. Implement the remaining end-to-end test infrastructure to ensure reliable testing of the complete pipeline.
-2. Expand IR conversion to handle more expression types, particularly focusing on binary operations and control flow.
-3. Begin implementing basic optimization passes once the IR conversion is complete.
+1. Complete the if/else expression implementation:
+   - Implement IR conversion for conditional expressions
+   - Add semantic analysis for boolean conditions
+   - Verify type consistency between branches
 
-Each new feature should be accompanied by appropriate tests and documentation. The project should maintain its focus on type safety and memory management while progressively adding features that make the language more practical for game development scenarios.
+2. Expand control flow support:
+   - Add loop constructs
+   - Implement pattern matching
+   - Add error handling constructs
+
+3. Continue enhancing the test suite with:
+   - Additional test cases for control flow
+   - Integration tests for combined features
+   - Error handling test cases
 
 ## Documentation Status
 

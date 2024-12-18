@@ -54,7 +54,7 @@ data CompileError
 
 data CompileResult = CompileResult
   { tokens :: Maybe [Located]
-  , parsedTokens :: Maybe (Located, Located)
+  , parsedAST :: Maybe [TopLevel]
   , program :: Maybe Program
   , analyzed :: Maybe Program
   , generatedCode :: Maybe T.Text
@@ -76,16 +76,14 @@ compile opts source = do
   parseResult <- if targetStage opts >= Parsing
     then do
       parsed <- mapLeft ParserError $ parseProgram source
-      return $ lexResult { parsedTokens = Just parsed }
+      return $ lexResult { parsedAST = Just parsed }
     else return lexResult
 
-  -- AST Translation
+  -- Create Program from parsed AST
   astResult <- if targetStage opts >= Parsing
-    then case parsedTokens parseResult of
-      Just (printTok, strTok) -> do
-        let translationResult = runExcept $ translateToAST printTok strTok
-        ast <- mapLeft TranslationError translationResult
-        let prog = Program [TLExpr ast]
+    then case parsedAST parseResult of
+      Just topLevels -> do
+        let prog = Program topLevels
         return $ parseResult { program = Just prog }
       Nothing -> return parseResult
     else return parseResult

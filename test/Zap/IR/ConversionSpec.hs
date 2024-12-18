@@ -108,3 +108,68 @@ spec = do
           Left (UnsupportedExpression _) -> return ()
           Left err -> expectationFailure $ "Expected UnsupportedExpression but got: " ++ show err
           Right ir -> expectationFailure $ "Expected error but got successful conversion: " ++ show ir
+
+      describe "Binary Operations" $ do
+        it "converts simple numeric addition" $ do
+          let ast = Program [TLExpr (BinOp Add
+                                    (NumLit Int32 "1")
+                                    (NumLit Int32 "2"))]
+          case convertToIR ast of
+            Right (IRProgram decls exprs) -> do
+              decls `shouldBe` []
+              exprs `shouldBe` [IRBinOp IRAdd
+                               (IRNum IRInt32 "1")
+                               (IRNum IRInt32 "2")]
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+        it "converts simple numeric subtraction" $ do
+          let ast = Program [TLExpr (BinOp Sub
+                                    (NumLit Int32 "5")
+                                    (NumLit Int32 "3"))]
+          case convertToIR ast of
+            Right (IRProgram decls exprs) -> do
+              decls `shouldBe` []
+              exprs `shouldBe` [IRBinOp IRSub
+                               (IRNum IRInt32 "5")
+                               (IRNum IRInt32 "3")]
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+        it "converts simple numeric multiplication" $ do
+          let ast = Program [TLExpr (BinOp Mul
+                                    (NumLit Int32 "4")
+                                    (NumLit Int32 "3"))]
+          case convertToIR ast of
+            Right (IRProgram decls exprs) -> do
+              decls `shouldBe` []
+              exprs `shouldBe` [IRBinOp IRMul
+                               (IRNum IRInt32 "4")
+                               (IRNum IRInt32 "3")]
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+        it "converts simple numeric division" $ do
+          let ast = Program [TLExpr (BinOp Div
+                                    (NumLit Int32 "6")
+                                    (NumLit Int32 "2"))]
+          case convertToIR ast of
+            Right (IRProgram decls exprs) -> do
+              decls `shouldBe` []
+              exprs `shouldBe` [IRBinOp IRDiv
+                               (IRNum IRInt32 "6")
+                               (IRNum IRInt32 "2")]
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+      describe "Control Flow" $ do
+        describe "If Expressions" $ do
+          it "converts simple if-else with boolean condition" $ do
+            let ast = Program [TLExpr (If
+                                      (BoolLit True)
+                                      (NumLit Int32 "1")
+                                      (NumLit Int32 "2"))]
+            case convertToIR ast of
+              Right (IRProgram decls exprs) -> do
+                decls `shouldBe` []
+                exprs `shouldBe` [IRIf
+                                 (IRBool True)
+                                 (IRNum IRInt32 "1")
+                                 (IRNum IRInt32 "2")]
+              Left err -> expectationFailure $ "Conversion failed: " ++ show err

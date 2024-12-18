@@ -1,6 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Zap.Parser.Expr
   ( defaultExprParser
+  , isPrint
+  , isStringLit
   , parseExpr
   , parsePrint
   , ExprParser(..)
@@ -40,6 +42,10 @@ isColon _ = False
 isBreak :: Token -> Bool
 isBreak (TWord "break") = True
 isBreak _ = False
+
+isPrint :: Token -> Bool
+isPrint (TWord "print") = True
+isPrint _ = False
 
 isResult :: Token -> Bool
 isResult (TWord "result") = True
@@ -231,10 +237,19 @@ parseBasicExprImpl = do
     let tok = head $ stateTokens state
     traceM $ "parseBasicExpr at indent " ++ show (stateIndent state) ++ " with token: " ++ show tok
     checkIndent GreaterEq
-    strTok <- matchToken isStringLit "string literal"
-    case locToken strTok of
-      TString s -> return $ StrLit s
-      _ -> error "Matched non-string token as string literal"
+    case locToken tok of
+        TWord "print" -> do
+            -- Handle print statement
+            printTok <- matchToken isPrint "print"
+            strTok <- matchToken isStringLit "string literal"
+            case locToken strTok of
+                TString s -> return $ Print (StrLit s)
+                _ -> error "Matched non-string token as string literal"
+        TString s -> do
+            -- Handle string literal
+            strTok <- matchToken isStringLit "string literal"
+            return $ StrLit s
+        _ -> throwError $ UnexpectedToken tok "expression"
 
 parsePrint :: Parser (Located, Located)
 parsePrint = do
@@ -256,9 +271,6 @@ parsePrint = do
           throwError $ IndentationError (locCol printTok + 1) (locCol exprTok) Greater
         return (printTok, exprTok)
       [] -> throwError $ EndOfInput "print statement"
-  where
-    isPrint (TWord "print") = True
-    isPrint _ = False
 
 defaultExprParser :: ExprParser
 defaultExprParser = ExprParser
