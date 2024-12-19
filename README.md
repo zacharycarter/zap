@@ -53,7 +53,7 @@ The Zap programming language is a general-purpose systems language optimized for
 ### Compiling a Program
 To compile a Zap source file:
 ```bash
-stack run zap-compiler -- input.zap
+stack run zap-compiler -- input.zap output.c
 ```
 The output will be a C file named `output.c`.
 
