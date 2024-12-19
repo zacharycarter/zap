@@ -8,72 +8,86 @@ import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.Text as T
+import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
 import Zap.Parser.Expr
 import Zap.AST
 
--- | Parse a complete program
 parseProgram :: T.Text -> Either ParseError [TopLevel]
 parseProgram input = do
-  tokens <- mapLexError $ tokenize input
-  runParser parseTopLevels tokens
+    traceM "\n=== Starting Program Parsing ==="
+    traceM $ "Input text: " ++ T.unpack input
+    tokens <- mapLexError $ tokenize input
+    traceM $ "Tokenized input: " ++ show tokens
+    runParser parseTopLevels tokens
 
--- | Parse multiple top-level expressions
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
-  state <- get
-  case stateTokens state of
-    [] -> pure []
-    (tok:_) -> case locToken tok of
-      TEOF -> pure []
-      _ -> do
-        expr <- parseTopLevel
-        rest <- parseTopLevels
-        pure (expr : rest)
+    state <- get
+    traceM "\n--- Parsing Top Level Expressions ---"
+    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
+    case stateTokens state of
+        [] -> do
+            traceM "No more tokens to parse"
+            pure []
+        (tok:_) -> case locToken tok of
+            TEOF -> do
+                traceM "Found EOF token"
+                pure []
+            _ -> do
+                traceM $ "Parsing top-level expression starting with: " ++ show tok
+                expr <- parseTopLevel
+                traceM $ "Successfully parsed expression: " ++ show expr
+                rest <- parseTopLevels
+                pure (expr : rest)
 
--- | Parse a single top-level expression
 parseTopLevel :: Parser TopLevel
 parseTopLevel = do
-  state <- get
-  case stateTokens state of
-    (tok:_) -> case locToken tok of
-      TWord "print" -> TLExpr <$> parsePrintStmt
-      TWord "block" -> TLExpr <$> parseBlockExpr
-      _ -> throwError $ UnexpectedToken tok "expected 'print' or 'block'"
-    [] -> throwError $ EndOfInput "expected top-level expression"
+    state <- get
+    traceM "\n--- Parsing Single Top Level Expression ---"
+    traceM $ "Current state: " ++ show state
+    case stateTokens state of
+        (tok:_) -> do
+            traceM $ "Processing token: " ++ show tok
+            case locToken tok of
+                TWord "print" -> do
+                    traceM "Found print statement"
+                    expr <- parsePrintStatement
+                    return $ TLExpr expr
+                TWord "block" -> do
+                    traceM "Found block expression"
+                    when (locCol tok /= 1) $
+                        throwError $ IndentationError 1 (locCol tok) Equal
+                    expr <- parseBlock defaultExprParser
+                    return $ TLExpr expr
+                TWord "let" -> do
+                    traceM "Found let binding"
+                    expr <- parseLetBinding defaultExprParser
+                    return $ TLExpr expr
+                _ -> do
+                    traceM $ "Unexpected token in top level: " ++ show tok
+                    throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"
+        [] -> do
+            traceM "No tokens available for top-level expression"
+            throwError $ EndOfInput "expected top-level expression"
 
--- | Parse a print statement
-parsePrintStmt :: Parser Expr
-parsePrintStmt = do
-  state <- get
-  when (locCol (head $ stateTokens state) /= 1) $
-    throwError $ IndentationError 1 (locCol (head $ stateTokens state)) Equal
-  printTok <- matchToken isPrint "print"
-  modify (\s -> s { stateIndent = locCol printTok + 1 })
-  strTok <- matchToken isStringLit "string literal"
-  let printLine = locLine printTok
-  when (locLine strTok > printLine && locCol strTok <= locCol printTok) $
-    throwError $ IndentationError (locCol printTok + 1) (locCol strTok) Greater
-  case locToken strTok of
-    TString s -> pure $ Print (StrLit s)
-    _ -> error "Matched non-string token as string literal"
-
--- | Parse a block expression
-parseBlockExpr :: Parser Expr
-parseBlockExpr = do
-  state <- get
-  when (locCol (head $ stateTokens state) /= 1) $
-    throwError $ IndentationError 1 (locCol (head $ stateTokens state)) Equal
-  expr <- parseExpr defaultExprParser
-  case expr of
-    Block {} -> pure expr
-    _ -> throwError $ UnexpectedToken (head $ stateTokens state) "block"
+parsePrintStatement :: Parser Expr
+parsePrintStatement = do
+    state <- get
+    traceM "Parsing print statement"
+    expectedIndent <- gets stateIndent
+    let tok = head $ stateTokens state
+    when (locCol tok < expectedIndent) $
+        throwError $ IndentationError expectedIndent (locCol tok) GreaterEq
+    _ <- matchToken isPrint "print"
+    expr <- parseExpression  -- Change from parseBasicExpr to parseExpression
+    return $ Print expr
 
 mapLexError :: Either LexError a -> Either ParseError a
 mapLexError (Left (UnterminatedString line col)) =
-  Left $ EndOfInput $ "Unterminated string at line " ++ show line ++ ", column " ++ show col
+    Left $ EndOfInput $ "Unterminated string at line " ++ show line ++ ", column " ++ show col
 mapLexError (Left (InvalidCharacter c line col)) =
-  Left $ EndOfInput $ "Invalid character '" ++ [c] ++ "' at line " ++ show line ++ ", column " ++ show col
+    Left $ EndOfInput $ "Invalid character '" ++ [c] ++ "' at line " ++ show line ++ ", column " ++ show col
 mapLexError (Right a) = Right a

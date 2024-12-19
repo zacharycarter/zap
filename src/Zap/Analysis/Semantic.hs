@@ -184,6 +184,8 @@ inferTypeExpr expr = case expr of
         eType <- inferTypeExpr e
         case eType of
             TypeString -> return TypeString
+            TypeNum numType -> return TypeString
+            TypeVec vecType -> return TypeString
             _ -> throwError $ TypeMismatch TypeString eType
 
     Block scope -> do

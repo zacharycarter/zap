@@ -1,14 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Zap.Parser.Expr
-  ( defaultExprParser
+  ( ExprParser(..)
+  , defaultExprParser
+  , parseExpr
+  , parseExpression
+  , parseLetBinding
+  , parsePrint
   , isPrint
   , isStringLit
-  , parseExpr
-  , parsePrint
-  , ExprParser(..)
   ) where
 
-import Control.Monad (when)
+import Control.Monad (when, replicateM)
 import Control.Monad.State
 import Control.Monad.Error.Class
 import qualified Data.Text as T
@@ -28,7 +30,7 @@ data ExprParser = ExprParser
 -- Token validation helpers
 isValidName :: Token -> Bool
 isValidName (TWord name) = traceShow ("Validating name: " ++ name) $
-  not $ name `elem` ["print", "break", "result", "block"]
+  not $ name `elem` ["print", "break", "result", "block", "let"]
 isValidName _ = False
 
 isBlockKeyword :: Token -> Bool
@@ -55,6 +57,18 @@ isStringLit :: Token -> Bool
 isStringLit (TString _) = True
 isStringLit _ = False
 
+isNumber :: Token -> Bool
+isNumber (TNumber _) = True
+isNumber _ = False
+
+isOperator :: Token -> Bool
+isOperator (TOperator op) = op `elem` ["+","-","*","/","<", ">", "=", "&", "|"]
+isOperator _ = False
+
+isVecConstructor :: Token -> Bool
+isVecConstructor (TVec _) = True
+isVecConstructor _ = False
+
 -- Main expression parser
 parseExpr :: ExprParser -> Parser Expr
 parseExpr parsers = do
@@ -64,11 +78,135 @@ parseExpr parsers = do
       (tok:_) -> do
         traceM $ "Parsing expression starting with: " ++ show (locToken tok)
         case locToken tok of
+          TWord "let" -> parseLetBinding parsers
           TWord "block" -> parseBlock parsers
           TWord "break" -> parseBreak parsers
           TWord "result" -> parseResult parsers
-          _ -> parseBasicExpr parsers
+          TVec _ -> parseVectorLiteral
+          TWord "print" -> parsePrintStatement
+          _ -> parseExpression
       [] -> throwError $ EndOfInput "expression"
+
+-- Top level expression parser that handles operator precedence
+parseExpression :: Parser Expr
+parseExpression = do
+    traceM "Parsing complete expression"
+    parseAdditive
+
+-- Parse addition and subtraction with proper precedence
+parseAdditive :: Parser Expr
+parseAdditive = do
+    traceM "Parsing additive expression"
+    left <- parseMultiplicative
+    remainingAdditive left
+  where
+    remainingAdditive left = do
+      state <- get
+      case stateTokens state of
+        (tok:_) -> case locToken tok of
+          TOperator "+" -> do
+            traceM "Found addition operator"
+            _ <- matchToken isOperator "+"
+            right <- parseMultiplicative
+            remainingAdditive (BinOp Add left right)
+          TOperator "-" -> do
+            traceM "Found subtraction operator"
+            _ <- matchToken isOperator "-"
+            right <- parseMultiplicative
+            remainingAdditive (BinOp Sub left right)
+          _ -> return left
+        [] -> return left
+
+-- Parse multiplication and division
+parseMultiplicative :: Parser Expr
+parseMultiplicative = do
+    traceM "Parsing multiplicative expression"
+    left <- parseUnary
+    remainingMultiplicative left
+  where
+    remainingMultiplicative left = do
+      state <- get
+      case stateTokens state of
+        (tok:_) -> case locToken tok of
+          TOperator "*" -> do
+            _ <- matchToken isOperator "*"
+            right <- parseUnary
+            remainingMultiplicative (BinOp Mul left right)
+          TOperator "/" -> do
+            _ <- matchToken isOperator "/"
+            right <- parseUnary
+            remainingMultiplicative (BinOp Div left right)
+          _ -> return left
+        [] -> return left
+
+-- Parse unary operations and basic terms
+parseUnary :: Parser Expr
+parseUnary = parseTerm
+
+-- Parse basic terms (numbers, variables, vector literals)
+parseTerm :: Parser Expr
+parseTerm = do
+    traceM "Parsing term"
+    state <- get
+    case stateTokens state of
+        (tok:_) -> case locToken tok of
+            TNumber n -> do
+                _ <- matchToken isNumber "number"
+                return $ NumLit Float32 n
+            TWord name | isValidName (locToken tok) -> do
+                traceM $ "Found variable: " ++ name
+                _ <- matchToken isValidName "identifier"
+                return $ Var name
+            TVec vecType -> do
+                traceM $ "Found vector constructor"
+                _ <- matchToken isVecConstructor "vector constructor"
+                args <- parseVectorArgs vecType
+                return $ VecLit (vecTypeFromString vecType) args
+            _ -> throwError $ UnexpectedToken tok "term"
+        [] -> throwError $ EndOfInput "term"
+
+parseBasicExprImpl :: Parser Expr
+parseBasicExprImpl = do
+    traceM "Starting basic expression parse"
+    state <- get
+    checkIndent GreaterEq
+    case stateTokens state of
+        [] -> throwError $ EndOfInput "expression expected"
+        (tok:_) -> case locToken tok of
+            TString s -> do
+                _ <- matchToken isStringLit "string literal"
+                return $ StrLit s
+            TNumber n -> do
+                _ <- matchToken isNumber "number"
+                return $ NumLit Float32 n
+            TVec vecType -> do
+                traceM $ "Parsing vector constructor: " ++ vecType
+                _ <- matchToken isVecConstructor "vector constructor"
+                args <- parseVectorArgs vecType
+                return $ VecLit (vecTypeFromString vecType) args
+            TWord "print" -> do
+                _ <- matchToken isPrint "print"
+                expr <- parseBasicExprImpl
+                return $ Print expr
+            TWord name | isValidName (locToken tok) -> do
+                _ <- matchToken isValidName "identifier"
+                return $ Var name
+            _ -> throwError $ UnexpectedToken tok "term"
+
+parseLetBinding :: ExprParser -> Parser Expr
+parseLetBinding parsers = do
+    traceM "Parsing let binding"
+    _ <- matchToken (\t -> t == TWord "let") "let keyword"
+    name <- matchToken isValidName "identifier"
+    traceM $ "Let binding name: " ++ show name
+    _ <- matchToken (\t -> t == TEquals) "equals sign"
+    traceM "Found equals sign, parsing value"
+    value <- parseExpression
+    case locToken name of
+        TWord varName -> do
+            traceM $ "Completed let binding for: " ++ varName
+            return $ Let varName value
+        _ -> throwError $ UnexpectedToken name "identifier"
 
 parseBlockImpl :: Parser Expr
 parseBlockImpl = do
@@ -102,8 +240,7 @@ parseBlockExprs baseIndent = do
     traceM $ "parseBlockExprs at indent " ++ show baseIndent ++ " with tokens: " ++ show (take 3 $ stateTokens state)
     case stateTokens state of
         [] -> return ([], Nothing)
-        (tok:_) -> do
-            -- **Added Check for TEOF**
+        (tok:_) ->
             if locToken tok == TEOF
                 then return ([], Nothing)
                 else do
@@ -131,39 +268,6 @@ parseBlockExprs baseIndent = do
                             expr <- parseBasicExprImpl
                             (moreExprs, resultExpr) <- parseBlockExprs baseIndent
                             return (expr : moreExprs, resultExpr)
-
--- parseBlockExprs :: Int -> Parser ([Expr], Maybe Expr)
--- parseBlockExprs baseIndent = do
---     state <- get
---     traceM $ "parseBlockExprs at indent " ++ show baseIndent ++ " with tokens: " ++ show (take 3 $ stateTokens state)
---     case stateTokens state of
---       [] -> return ([], Nothing)
---       (tok:_) -> do
---         traceM $ "Checking token: " ++ show tok ++ " at col " ++ show (locCol tok)
---         when (locCol tok < baseIndent) $
---           throwError $ IndentationError baseIndent (locCol tok) GreaterEq
---         case locToken tok of
---             TWord "result" -> do
---               traceM "Parsing result expression"
---               resultExpr <- parseResultImpl
---               breaks <- parsePostResult baseIndent
---               traceM $ "Result parsed with " ++ show (length breaks) ++ " following breaks"
---               return (breaks, Just resultExpr)
---             TWord "break" -> do
---               traceM "Parsing break statement"
---               breakExpr <- parseBreakImpl
---               (moreExprs, resultExpr) <- parseBlockExprs baseIndent
---               return (breakExpr : moreExprs, resultExpr)
---             TWord "block" -> do
---               traceM "Parsing nested block"
---               blockExpr <- parseBlockImpl
---               (moreExprs, resultExpr) <- parseBlockExprs baseIndent
---               return (blockExpr : moreExprs, resultExpr)
---             _ -> do
---               traceM "Parsing basic expression"
---               expr <- parseBasicExprImpl
---               (moreExprs, resultExpr) <- parseBlockExprs baseIndent
---               return (expr : moreExprs, resultExpr)
 
 parseBreakImpl :: Parser Expr
 parseBreakImpl = do
@@ -195,7 +299,6 @@ parsePostResult baseIndent = do
       [] -> return []
       (tok:_) -> do
         traceM $ "Post-result token: " ++ show tok
-        -- Allow TEOF as a valid termination after result
         if locToken tok == TEOF
             then return []
             else do
@@ -211,45 +314,55 @@ parsePostResult baseIndent = do
                         throwError $ UnexpectedToken tok "only break statements allowed after result"
                     _ -> throwError $ UnexpectedToken tok "only break statements allowed after result"
 
--- parsePostResult :: Int -> Parser [Expr]
--- parsePostResult baseIndent = do
---     state <- get
---     traceM $ "parsePostResult at indent " ++ show baseIndent
---     case stateTokens state of
---       [] -> return []
---       (tok:_) -> do
---         traceM $ "Post-result token: " ++ show tok
---         when (locCol tok < baseIndent) $
---           throwError $ IndentationError baseIndent (locCol tok) GreaterEq
---         case locToken tok of
---             TWord "break" -> do
---               traceM "Parsing post-result break statement"
---               breakExpr <- parseBreakImpl
---               rest <- parsePostResult baseIndent
---               return (breakExpr : rest)
---             TWord "result" ->
---               throwError $ UnexpectedToken tok "only break statements allowed after result"
---             _ -> throwError $ UnexpectedToken tok "only break statements allowed after result"
+parseVectorLiteral :: Parser Expr
+parseVectorLiteral = do
+    constructorTok <- matchToken isVecConstructor "vector constructor"
+    case locToken constructorTok of
+        TVec vecType -> do
+            traceM $ "Parsing vector constructor: " ++ show vecType
+            args <- parseVectorArgs vecType
+            return $ VecLit (vecTypeFromString vecType) args
+        _ -> throwError $ UnexpectedToken constructorTok "vector constructor"
 
-parseBasicExprImpl :: Parser Expr
-parseBasicExprImpl = do
+parseVectorArgs :: String -> Parser [Expr]
+parseVectorArgs vecType = do
+    traceM $ "Parsing arguments for vector type: " ++ vecType
+    let numArgs = case vecType of
+            "Vec2" -> 2
+            "Vec3" -> 3
+            "Vec4" -> 4
+            _ -> error "Invalid vector type"
+    replicateM numArgs $ do
+        tok <- matchToken isNumber "number"
+        case locToken tok of
+            TNumber n -> return $ NumLit Float32 n
+            _ -> throwError $ UnexpectedToken tok "number"
+
+parsePrintStatement :: Parser Expr
+parsePrintStatement = do
+    traceM "Parsing print statement"
+    expectedIndent <- gets stateIndent
     state <- get
     let tok = head $ stateTokens state
-    traceM $ "parseBasicExpr at indent " ++ show (stateIndent state) ++ " with token: " ++ show tok
-    checkIndent GreaterEq
-    case locToken tok of
-        TWord "print" -> do
-            -- Handle print statement
-            printTok <- matchToken isPrint "print"
-            strTok <- matchToken isStringLit "string literal"
-            case locToken strTok of
-                TString s -> return $ Print (StrLit s)
-                _ -> error "Matched non-string token as string literal"
-        TString s -> do
-            -- Handle string literal
-            strTok <- matchToken isStringLit "string literal"
-            return $ StrLit s
-        _ -> throwError $ UnexpectedToken tok "expression"
+    when (locCol tok < expectedIndent) $
+        throwError $ IndentationError expectedIndent (locCol tok) GreaterEq
+    _ <- matchToken isPrint "print"
+    expr <- parseExpression  -- Use the full expression parser
+    return $ Print expr
+
+vecTypeFromString :: String -> VecType
+vecTypeFromString "Vec2" = Vec2 Float32
+vecTypeFromString "Vec3" = Vec3 Float32
+vecTypeFromString "Vec4" = Vec4 Float32
+vecTypeFromString other = error $ "Invalid vector type: " ++ other
+
+defaultExprParser :: ExprParser
+defaultExprParser = ExprParser
+  { parseBasicExpr = parseBasicExprImpl
+  , parseBlock = parseBlockImpl
+  , parseBreak = parseBreakImpl
+  , parseResult = parseResultImpl
+  }
 
 parsePrint :: Parser (Located, Located)
 parsePrint = do
@@ -271,11 +384,3 @@ parsePrint = do
           throwError $ IndentationError (locCol printTok + 1) (locCol exprTok) Greater
         return (printTok, exprTok)
       [] -> throwError $ EndOfInput "print statement"
-
-defaultExprParser :: ExprParser
-defaultExprParser = ExprParser
-  { parseBasicExpr = parseBasicExprImpl
-  , parseBlock = parseBlockImpl
-  , parseBreak = parseBreakImpl
-  , parseResult = parseResultImpl
-  }

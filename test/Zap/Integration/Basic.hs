@@ -31,4 +31,10 @@ basicTests =
       , expectedOutput = ""
       , expectedExitCode = ExitFailure 1
       }
+  , TestCase
+      { testName = "print_add"
+      , sourceCode = "print 1 + 1"  -- Missing indentation
+      , expectedOutput = "2"
+      , expectedExitCode = ExitSuccess
+      }
   ]

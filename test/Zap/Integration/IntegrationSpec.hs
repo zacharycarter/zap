@@ -29,13 +29,3 @@ spec = do
               }
         result <- runTest badTest
         result `shouldBe` TestSuccess
-
-      it "handles indentation errors" $ do
-        let badTest = TestCase
-              { testName = "indent_error"
-              , sourceCode = "block test:\nprint \"Bad indent\"" -- Missing indentation
-              , expectedOutput = ""
-              , expectedExitCode = ExitFailure 1
-              }
-        result <- runTest badTest
-        result `shouldBe` TestSuccess

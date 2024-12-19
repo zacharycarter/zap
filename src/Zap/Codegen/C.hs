@@ -68,10 +68,19 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
 
     -- Build complete program
     traceM "\n--- Assembling Complete Program ---"
+    let vectorOps = T.unlines
+          [ "typedef struct { float x, y, z; } v3f32;"
+          , "v3f32 vec3_add(v3f32 a, v3f32 b) {"
+          , "    return (v3f32){a.x + b.x, a.y + b.y, a.z + b.z};"
+          , "}"
+          , ""
+          ]
+
     let program = T.unlines
           [ T.pack "#include <stdio.h>"
           , T.pack "#include <immintrin.h>"
           , T.pack ""
+          , vectorOps  -- Add the vector operations here
           , T.unlines declsText
           , T.pack "int main(void) {"
           , T.unlines mainBody
@@ -101,32 +110,47 @@ generateTypedExpr expr = do
                 Just t -> return (name, t)
                 Nothing -> throwError $ UnsupportedType IRTypeString
 
-        IRVec vt components -> do
+        IRVec (IRVec3 IRFloat32) components -> do
             componentVals <- mapM generateTypedExpr components
             let vals = map fst componentVals
-            case vt of
-                IRVec4 IRFloat32 ->
-                    return (T.concat ["_mm_set_ps(", T.intercalate ", " (reverse vals), ")"],
-                           IRTypeVec vt)
-                _ -> throwError $ UnsupportedType (IRTypeVec vt)
+            return (T.concat ["(v3f32){", T.intercalate ", " vals, "}"],
+                    IRTypeVec (IRVec3 IRFloat32))
+
+        IRBinOp IRAdd lhs rhs -> do
+            (lval, ltyp) <- generateTypedExpr lhs
+            (rval, rtyp) <- generateTypedExpr rhs
+            case (ltyp, rtyp) of
+                (IRTypeVec (IRVec3 IRFloat32), IRTypeVec (IRVec3 IRFloat32)) ->
+                    return (T.concat ["vec3_add(", lval, ", ", rval, ")"],
+                            IRTypeVec (IRVec3 IRFloat32))
+                _ -> throwError $ UnsupportedOperation IRAdd ltyp rtyp
 
         IRBinOp op lhs rhs -> do
             (lval, ltyp) <- generateTypedExpr lhs
             (rval, rtyp) <- generateTypedExpr rhs
             case (op, ltyp, rtyp) of
-                -- Vector operations (existing)
+                -- SIMD vector operations
                 (IRAdd, IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)) ->
                     return (T.concat ["_mm_add_ps(", lval, ", ", rval, ")"], ltyp)
+
                 (IRDot, IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)) ->
                     return (T.concat ["_mm_dp_ps(", lval, ", ", rval, ", 0xFF)"], IRTypeNum IRFloat32)
+
+                -- Vec3 operations
+                (IRAdd, IRTypeVec (IRVec3 IRFloat32), IRTypeVec (IRVec3 IRFloat32)) ->
+                    return (T.concat ["vec3_add(", lval, ", ", rval, ")"],
+                            IRTypeVec (IRVec3 IRFloat32))
 
                 -- Numeric operations
                 (IRAdd, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
                     return (T.concat ["(", lval, " + ", rval, ")"], IRTypeNum t1)
+
                 (IRSub, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
                     return (T.concat ["(", lval, " - ", rval, ")"], IRTypeNum t1)
+
                 (IRMul, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
                     return (T.concat ["(", lval, " * ", rval, ")"], IRTypeNum t1)
+
                 (IRDiv, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
                     return (T.concat ["(", lval, " / ", rval, ")"], IRTypeNum t1)
 
@@ -158,6 +182,29 @@ generateTypedExpr expr = do
             return (T.concat [name, "(", T.intercalate ", " argStrs, ")"],
                     returnType)
 
+        IRFieldAccess vec field -> do
+            traceM $ "Generating SIMD field access for field: " ++ show field
+            (vecVal, vecType) <- generateTypedExpr vec
+            case vecType of
+                IRTypeVec vt -> do
+                    let componentIndex = case field of
+                            "x" -> "0"
+                            "y" -> "1"
+                            "z" -> "2"
+                            "w" -> "3"
+                            _ -> error $ "Invalid vector component: " ++ T.unpack field
+
+                    let baseType = case vt of
+                            IRVec2 t -> t
+                            IRVec3 t -> t
+                            IRVec4 t -> t
+
+                    -- Generate SIMD extraction using _mm_extract_ps
+                    return (T.concat ["_mm_extract_ps(", vecVal, ", ", componentIndex, ")"],
+                           IRTypeNum baseType)
+
+                _ -> throwError $ UnsupportedOperation IRAdd vecType vecType
+
 getPrintfFormat :: IRType -> Codegen Text
 getPrintfFormat typ = do
     traceM $ "Getting printf format for type: " ++ show typ
@@ -177,7 +224,10 @@ getPrintfFormat typ = do
             return "%d"
         IRTypeVec _ -> do
             traceM "Using vector format specifier"
-            return "%s"
+            return "(%f, %f, %f)"
+        IRTypeVec (IRVec4 _) -> do
+            traceM "Using Vec4 format specifier"
+            return "(%f, %f, %f, %f)"
         _ -> do
             traceM $ "Unsupported type for printing: " ++ show typ
             throwError $ UnsupportedType typ
@@ -186,46 +236,46 @@ generateStmt :: IRExpr -> Codegen Text
 generateStmt expr = do
     traceM $ "Generating statement for expression: " ++ show expr
     case expr of
+        IRLetAlloc name val strat -> do
+            traceM $ "Generating let allocation for: " ++ show name
+            (valExpr, valType) <- generateTypedExpr val
+            typeStr <- irTypeToCType valType
+            modify $ \s -> s { varEnv = M.insert name valType (varEnv s) }
+            return $ T.concat ["    ", typeStr, " ", name, " = ", valExpr, ";"]
+
         IRPrint printExpr -> do
             traceM $ "Generating print statement for expression: " ++ show printExpr
-            case printExpr of
-                IRString s -> do
-                    traceM $ "Generating print statement for string literal: " ++ T.unpack s
-                    let result = T.concat ["    printf(\"%s\\n\", ", "\"", s, "\"", ");"]
-                    traceM $ "Generated: " ++ T.unpack result
-                    return result
-
-                other -> do
-                    traceM $ "Generating print statement for expression: " ++ show other
-                    (val, typ) <- generateTypedExpr other
-                    traceM $ "Expression evaluated to value: " ++ T.unpack val ++ " of type: " ++ show typ
-                    fmt <- getPrintfFormat typ
-                    let result = T.concat ["    printf(\"", fmt, "\\n\", ", val, ");"]
-                    traceM $ "Generated: " ++ T.unpack result
-                    return result
+            (val, typ) <- generateTypedExpr printExpr
+            traceM $ "Print value generated: " ++ T.unpack val
+            traceM $ "Print value type: " ++ show typ
+            fmt <- getPrintfFormat typ
+            case typ of
+                IRTypeVec (IRVec3 _) -> do
+                    traceM "Generating Vec3 print statement"
+                    return $ T.concat ["    printf(\"", fmt, "\\n\", ",
+                                     val, ".x, ", val, ".y, ", val, ".z);"]
+                IRTypeVec (IRVec4 _) -> do
+                    traceM "Generating Vec4 print statement"
+                    return $ T.concat ["    printf(\"", fmt, "\\n\", ",
+                                     val, ".x, ", val, ".y, ", val, ".z, ", val, ".w);"]
+                _ -> do
+                    traceM "Generating standard print statement"
+                    return $ T.concat ["    printf(\"", fmt, "\\n\", ", val, ");"]
 
         IRBlockAlloc name exprs mResult -> do
-            -- Generate statements for all expressions in the block
+            traceM $ "Generating block allocation: " ++ show name
             stmts <- mapM generateStmt exprs
-            -- Return the statements joined together
             return $ T.unlines stmts
 
         IRBinOp op lhs rhs -> do
-            traceM $ "Generating binary operation: " ++ show op
-            (lval, ltyp) <- generateTypedExpr lhs
-            (rval, rtyp) <- generateTypedExpr rhs
-            case (op, ltyp, rtyp) of
-                (IRAdd, IRTypeVec (IRVec4 IRFloat32), IRTypeVec (IRVec4 IRFloat32)) -> do
-                    let result = T.concat ["    _mm_add_ps(", lval, ", ", rval, ");"]
-                    traceM $ "Generated SIMD addition: " ++ T.unpack result
-                    return result
-                _ -> do
-                    traceM $ "Unsupported operation combination"
-                    throwError $ UnsupportedOperation op ltyp rtyp
+            traceM $ "Generating binary operation statement"
+            (val, typ) <- generateTypedExpr expr
+            return $ T.concat ["    ", val, ";"]
 
         _ -> do
-            traceM $ "Unhandled expression type: " ++ show expr
-            throwError $ UnsupportedType IRTypeString
+            traceM $ "Generating statement for other expression type: " ++ show expr
+            (val, _) <- generateTypedExpr expr
+            return $ T.concat ["    ", val, ";"]
 
 generateFuncDef :: IRDecl -> Codegen Text
 generateFuncDef (IRFunc name params retType body) = do

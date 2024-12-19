@@ -11,6 +11,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Control.Monad.Except
 import Control.Monad.State
+import Debug.Trace
 
 import Zap.AST
 import Zap.IR.Core
@@ -38,12 +39,15 @@ convertToIR program =
 
 convertProgram :: Program -> IRConverter IR
 convertProgram (Program topLevels) = do
+  traceM "\n=== Starting IR Conversion ==="
+  traceM $ "Converting program with " ++ show (length topLevels) ++ " top-level expressions"
   decls <- sequence [convertDecl d | TLDecl d <- topLevels]
   exprs <- concat <$> sequence [convertTopLevel t | t@(TLExpr _) <- topLevels]
   return $ IRProgram decls exprs
 
 convertTopLevel :: TopLevel -> IRConverter [IRExpr]
 convertTopLevel (TLExpr expr) = do
+  traceM $ "\nConverting top-level expression: " ++ show expr
   converted <- convertExpr expr
   return [converted]
 convertTopLevel (TLDecl _) =
@@ -51,93 +55,142 @@ convertTopLevel (TLDecl _) =
 
 convertDecl :: Decl -> IRConverter IRDecl
 convertDecl (DFunc name params retType body) = do
+  traceM $ "\nConverting function declaration: " ++ name
   convertedParams <- mapM convertParam params
+  traceM "Converting function body"
   convertedBody <- convertExpr body
   return $ IRFunc
     (T.pack name)
     convertedParams
     (convertType retType)
     convertedBody
-convertDecl (DStruct name fields) =
+convertDecl (DStruct name fields) = do
+  traceM $ "\nConverting struct declaration: " ++ name
   return $ IRStruct
     (T.pack name)
     [(T.pack fname, convertType ftype) | (fname, ftype) <- fields]
 
 convertParam :: Param -> IRConverter (T.Text, IRType)
-convertParam (Param name typ) =
+convertParam (Param name typ) = do
+  traceM $ "Converting parameter: " ++ name ++ " :: " ++ show typ
   return (T.pack name, convertType typ)
 
 convertExpr :: Expr -> IRConverter IRExpr
-convertExpr expr = case expr of
-  StrLit s ->
-    return $ IRString (T.pack s)
+convertExpr expr = do
+    traceM $ "\nConverting expression: " ++ show expr
+    case expr of
+        StrLit s -> do
+            traceM "Converting string literal"
+            return $ IRString (T.pack s)
 
-  NumLit numType val ->
-    return $ IRNum (convertNumType numType) (T.pack val)
+        NumLit numType val -> do
+            traceM $ "Converting numeric literal: " ++ val
+            return $ IRNum (convertNumType numType) (T.pack val)
 
-  BinOp op e1 e2 -> do
-    converted1 <- convertExpr e1
-    converted2 <- convertExpr e2
-    case (op, converted1, converted2) of
-      (Add, IRNum t1 _, IRNum t2 _) | t1 == t2 ->
-        return $ IRBinOp IRAdd converted1 converted2
-      (Sub, IRNum t1 _, IRNum t2 _) | t1 == t2 ->
-        return $ IRBinOp IRSub converted1 converted2
-      (Mul, IRNum t1 _, IRNum t2 _) | t1 == t2 ->
-        return $ IRBinOp IRMul converted1 converted2
-      (Div, IRNum t1 _, IRNum t2 _) | t1 == t2 ->
-        return $ IRBinOp IRDiv converted1 converted2
-      (Add, _, _) ->
-        throwError $ UnsupportedExpression "Addition only supported for matching numeric types"
-      (Sub, _, _) ->
-        throwError $ UnsupportedExpression "Subtraction only supported for matching numeric types"
-      (Mul, _, _) ->
-        throwError $ UnsupportedExpression "Multiplication only supported for matching numeric types"
-      (Div, _, _) ->
-        throwError $ UnsupportedExpression "Division only supported for matching numeric types"
-      _ -> throwError $ UnsupportedExpression "Unsupported binary operator"
+        BinOp op e1 e2 -> do
+            traceM $ "Converting binary operation: " ++ show op
+            converted1 <- convertExpr e1
+            traceM $ "Left operand converted to: " ++ show converted1
+            converted2 <- convertExpr e2
+            traceM $ "Right operand converted to: " ++ show converted2
 
-  Print e -> do
-    converted <- convertExpr e
-    return $ IRPrint converted
+            type1 <- getExpressionType converted1
+            type2 <- getExpressionType converted2
+            traceM $ "Types for binary operation: " ++ show type1 ++ " and " ++ show type2
 
-  Block scope -> do
-    blockId <- freshBlockId
-    bodyExprs <- mapM convertExpr (blockExprs scope)
-    resultExpr <- case blockResult scope of
-      Just result -> Just <$> convertExpr result
-      Nothing -> return Nothing
-    return $ IRBlockAlloc
-      (T.pack $ blockLabel scope)
-      bodyExprs
-      resultExpr
+            case (op, type1, type2) of
+                (Add, IRTypeVec vt1, IRTypeVec vt2) | vt1 == vt2 -> do
+                    traceM "Matched vector addition"
+                    return $ IRBinOp IRAdd converted1 converted2
+                (Add, IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> do
+                    traceM "Matched numeric addition"
+                    return $ IRBinOp IRAdd converted1 converted2
+                (Sub, IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> do
+                    traceM "Matched numeric subtraction"
+                    return $ IRBinOp IRSub converted1 converted2
+                (Mul, IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> do
+                    traceM "Matched numeric multiplication"
+                    return $ IRBinOp IRMul converted1 converted2
+                (Div, IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> do
+                    traceM "Matched numeric division"
+                    return $ IRBinOp IRDiv converted1 converted2
+                _ -> do
+                    traceM $ "Unmatched operation types: " ++ show type1 ++ " and " ++ show type2
+                    throwError $ UnsupportedExpression "Operation only supported for matching types"
 
-  Break label ->
-    return $ IRBreak (T.pack label)
+        Print e -> do
+            traceM "Converting print expression"
+            converted <- convertExpr e
+            traceM $ "Print expression converted to: " ++ show converted
+            return $ IRPrint converted
 
-  Result e -> do
-    converted <- convertExpr e
-    return $ IRResult converted
+        Block scope -> do
+            traceM $ "Converting block: " ++ blockLabel scope
+            blockId <- freshBlockId
+            bodyExprs <- mapM convertExpr (blockExprs scope)
+            resultExpr <- case blockResult scope of
+                Just result -> Just <$> convertExpr result
+                Nothing -> return Nothing
+            return $ IRBlockAlloc
+                (T.pack $ blockLabel scope)
+                bodyExprs
+                resultExpr
 
-  Var name -> do
+        Break label -> do
+            traceM $ "Converting break statement for label: " ++ label
+            return $ IRBreak (T.pack label)
+
+        Result e -> do
+            traceM "Converting result expression"
+            converted <- convertExpr e
+            return $ IRResult converted
+
+        Var name -> do
+            traceM $ "Converting variable reference: " ++ name
+            state <- get
+            case M.lookup name (varEnvironment state) of
+                Just varType -> do
+                    traceM $ "Found variable type: " ++ show varType
+                    modify $ \s -> s { varEnvironment = M.insert name varType (varEnvironment s) }
+                    return $ IRVar (T.pack name)
+                Nothing -> do
+                    traceM $ "Variable type not found in environment"
+                    return $ IRVar (T.pack name)
+
+        VecLit vecType components -> do
+            traceM $ "Converting vector literal: " ++ show vecType
+            convertedComps <- mapM convertExpr components
+            let varType = IRTypeVec (convertVecType vecType)
+            return $ IRVec (convertVecType vecType) convertedComps
+
+        Let name val -> do
+            traceM $ "Converting let binding: " ++ name
+            convertedVal <- convertExpr val
+            valType <- getExpressionType convertedVal
+            traceM $ "Binding type: " ++ show valType
+            modify $ \s -> s { varEnvironment = M.insert name valType (varEnvironment s) }
+            return $ IRLetAlloc (T.pack name) convertedVal IRAllocDefault
+
+        BoolLit b -> do
+            traceM $ "Converting boolean literal: " ++ show b
+            return $ IRBool b
+
+        _ -> do
+            traceM $ "Encountered unsupported expression type: " ++ show expr
+            throwError $ UnsupportedExpression "Unsupported expression type"
+
+getExpressionType :: IRExpr -> IRConverter IRType
+getExpressionType expr = do
     state <- get
-    case M.lookup name (varEnvironment state) of
-      Nothing -> throwError $ UnknownVariable name
-      Just _ -> return $ IRVar (T.pack name)
-
-  If cond thenExpr elseExpr -> do
-    convertedCond <- convertExpr cond
-    convertedThen <- convertExpr thenExpr
-    convertedElse <- convertExpr elseExpr
-
-    case convertedCond of
-      IRBool _ -> return $ IRIf convertedCond convertedThen convertedElse
-      _ -> throwError $ InvalidType "If condition must evaluate to a boolean type"
-
-  BoolLit b ->
-    return $ IRBool b
- 
-  _ -> throwError $ UnsupportedExpression "Unsupported expression type"
+    case expr of
+        IRVar name -> case M.lookup (T.unpack name) (varEnvironment state) of
+            Just t -> return t
+            Nothing -> throwError $ UnknownVariable (T.unpack name)
+        IRVec vt _ -> return $ IRTypeVec vt
+        IRNum nt _ -> return $ IRTypeNum nt
+        IRBool _ -> return IRTypeBool
+        IRString _ -> return IRTypeString
+        _ -> throwError $ InvalidType "Unable to determine expression type"
 
 convertType :: Type -> IRType
 convertType (TypeNum numType) = IRTypeNum $ convertNumType numType
