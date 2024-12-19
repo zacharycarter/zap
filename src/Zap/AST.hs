@@ -58,6 +58,7 @@ data Decl
 data TopLevel
   = TLDecl Decl
   | TLExpr Expr
+  | TLType String Type
   deriving (Show, Eq)
 
 data Program = Program [TopLevel]

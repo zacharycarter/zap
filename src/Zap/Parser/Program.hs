@@ -4,6 +4,7 @@ module Zap.Parser.Program
   , parseTopLevel
   ) where
 
+import Control.Applicative
 import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
@@ -52,6 +53,15 @@ parseTopLevel = do
         (tok:_) -> do
             traceM $ "Processing token: " ++ show tok
             case locToken tok of
+                TType -> do
+                    traceM "Found type definition"
+                    _ <- matchToken (== TType) "type"
+                    typeName <- matchToken isValidName "type name"
+                    _ <- matchToken (== TEquals) "equals sign"
+                    typeDefinition <- parseTypeDefinition
+                    case locToken typeName of
+                        TWord name -> return $ TLType name typeDefinition
+                        _ -> throwError $ UnexpectedToken typeName "type name"
                 TWord "print" -> do
                     traceM "Found print statement"
                     expr <- parsePrintStatement
@@ -72,6 +82,46 @@ parseTopLevel = do
         [] -> do
             traceM "No tokens available for top-level expression"
             throwError $ EndOfInput "expected top-level expression"
+
+parseTypeDefinition :: Parser Type
+parseTypeDefinition = do
+    traceM "Parsing type definition"
+    _ <- matchToken (== TStruct) "struct"
+    fields <- parseStructFields
+    return $ TypeStruct "" fields
+
+parseStructFields :: Parser [(String, Type)]
+parseStructFields = do
+    traceM "Parsing struct fields"
+    let loop acc = do
+          state <- get
+          case stateTokens state of
+            (tok:_) | isValidName (locToken tok) -> do
+                        field <- parseStructField
+                        loop (field : acc)
+            _ -> return $ reverse acc
+    loop []
+
+parseStructField :: Parser (String, Type)
+parseStructField = do
+    traceM "Parsing struct field"
+    name <- matchToken isValidName "field name"
+    _ <- matchToken (== TColon) "colon"
+    fieldType <- parseType
+    case locToken name of
+        TWord fieldName -> return (fieldName, fieldType)
+        _ -> throwError $ UnexpectedToken name "field name"
+
+parseType :: Parser Type
+parseType = do
+    traceM "Parsing type"
+    tok <- matchToken isValidName "type name"
+    case locToken tok of
+        TWord "Float32" -> return $ TypeNum Float32
+        TWord "Float64" -> return $ TypeNum Float64
+        TWord "Int32" -> return $ TypeNum Int32
+        TWord "Int64" -> return $ TypeNum Int64
+        _ -> throwError $ UnexpectedToken tok "type name"
 
 parsePrintStatement :: Parser Expr
 parsePrintStatement = do

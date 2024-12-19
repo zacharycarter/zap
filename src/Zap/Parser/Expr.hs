@@ -8,6 +8,7 @@ module Zap.Parser.Expr
   , parsePrint
   , isPrint
   , isStringLit
+  , isValidName
   ) where
 
 import Control.Monad (when, replicateM)
@@ -147,23 +148,75 @@ parseUnary = parseTerm
 parseTerm :: Parser Expr
 parseTerm = do
     traceM "Parsing term"
+    baseExpr <- parseBaseTerm
+    parseFieldAccess baseExpr
+
+parseBaseTerm :: Parser Expr
+parseBaseTerm = do
+    traceM "Parsing base term"
     state <- get
     case stateTokens state of
-        (tok:_) -> case locToken tok of
+        (tok:rest) -> case locToken tok of
             TNumber n -> do
                 _ <- matchToken isNumber "number"
                 return $ NumLit Float32 n
+
             TWord name | isValidName (locToken tok) -> do
-                traceM $ "Found variable: " ++ name
+                traceM $ "Found identifier: " ++ name
                 _ <- matchToken isValidName "identifier"
-                return $ Var name
+                case rest of
+                    (nextTok:_) | isNumber (locToken nextTok) -> do
+                        traceM "Found struct instantiation"
+                        args <- parseStructArgs
+                        return $ StructLit name args
+                    _ -> do
+                        traceM "Found variable reference"
+                        return $ Var name
+
             TVec vecType -> do
                 traceM $ "Found vector constructor"
                 _ <- matchToken isVecConstructor "vector constructor"
                 args <- parseVectorArgs vecType
                 return $ VecLit (vecTypeFromString vecType) args
+
             _ -> throwError $ UnexpectedToken tok "term"
         [] -> throwError $ EndOfInput "term"
+
+parseFieldAccess :: Expr -> Parser Expr
+parseFieldAccess expr = do
+    traceM "Checking for field access"
+    state <- get
+    case stateTokens state of
+        (tok:_) | locToken tok == TDot -> do
+            traceM "Found field access"
+            _ <- matchToken (== TDot) "dot"
+            fieldName <- matchToken isValidName "field name"
+            case locToken fieldName of
+                TWord name -> do
+                    traceM $ "Accessing field: " ++ name
+                    let nextExpr = FieldAccess expr name
+                    parseFieldAccess nextExpr  -- Handle chained field access
+                _ -> throwError $ UnexpectedToken fieldName "field name"
+        _ -> return expr
+
+parseStructArgs :: Parser [(String, Expr)]
+parseStructArgs = do
+    traceM "Parsing struct arguments"
+    -- For now, assume fields are in order defined in struct
+    args <- parseExprList
+    return $ zip ["x", "y"] args  -- Temporarily hardcoded field names
+
+parseExprList :: Parser [Expr]
+parseExprList = do
+    traceM "Parsing expression list"
+    let loop acc = do
+          state <- get
+          case stateTokens state of
+            (tok:_) | isNumber (locToken tok) || isValidName (locToken tok) -> do
+                        expr <- parseExpression
+                        loop (expr : acc)
+            _ -> return $ reverse acc
+    loop []
 
 parseBasicExprImpl :: Parser Expr
 parseBasicExprImpl = do

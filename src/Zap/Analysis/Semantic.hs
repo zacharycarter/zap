@@ -63,6 +63,30 @@ collectDeclarations _ = return ()
 checkTopLevel :: TopLevel -> SemCheck ()
 checkTopLevel (TLExpr e) = void $ inferTypeExpr e
 checkTopLevel (TLDecl d) = checkDecl d
+checkTopLevel (TLType name typ) = do
+    -- Add the type definition to our environment
+    (vars, funs, structs, blocks) <- get
+    case typ of
+        TypeStruct _ fields -> do
+            -- Verify all field types are valid
+            forM_ fields $ \(fieldName, fieldType) -> do
+                -- Recursively check that referenced types exist
+                checkTypeExists fieldType
+            -- Add struct definition to environment
+            put (vars, funs, M.insert name fields structs, blocks)
+        _ -> throwError $ TypeMismatch (TypeStruct name []) typ
+
+checkTypeExists :: Type -> SemCheck ()
+checkTypeExists typ = case typ of
+    TypeNum _ -> return ()
+    TypeString -> return ()
+    TypeBool -> return ()
+    TypeStruct name _ -> do
+        (_, _, structs, _) <- get
+        unless (M.member name structs) $
+            throwError $ UndefinedStruct name
+    TypeVec _ -> return ()
+    TypeArray elemType -> checkTypeExists elemType
 
 checkDecl :: Decl -> SemCheck ()
 checkDecl (DFunc name params retType body) = do
@@ -199,6 +223,29 @@ inferTypeExpr expr = case expr of
                         then return $ TypeNum Int32  -- Default type for empty blocks
                         else inferTypeExpr (last (blockExprs scope))
 
+    StructLit name fields -> do
+        (_, _, structs, _) <- get
+        case M.lookup name structs of
+            Nothing -> throwError $ UndefinedStruct name
+            Just structFields -> do
+                -- Verify field count matches
+                when (length fields /= length structFields) $
+                    throwError $ ArgumentCountMismatch name (length structFields) (length fields)
+                -- Verify each field's type
+                forM_ (zip fields structFields) $ \((_, fieldExpr), (_, expectedType)) -> do
+                    actualType <- inferTypeExpr fieldExpr
+                    unless (actualType == expectedType) $
+                        throwError $ TypeMismatch expectedType actualType
+                return $ TypeStruct name structFields
+
+    FieldAccess expr fieldName -> do
+        exprType <- inferTypeExpr expr
+        case exprType of
+            TypeStruct structName fields ->
+                case lookup fieldName fields of
+                    Just fieldType -> return fieldType
+                    Nothing -> throwError $ UndefinedField structName fieldName
+            _ -> throwError $ TypeMismatch (TypeStruct "" []) exprType
     _ -> throwError $ IncompatibleTypes "Unsupported expression type" TypeBool TypeBool
 
 -- Helper function to extract numeric type from vector type

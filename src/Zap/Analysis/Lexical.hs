@@ -18,12 +18,15 @@ import Debug.Trace
 data Token
   = TWord String        -- Identifiers and keywords
   | TString String      -- String literals
-  | TNumber String      -- Numeric literals (including floating-point)
+  | TNumber String      -- Numeric literals
   | TOperator String    -- Operators
   | TSymbol String      -- Other symbols
   | TColon             -- Block symbol
-  | TVec String        -- Vector constructors (Vec2, Vec3, Vec4)
+  | TVec String        -- Vector constructors
   | TEquals            -- Assignment operator
+  | TDot               -- Struct field access
+  | TType              -- Type keyword
+  | TStruct            -- Struct keyword
   | TEOF               -- End of file
   deriving (Show, Eq)
 
@@ -53,9 +56,10 @@ scanTokens line col [] = do
 scanTokens line col (c:cs) = do
     traceM $ "scanTokens: Processing character '" ++ [c] ++ "' at line " ++ show line ++ ", col " ++ show col
     case c of
-        '"' -> do
-            traceM $ "scanTokens: Starting string literal at line " ++ show line ++ ", col " ++ show col
-            lexString line col [] cs
+        '.' -> do
+            traceM $ "scanTokens: Found field access dot at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokens line (col + 1) cs
+            Right (Located TDot col line : rest)
         ':' -> do
             traceM $ "scanTokens: Found colon at line " ++ show line ++ ", col " ++ show col
             rest <- scanTokens line (col + 1) cs
@@ -148,6 +152,8 @@ createWordToken word col line = Located token col line
       "Vec3" -> TVec "Vec3"
       "Vec4" -> TVec "Vec4"
       "let"  -> TWord "let"
+      "type" -> TType
+      "struct" -> TStruct
       _      -> TWord word
 
 -- Check for spaces
