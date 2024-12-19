@@ -116,7 +116,7 @@ print (vec1 + vec2)
 ### Struct Definitions (WIP)
 ```zap
 type
-  struct Point =
+  Point = struct
     x: Float32
     y: Float32
 
