@@ -75,11 +75,11 @@ data IRExpr
   | IRPrint IRExpr
   | IRBinOp IROp IRExpr IRExpr
   | IRBool Bool
-  | IRIf IRExpr IRExpr IRExpr
+  | IRIf IRExpr IRExpr IRExpr     -- Added
   | IRCall T.Text [IRExpr]
   | IRBlock T.Text [IRExpr] (Maybe IRExpr)
   | IRBreak T.Text
-  | IRResult IRExpr
+  | IRResult IRExpr               -- Added
   | IRVec IRVecType [IRExpr]
   | IRStructLit T.Text [(T.Text, IRExpr)]
   | IRFieldAccess IRExpr T.Text

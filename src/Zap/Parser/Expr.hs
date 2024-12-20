@@ -6,6 +6,8 @@ module Zap.Parser.Expr
   , parseExpression
   , parseLetBinding
   , parsePrint
+  , parsePrintStatement
+  , parseSingleBindingLine
   , isPrint
   , isStringLit
   , isValidName
@@ -157,6 +159,11 @@ parseBaseTerm = do
     state <- get
     case stateTokens state of
         (tok:rest) -> case locToken tok of
+            TString s -> do
+                traceM $ "Found string literal: " ++ s
+                _ <- matchToken isStringLit "string literal"
+                return $ StrLit s
+
             TNumber n -> do
                 _ <- matchToken isNumber "number"
                 return $ NumLit Float32 n
@@ -164,23 +171,59 @@ parseBaseTerm = do
             TWord name | isValidName (locToken tok) -> do
                 traceM $ "Found identifier: " ++ name
                 _ <- matchToken isValidName "identifier"
-                case rest of
-                    (nextTok:_) | isNumber (locToken nextTok) -> do
-                        traceM "Found struct instantiation"
-                        args <- parseStructArgs
-                        return $ StructLit name args
-                    _ -> do
-                        traceM "Found variable reference"
-                        return $ Var name
+                parseMaybeCall name
 
-            TVec vecType -> do
+            TVec vecTypeStr -> do
                 traceM $ "Found vector constructor"
                 _ <- matchToken isVecConstructor "vector constructor"
-                args <- parseVectorArgs vecType
-                return $ VecLit (vecTypeFromString vecType) args
+                parseMaybeCall vecTypeStr
 
             _ -> throwError $ UnexpectedToken tok "term"
         [] -> throwError $ EndOfInput "term"
+
+parseMaybeCall :: String -> Parser Expr
+parseMaybeCall fname = do
+    state <- get
+    case stateTokens state of
+        (tok:_)
+            | locToken tok == TLeftParen -> do
+                _ <- matchToken (== TLeftParen) "opening parenthesis"
+                args <- parseCallArgs
+                _ <- matchToken (== TRightParen) "closing parenthesis"
+                return (Call fname args)
+            | locToken tok == TComma || isCallArgToken (locToken tok) -> do
+                args <- parseCallArgs
+                return (Call fname args)
+            | otherwise ->
+                return (Var fname)
+        [] -> return (Var fname)
+  where
+    isCallArgToken :: Token -> Bool
+    isCallArgToken (TNumber _) = True
+    isCallArgToken (TString _) = True
+    isCallArgToken (TWord name) = isValidName (TWord name)
+    isCallArgToken (TVec _) = True
+    isCallArgToken _ = False
+
+parseCallArgs :: Parser [Expr]
+parseCallArgs = do
+    state <- get
+    case stateTokens state of
+        (tok:_)
+            | locToken tok == TRightParen -> return []
+            | otherwise -> do
+                firstArg <- parseExpression
+                parseMoreArgs [firstArg]
+        [] -> return []
+  where
+    parseMoreArgs acc = do
+        state <- get
+        case stateTokens state of
+            (tok:_) | locToken tok == TComma -> do
+                _ <- matchToken (== TComma) "comma"
+                arg <- parseExpression
+                parseMoreArgs (acc ++ [arg])
+            _ -> return acc
 
 parseFieldAccess :: Expr -> Parser Expr
 parseFieldAccess expr = do
@@ -199,25 +242,6 @@ parseFieldAccess expr = do
                 _ -> throwError $ UnexpectedToken fieldName "field name"
         _ -> return expr
 
-parseStructArgs :: Parser [(String, Expr)]
-parseStructArgs = do
-    traceM "Parsing struct arguments"
-    -- For now, assume fields are in order defined in struct
-    args <- parseExprList
-    return $ zip ["x", "y"] args  -- Temporarily hardcoded field names
-
-parseExprList :: Parser [Expr]
-parseExprList = do
-    traceM "Parsing expression list"
-    let loop acc = do
-          state <- get
-          case stateTokens state of
-            (tok:_) | isNumber (locToken tok) || isValidName (locToken tok) -> do
-                        expr <- parseExpression
-                        loop (expr : acc)
-            _ -> return $ reverse acc
-    loop []
-
 parseBasicExprImpl :: Parser Expr
 parseBasicExprImpl = do
     traceM "Starting basic expression parse"
@@ -232,34 +256,42 @@ parseBasicExprImpl = do
             TNumber n -> do
                 _ <- matchToken isNumber "number"
                 return $ NumLit Float32 n
-            TVec vecType -> do
-                traceM $ "Parsing vector constructor: " ++ vecType
+            TVec vecTypeStr -> do
+                traceM $ "Parsing vector constructor: " ++ vecTypeStr
                 _ <- matchToken isVecConstructor "vector constructor"
-                args <- parseVectorArgs vecType
-                return $ VecLit (vecTypeFromString vecType) args
+                -- Parse as a call
+                parseMaybeCall vecTypeStr
             TWord "print" -> do
                 _ <- matchToken isPrint "print"
                 expr <- parseBasicExprImpl
                 return $ Print expr
             TWord name | isValidName (locToken tok) -> do
                 _ <- matchToken isValidName "identifier"
-                return $ Var name
+                parseMaybeCall name
             _ -> throwError $ UnexpectedToken tok "term"
 
 parseLetBinding :: ExprParser -> Parser Expr
-parseLetBinding parsers = do
+parseLetBinding _ = do
     traceM "Parsing let binding"
     _ <- matchToken (\t -> t == TWord "let") "let keyword"
-    name <- matchToken isValidName "identifier"
-    traceM $ "Let binding name: " ++ show name
-    _ <- matchToken (\t -> t == TEquals) "equals sign"
-    traceM "Found equals sign, parsing value"
+    (varName, value) <- parseSingleBindingLine
+    traceM $ "Completed let binding for: " ++ varName
+    return $ Let varName value
+
+-- Helper function to parse a single binding line (no 'let' keyword)
+parseSingleBindingLine :: Parser (String, Expr)
+parseSingleBindingLine = do
+    traceM "Parsing single binding line (identifier = expression)"
+    checkIndent GreaterEq
+    nameTok <- matchToken isValidName "identifier"
+    _ <- matchToken (== TEquals) "equals sign"
+    traceM "Parsing value for binding line"
     value <- parseExpression
-    case locToken name of
+    case locToken nameTok of
         TWord varName -> do
-            traceM $ "Completed let binding for: " ++ varName
-            return $ Let varName value
-        _ -> throwError $ UnexpectedToken name "identifier"
+            traceM $ "Single binding line completed for: " ++ varName
+            return (varName, value)
+        _ -> throwError $ UnexpectedToken nameTok "identifier"
 
 parseBlockImpl :: Parser Expr
 parseBlockImpl = do
@@ -371,25 +403,11 @@ parseVectorLiteral :: Parser Expr
 parseVectorLiteral = do
     constructorTok <- matchToken isVecConstructor "vector constructor"
     case locToken constructorTok of
-        TVec vecType -> do
-            traceM $ "Parsing vector constructor: " ++ show vecType
-            args <- parseVectorArgs vecType
-            return $ VecLit (vecTypeFromString vecType) args
+        TVec vecTypeStr -> do
+            traceM $ "Parsing vector constructor: " ++ show vecTypeStr
+            -- After reading the constructor, parse as a call
+            parseMaybeCall vecTypeStr
         _ -> throwError $ UnexpectedToken constructorTok "vector constructor"
-
-parseVectorArgs :: String -> Parser [Expr]
-parseVectorArgs vecType = do
-    traceM $ "Parsing arguments for vector type: " ++ vecType
-    let numArgs = case vecType of
-            "Vec2" -> 2
-            "Vec3" -> 3
-            "Vec4" -> 4
-            _ -> error "Invalid vector type"
-    replicateM numArgs $ do
-        tok <- matchToken isNumber "number"
-        case locToken tok of
-            TNumber n -> return $ NumLit Float32 n
-            _ -> throwError $ UnexpectedToken tok "number"
 
 parsePrintStatement :: Parser Expr
 parsePrintStatement = do

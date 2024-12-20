@@ -28,6 +28,9 @@ data Token
   | TType              -- Type keyword
   | TStruct            -- Struct keyword
   | TEOF               -- End of file
+  | TLeftParen
+  | TRightParen
+  | TComma
   deriving (Show, Eq)
 
 -- Located tokens
@@ -56,6 +59,18 @@ scanTokens line col [] = do
 scanTokens line col (c:cs) = do
     traceM $ "scanTokens: Processing character '" ++ [c] ++ "' at line " ++ show line ++ ", col " ++ show col
     case c of
+        '(' -> do
+            traceM $ "scanTokens: Found left paren at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokens line (col + 1) cs
+            Right (Located TLeftParen col line : rest)
+        ')' -> do
+            traceM $ "scanTokens: Found right paren at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokens line (col + 1) cs
+            Right (Located TRightParen col line : rest)
+        ',' -> do
+            traceM $ "scanTokens: Found comma at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokens line (col + 1) cs
+            Right (Located TComma col line : rest)
         '.' -> do
             traceM $ "scanTokens: Found field access dot at line " ++ show line ++ ", col " ++ show col
             rest <- scanTokens line (col + 1) cs
@@ -64,6 +79,9 @@ scanTokens line col (c:cs) = do
             traceM $ "scanTokens: Found colon at line " ++ show line ++ ", col " ++ show col
             rest <- scanTokens line (col + 1) cs
             Right (Located TColon col line : rest)
+        '"' -> do  -- Add this case
+            traceM $ "scanTokens: Starting string literal"
+            lexString line col "" cs
         _ | isSpace c -> do
             traceM $ "scanTokens: Processing whitespace"
             case c of

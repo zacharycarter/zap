@@ -88,4 +88,5 @@ data Expr
   | FieldAccess Expr String            -- Access struct field
   | ArrayLit Type [Expr]               -- Array literal
   | Index Expr Expr                    -- Array indexing
+  | VarLit String Expr
   deriving (Show, Eq)

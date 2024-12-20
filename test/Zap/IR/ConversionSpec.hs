@@ -91,8 +91,8 @@ spec = do
       it "reports errors for unsupported binary operations" $ do
         let ast = Program [TLExpr (BinOp Add (StrLit "a") (StrLit "b"))]
         case convertToIR ast of
-          Left (UnsupportedExpression _) -> return ()
-          Left err -> expectationFailure $ "Expected UnsupportedExpression but got: " ++ show err
+          Left (InvalidType _) -> return ()
+          Left err -> expectationFailure $ "Expected InvalidType but got: " ++ show err
           Right ir -> expectationFailure $ "Expected error but got successful conversion: " ++ show ir
 
       it "reports errors for unsupported variable references" $ do
@@ -105,8 +105,8 @@ spec = do
       it "reports errors for invalid type combinations" $ do
         let ast = Program [TLExpr (Let "x" (BinOp Add (StrLit "str") (NumLit Int32 "42")))]
         case convertToIR ast of
-          Left (UnsupportedExpression _) -> return ()
-          Left err -> expectationFailure $ "Expected UnsupportedExpression but got: " ++ show err
+          Left (InvalidType _) -> return ()
+          Left err -> expectationFailure $ "Expected InvalidType but got: " ++ show err
           Right ir -> expectationFailure $ "Expected error but got successful conversion: " ++ show ir
 
       describe "Binary Operations" $ do

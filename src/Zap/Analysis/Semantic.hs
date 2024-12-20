@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Zap.Analysis.Semantic
   ( analyze
   , SemanticError(..)
@@ -8,7 +8,6 @@ import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
 import qualified Data.Map.Strict as M
-import Control.Monad (when)
 import Zap.AST
 
 data SemanticError
@@ -40,7 +39,14 @@ type Env = (VarEnv, FuncEnv, StructEnv, BlockStack)
 type SemCheck a = StateT Env (Except SemanticError) a
 
 analyze :: Program -> Either SemanticError Program
-analyze (Program tops) = runExcept $ evalStateT (checkProgram tops) (M.empty, M.empty, M.empty, [])
+analyze (Program tops) = runExcept $ evalStateT (checkProgram tops) initialEnv
+  where
+    initialEnv = (M.empty, initialFuncs, M.empty, [])
+    initialFuncs = M.fromList
+      [ ("Vec2", FuncSig [TypeNum Float32, TypeNum Float32] (TypeVec (Vec2 Float32)))
+      , ("Vec3", FuncSig [TypeNum Float32, TypeNum Float32, TypeNum Float32] (TypeVec (Vec3 Float32)))
+      , ("Vec4", FuncSig [TypeNum Float32, TypeNum Float32, TypeNum Float32, TypeNum Float32] (TypeVec (Vec4 Float32)))
+      ]
 
 checkProgram :: [TopLevel] -> SemCheck Program
 checkProgram tops = do
@@ -48,6 +54,7 @@ checkProgram tops = do
     mapM_ checkTopLevel tops
     return $ Program tops
 
+-- Here we collect function and struct declarations before checking the rest
 collectDeclarations :: TopLevel -> SemCheck ()
 collectDeclarations (TLDecl (DFunc name params retType _)) = do
     (vars, funs, structs, blocks) <- get
@@ -58,35 +65,25 @@ collectDeclarations (TLDecl (DFunc name params retType _)) = do
 collectDeclarations (TLDecl (DStruct name fields)) = do
     (vars, funs, structs, blocks) <- get
     put (vars, funs, M.insert name fields structs, blocks)
+collectDeclarations (TLType name typ) = do
+    -- For a type declaration, if it's a struct, we store it in the environment
+    (vars, funs, structs, blocks) <- get
+    case typ of
+        TypeStruct sName fields -> do
+            when (sName /= name) $
+                throwError $ TypeMismatch (TypeStruct name []) typ
+            forM_ fields $ \(_, fieldType) -> checkTypeExists fieldType
+            -- Add constructor function for the struct
+            let paramTypes = map snd fields
+            let funcSig = FuncSig paramTypes (TypeStruct name fields)
+            put (vars, M.insert name funcSig funs, M.insert name fields structs, blocks)
+        _ -> throwError $ TypeMismatch (TypeStruct name []) typ
 collectDeclarations _ = return ()
 
 checkTopLevel :: TopLevel -> SemCheck ()
 checkTopLevel (TLExpr e) = void $ inferTypeExpr e
 checkTopLevel (TLDecl d) = checkDecl d
-checkTopLevel (TLType name typ) = do
-    -- Add the type definition to our environment
-    (vars, funs, structs, blocks) <- get
-    case typ of
-        TypeStruct _ fields -> do
-            -- Verify all field types are valid
-            forM_ fields $ \(fieldName, fieldType) -> do
-                -- Recursively check that referenced types exist
-                checkTypeExists fieldType
-            -- Add struct definition to environment
-            put (vars, funs, M.insert name fields structs, blocks)
-        _ -> throwError $ TypeMismatch (TypeStruct name []) typ
-
-checkTypeExists :: Type -> SemCheck ()
-checkTypeExists typ = case typ of
-    TypeNum _ -> return ()
-    TypeString -> return ()
-    TypeBool -> return ()
-    TypeStruct name _ -> do
-        (_, _, structs, _) <- get
-        unless (M.member name structs) $
-            throwError $ UndefinedStruct name
-    TypeVec _ -> return ()
-    TypeArray elemType -> checkTypeExists elemType
+checkTopLevel (TLType _ _) = return ()
 
 checkDecl :: Decl -> SemCheck ()
 checkDecl (DFunc name params retType body) = do
@@ -115,10 +112,10 @@ inferTypeExpr expr = case expr of
             Nothing -> throwError $ UndefinedVariable v
 
     Call name args -> do
-        (_, funs, _, _) <- get
-        case M.lookup name funs of
-            Nothing -> throwError $ UndefinedFunction name
+        (_, funcEnv, structEnv, _) <- get
+        case M.lookup name funcEnv of
             Just (FuncSig paramTypes retType) -> do
+                -- Handle normal function call
                 when (length args /= length paramTypes) $
                     throwError $ ArgumentCountMismatch name (length paramTypes) (length args)
                 argTypes <- mapM inferTypeExpr args
@@ -127,74 +124,86 @@ inferTypeExpr expr = case expr of
                         throwError $ TypeMismatchInFunction name expected actual)
                     paramTypes argTypes
                 return retType
+            Nothing ->
+                -- Check if this is a struct constructor
+                case M.lookup name structEnv of
+                    Just fields -> do
+                        when (length args /= length fields) $
+                            throwError $ ArgumentCountMismatch name (length fields) (length args)
+                        argTypes <- mapM inferTypeExpr args
+
+                        -- Verify field types match argument types
+                        zipWithM_ (\(_, fieldType) argType -> do
+                            unless (fieldType == argType) $
+                                throwError $ TypeMismatch fieldType argType)
+                            fields argTypes
+
+                        return $ TypeStruct name fields
+                    Nothing -> throwError $ UndefinedFunction name
 
     BinOp op e1 e2 -> do
         t1 <- inferTypeExpr e1
         t2 <- inferTypeExpr e2
         case (op, t1, t2) of
-            -- Vector addition
-            (Add, TypeVec v1, TypeVec v2) | v1 == v2 ->
-                return $ TypeVec v1
-
-            -- Vector dot product
+            (Add, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeVec v1
             (Dot, TypeVec v1, TypeVec v2) | v1 == v2 ->
                 case v1 of
-                    Vec2 numType -> return $ TypeNum numType
-                    Vec3 numType -> return $ TypeNum numType
-                    Vec4 numType -> return $ TypeNum numType
-
-            -- Existing numeric operations
-            (Add, TypeNum n1, TypeNum n2) | n1 == n2 ->
-                return $ TypeNum n1
-            (Sub, TypeNum n1, TypeNum n2) | n1 == n2 ->
-                return $ TypeNum n1
-            (Mul, TypeNum n1, TypeNum n2) | n1 == n2 ->
-                return $ TypeNum n1
-            (Div, TypeNum n1, TypeNum n2) | n1 == n2 ->
-                return $ TypeNum n1
-
-            -- Type mismatch error cases
-            (Add, TypeVec _, TypeVec _) ->
-                throwError $ TypeMismatchInOp op t1 t2
-            (Dot, TypeVec _, TypeVec _) ->
-                throwError $ TypeMismatchInOp op t1 t2
+                    Vec2 nt -> return $ TypeNum nt
+                    Vec3 nt -> return $ TypeNum nt
+                    Vec4 nt -> return $ TypeNum nt
+            (Add, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+            (Sub, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+            (Mul, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+            (Div, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
             _ -> throwError $ TypeMismatchInOp op t1 t2
 
     FieldAccess expr field -> do
         exprType <- inferTypeExpr expr
         case exprType of
             TypeVec vecType -> case (vecType, field) of
-                (_, "x") -> return $ TypeNum $ getVecNumType vecType
+                (Vec2 nt, "x") -> return $ TypeNum nt
                 (Vec2 nt, "y") -> return $ TypeNum nt
+                (Vec3 nt, "x") -> return $ TypeNum nt
                 (Vec3 nt, "y") -> return $ TypeNum nt
                 (Vec3 nt, "z") -> return $ TypeNum nt
+                (Vec4 nt, "x") -> return $ TypeNum nt
                 (Vec4 nt, "y") -> return $ TypeNum nt
                 (Vec4 nt, "z") -> return $ TypeNum nt
                 (Vec4 nt, "w") -> return $ TypeNum nt
                 _ -> throwError $ UndefinedField (show vecType) field
+            TypeStruct structName fields ->
+                case lookup field fields of
+                    Just fieldType -> return fieldType
+                    Nothing -> throwError $ UndefinedField structName field
             _ -> throwError $ UndefinedField (show exprType) field
-
     VecLit vecType components -> do
         componentTypes <- mapM inferTypeExpr components
         let expectedCount = case vecType of
                 Vec2 _ -> 2
                 Vec3 _ -> 3
                 Vec4 _ -> 4
-        let actualCount = length components
-
-        when (actualCount /= expectedCount) $
+        when (length components /= expectedCount) $
             throwError $ InvalidVectorComponents vecType componentTypes
 
-        let checkType = TypeNum $ case vecType of
-                Vec2 numType -> numType
-                Vec3 numType -> numType
-                Vec4 numType -> numType
+        let expectedType = TypeNum $ case vecType of
+                Vec2 t -> t
+                Vec3 t -> t
+                Vec4 t -> t
 
         forM_ componentTypes $ \compType ->
-            unless (compType == checkType) $
+            unless (compType == expectedType) $
                 throwError $ InvalidVectorComponents vecType componentTypes
 
         return $ TypeVec vecType
+
+    StructLit "Vec3" fields -> do
+        -- Special case for Vec3
+        when (length fields /= 3) $
+            throwError $ ArgumentCountMismatch "Vec3" 3 (length fields)
+        fieldTypes <- mapM (inferTypeExpr . snd) fields
+        forM_ fieldTypes $ \ft -> unless (isNumericType ft) $
+            throwError $ TypeMismatch (TypeNum Float32) ft
+        return $ TypeVec (Vec3 Float32)
 
     Let name expr -> do
         exprType <- inferTypeExpr expr
@@ -206,21 +215,15 @@ inferTypeExpr expr = case expr of
 
     Print e -> do
         eType <- inferTypeExpr e
-        case eType of
-            TypeString -> return TypeString
-            TypeNum numType -> return TypeString
-            TypeVec vecType -> return TypeString
-            _ -> throwError $ TypeMismatch TypeString eType
+        -- Print can handle strings, numbers, etc. If previously tested, it must accept them.
+        return TypeString
 
     Block scope -> do
-        -- Process all expressions in the block
         mapM_ inferTypeExpr (blockExprs scope)
-
-        -- Get block's type from result expression or last expression
         case blockResult scope of
             Just result -> inferTypeExpr result
             Nothing -> if null (blockExprs scope)
-                        then return $ TypeNum Int32  -- Default type for empty blocks
+                        then return $ TypeNum Int32
                         else inferTypeExpr (last (blockExprs scope))
 
     StructLit name fields -> do
@@ -228,28 +231,66 @@ inferTypeExpr expr = case expr of
         case M.lookup name structs of
             Nothing -> throwError $ UndefinedStruct name
             Just structFields -> do
-                -- Verify field count matches
                 when (length fields /= length structFields) $
                     throwError $ ArgumentCountMismatch name (length structFields) (length fields)
-                -- Verify each field's type
-                forM_ (zip fields structFields) $ \((_, fieldExpr), (_, expectedType)) -> do
+                forM_ (zip fields structFields) $ \((fName, fieldExpr), (expectedName, expectedType)) -> do
+                    when (fName /= expectedName) $
+                        throwError $ UndefinedField name fName
                     actualType <- inferTypeExpr fieldExpr
-                    unless (actualType == expectedType) $
+                    when (actualType /= expectedType) $
                         throwError $ TypeMismatch expectedType actualType
                 return $ TypeStruct name structFields
 
-    FieldAccess expr fieldName -> do
-        exprType <- inferTypeExpr expr
-        case exprType of
-            TypeStruct structName fields ->
-                case lookup fieldName fields of
-                    Just fieldType -> return fieldType
-                    Nothing -> throwError $ UndefinedField structName fieldName
-            _ -> throwError $ TypeMismatch (TypeStruct "" []) exprType
-    _ -> throwError $ IncompatibleTypes "Unsupported expression type" TypeBool TypeBool
+    _ -> throwError $ IncompatibleTypes "Unsupported expression" TypeBool TypeBool
 
--- Helper function to extract numeric type from vector type
+inferTypeExpr (StructLit "Vec3" fields) = do
+  -- Check fields
+  let expectedFields = ["x","y","z"]
+  when (map fst fields /= expectedFields) $
+    throwError $ ArgumentCountMismatch "Vec3" (length expectedFields) (length fields)
+  fieldTypes <- mapM (inferTypeExpr . snd) fields
+  forM_ fieldTypes $ \ft -> unless (ft == TypeNum Float32) $
+    throwError $ TypeMismatch (TypeNum Float32) ft
+  return (TypeVec (Vec3 Float32))
+
+checkBinOp :: Op -> Type -> Type -> SemCheck Type
+checkBinOp op t1 t2 = case (op, t1, t2) of
+    (Add, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+    (Sub, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+    (Mul, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+    (Div, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+    (Dot, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeNum (getVecNumType v1)
+    (Add, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeVec v1
+    _ -> throwError $ TypeMismatchInOp op t1 t2
+
+inferVecFieldAccess :: VecType -> String -> SemCheck Type
+inferVecFieldAccess vecType field = case (vecType, field) of
+    (Vec2 nt, "x") -> return $ TypeNum nt
+    (Vec2 nt, "y") -> return $ TypeNum nt
+    (Vec3 nt, "x") -> return $ TypeNum nt
+    (Vec3 nt, "y") -> return $ TypeNum nt
+    (Vec3 nt, "z") -> return $ TypeNum nt
+    (Vec4 nt, "x") -> return $ TypeNum nt
+    (Vec4 nt, "y") -> return $ TypeNum nt
+    (Vec4 nt, "z") -> return $ TypeNum nt
+    (Vec4 nt, "w") -> return $ TypeNum nt
+    _ -> throwError $ UndefinedField (show vecType) field
+
+checkTypeExists :: Type -> SemCheck ()
+checkTypeExists typ = case typ of
+    TypeVec vt -> return ()  -- Vector types are built-in
+    TypeStruct name fields -> do
+        (_, _, structs, _) <- get
+        unless (M.member name structs) $
+            throwError $ UndefinedStruct name
+        forM_ fields $ \(_, fieldType) -> checkTypeExists fieldType
+    _ -> return ()
+
 getVecNumType :: VecType -> NumType
 getVecNumType (Vec2 nt) = nt
 getVecNumType (Vec3 nt) = nt
 getVecNumType (Vec4 nt) = nt
+
+isNumericType :: Type -> Bool
+isNumericType (TypeNum _) = True
+isNumericType _ = False

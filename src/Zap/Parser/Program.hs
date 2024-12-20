@@ -4,7 +4,6 @@ module Zap.Parser.Program
   , parseTopLevel
   ) where
 
-import Control.Applicative
 import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
@@ -13,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr
+import Zap.Parser.Expr (isValidName, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -22,7 +21,9 @@ parseProgram input = do
     traceM $ "Input text: " ++ T.unpack input
     tokens <- mapLexError $ tokenize input
     traceM $ "Tokenized input: " ++ show tokens
-    runParser parseTopLevels tokens
+    result <- runParser parseTopLevels tokens
+    traceM $ "Parsed top-levels: " ++ show result
+    return result
 
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
@@ -31,17 +32,18 @@ parseTopLevels = do
     traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
     case stateTokens state of
         [] -> do
-            traceM "No more tokens to parse"
+            traceM "No more tokens to parse, returning empty list"
             pure []
         (tok:_) -> case locToken tok of
             TEOF -> do
-                traceM "Found EOF token"
+                traceM "Found EOF token, returning empty list"
                 pure []
             _ -> do
                 traceM $ "Parsing top-level expression starting with: " ++ show tok
                 expr <- parseTopLevel
-                traceM $ "Successfully parsed expression: " ++ show expr
+                traceM $ "Successfully parsed top-level expression: " ++ show expr
                 rest <- parseTopLevels
+                traceM $ "Collected expressions so far: " ++ show (expr:rest)
                 pure (expr : rest)
 
 parseTopLevel :: Parser TopLevel
@@ -56,25 +58,32 @@ parseTopLevel = do
                 TType -> do
                     traceM "Found type definition"
                     _ <- matchToken (== TType) "type"
-                    typeName <- matchToken isValidName "type name"
+                    typeNameTok <- matchToken isValidName "type name"
                     _ <- matchToken (== TEquals) "equals sign"
-                    typeDefinition <- parseTypeDefinition
-                    case locToken typeName of
-                        TWord name -> return $ TLType name typeDefinition
-                        _ -> throwError $ UnexpectedToken typeName "type name"
+                    case locToken typeNameTok of
+                        TWord name -> do
+                            traceM $ "Parsing type definition for: " ++ name
+                            typeDefinition <- parseTypeDefinition (T.pack name)
+                            let tl = TLType name typeDefinition
+                            traceM $ "Parsed type definition: " ++ show tl
+                            return tl
+                        _ -> throwError $ UnexpectedToken typeNameTok "type name"
                 TWord "print" -> do
-                    traceM "Found print statement"
+                    traceM "Found print statement at top-level"
                     expr <- parsePrintStatement
+                    traceM $ "Parsed print statement: " ++ show expr
                     return $ TLExpr expr
                 TWord "block" -> do
-                    traceM "Found block expression"
+                    traceM "Found block expression at top-level"
                     when (locCol tok /= 1) $
                         throwError $ IndentationError 1 (locCol tok) Equal
                     expr <- parseBlock defaultExprParser
+                    traceM $ "Parsed block: " ++ show expr
                     return $ TLExpr expr
                 TWord "let" -> do
-                    traceM "Found let binding"
-                    expr <- parseLetBinding defaultExprParser
+                    traceM "Found let block at top-level"
+                    expr <- parseLetBlock
+                    traceM $ "Parsed let block: " ++ show expr
                     return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
@@ -83,24 +92,67 @@ parseTopLevel = do
             traceM "No tokens available for top-level expression"
             throwError $ EndOfInput "expected top-level expression"
 
-parseTypeDefinition :: Parser Type
-parseTypeDefinition = do
-    traceM "Parsing type definition"
+parseLetBlock :: Parser Expr
+parseLetBlock = do
+    traceM "Parsing let block"
+    firstBinding <- parseLetBinding defaultExprParser
+    traceM $ "First let binding parsed: " ++ show firstBinding
+    moreBindings <- parseMoreBindings
+    traceM $ "Additional bindings parsed: " ++ show moreBindings
+    let allBindings = firstBinding : map (\(n,v) -> Let n v) moreBindings
+    let blockExpr = Block $ BlockScope
+          { blockLabel = "top_let"
+          , blockExprs = allBindings
+          , blockResult = Nothing }
+    traceM $ "Constructed let block expr: " ++ show blockExpr
+    return blockExpr
+  where
+    parseMoreBindings :: Parser [(String, Expr)]
+    parseMoreBindings = do
+        state <- get
+        traceM $ "Checking for more bindings at: " ++ show (take 3 $ stateTokens state)
+        case stateTokens state of
+            (tok:_) ->
+                if isValidName (locToken tok) then do
+                    traceM "Found another binding line"
+                    (n,v) <- parseSingleBindingLine
+                    traceM $ "Parsed binding: " ++ n ++ " = " ++ show v
+                    rest <- parseMoreBindings
+                    traceM $ "Bindings after this: " ++ show rest
+                    return ((n,v):rest)
+                else do
+                    traceM "No more bindings found"
+                    return []
+            [] -> do
+                traceM "No tokens left for more bindings"
+                return []
+
+parseTypeDefinition :: T.Text -> Parser Type
+parseTypeDefinition givenName = do
+    traceM $ "Parsing type definition for " ++ T.unpack givenName
     _ <- matchToken (== TStruct) "struct"
     fields <- parseStructFields
-    return $ TypeStruct "" fields
+    let t = TypeStruct (T.unpack givenName) fields
+    traceM $ "Constructed TypeStruct: " ++ show t
+    return t
 
 parseStructFields :: Parser [(String, Type)]
 parseStructFields = do
     traceM "Parsing struct fields"
     let loop acc = do
           state <- get
+          traceM $ "Struct fields loop, tokens: " ++ show (take 3 $ stateTokens state)
           case stateTokens state of
             (tok:_) | isValidName (locToken tok) -> do
                         field <- parseStructField
+                        traceM $ "Parsed struct field: " ++ show field
                         loop (field : acc)
-            _ -> return $ reverse acc
-    loop []
+            _ -> do
+                traceM "No more struct fields"
+                return $ reverse acc
+    result <- loop []
+    traceM $ "All struct fields parsed: " ++ show result
+    return result
 
 parseStructField :: Parser (String, Type)
 parseStructField = do
@@ -108,32 +160,39 @@ parseStructField = do
     name <- matchToken isValidName "field name"
     _ <- matchToken (== TColon) "colon"
     fieldType <- parseType
-    case locToken name of
-        TWord fieldName -> return (fieldName, fieldType)
-        _ -> throwError $ UnexpectedToken name "field name"
+    let fieldName = case locToken name of
+          TWord fn -> fn
+          _ -> error "Invalid field name token"
+    traceM $ "Field parsed: " ++ fieldName ++ ": " ++ show fieldType
+    return (fieldName, fieldType)
 
 parseType :: Parser Type
 parseType = do
     traceM "Parsing type"
     tok <- matchToken isValidName "type name"
     case locToken tok of
-        TWord "Float32" -> return $ TypeNum Float32
-        TWord "Float64" -> return $ TypeNum Float64
-        TWord "Int32" -> return $ TypeNum Int32
-        TWord "Int64" -> return $ TypeNum Int64
+        TWord "Float32" -> do
+            traceM "Recognized Float32"
+            return $ TypeNum Float32
+        TWord "Float64" -> do
+            traceM "Recognized Float64"
+            return $ TypeNum Float64
+        TWord "Int32"   -> do
+            traceM "Recognized Int32"
+            return $ TypeNum Int32
+        TWord "Int64"   -> do
+            traceM "Recognized Int64"
+            return $ TypeNum Int64
+        TWord "f32"     -> do
+            traceM "Recognized f32"
+            return $ TypeNum Float32
+        TWord "f64"     -> do
+            traceM "Recognized f64"
+            return $ TypeNum Float64
+        TWord other     -> do
+            traceM $ "Unrecognized type name: " ++ other
+            throwError $ UnexpectedToken tok "type name"
         _ -> throwError $ UnexpectedToken tok "type name"
-
-parsePrintStatement :: Parser Expr
-parsePrintStatement = do
-    state <- get
-    traceM "Parsing print statement"
-    expectedIndent <- gets stateIndent
-    let tok = head $ stateTokens state
-    when (locCol tok < expectedIndent) $
-        throwError $ IndentationError expectedIndent (locCol tok) GreaterEq
-    _ <- matchToken isPrint "print"
-    expr <- parseExpression  -- Change from parseBasicExpr to parseExpression
-    return $ Print expr
 
 mapLexError :: Either LexError a -> Either ParseError a
 mapLexError (Left (UnterminatedString line col)) =
