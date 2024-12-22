@@ -32,6 +32,8 @@ data IRType
   | IRTypeBool
   | IRTypeStruct T.Text [(T.Text, IRType)]
   | IRTypeArray IRType
+  | IRTypeVoid
+  | IRTypeAny
   deriving (Eq, Show)
 
 -- Custom Ord instance for IRType
@@ -45,6 +47,8 @@ instance Ord IRType where
       EQ -> compare (map snd fields1) (map snd fields2)
       x -> x
   compare (IRTypeArray t1) (IRTypeArray t2) = compare t1 t2
+  compare IRTypeVoid IRTypeVoid = EQ
+  compare IRTypeAny IRTypeAny = EQ
 
   -- Define total ordering between different constructors
   compare (IRTypeNum _) _ = LT
@@ -57,6 +61,10 @@ instance Ord IRType where
   compare _ IRTypeBool = GT
   compare (IRTypeStruct _ _) _ = LT
   compare _ (IRTypeStruct _ _) = GT
+  compare (IRTypeArray _) _ = LT
+  compare _ (IRTypeArray _) = GT
+  compare IRTypeVoid _ = LT
+  compare _ IRTypeVoid = GT
 
 data IROp
   = IRAdd

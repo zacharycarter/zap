@@ -5,7 +5,6 @@ module Zap.Parser.Expr
   , parseExpr
   , parseExpression
   , parseLetBinding
-  , parsePrint
   , parsePrintStatement
   , parseSingleBindingLine
   , isPrint
@@ -33,7 +32,7 @@ data ExprParser = ExprParser
 -- Token validation helpers
 isValidName :: Token -> Bool
 isValidName (TWord name) = traceShow ("Validating name: " ++ name) $
-  not $ name `elem` ["print", "break", "result", "block", "let"]
+  not $ name `elem` ["break", "result", "block", "let"]
 isValidName _ = False
 
 isBlockKeyword :: Token -> Bool
@@ -150,8 +149,12 @@ parseUnary = parseTerm
 parseTerm :: Parser Expr
 parseTerm = do
     traceM "Parsing term"
-    baseExpr <- parseBaseTerm
-    parseFieldAccess baseExpr
+    state <- get
+    case stateTokens state of
+        (tok:_) -> case locToken tok of
+            TWord "print" -> parsePrintStatement
+            _ -> parseBaseTerm >>= parseFieldAccess
+        [] -> throwError $ EndOfInput "term"
 
 parseBaseTerm :: Parser Expr
 parseBaseTerm = do
@@ -261,10 +264,6 @@ parseBasicExprImpl = do
                 _ <- matchToken isVecConstructor "vector constructor"
                 -- Parse as a call
                 parseMaybeCall vecTypeStr
-            TWord "print" -> do
-                _ <- matchToken isPrint "print"
-                expr <- parseBasicExprImpl
-                return $ Print expr
             TWord name | isValidName (locToken tok) -> do
                 _ <- matchToken isValidName "identifier"
                 parseMaybeCall name
@@ -418,8 +417,20 @@ parsePrintStatement = do
     when (locCol tok < expectedIndent) $
         throwError $ IndentationError expectedIndent (locCol tok) GreaterEq
     _ <- matchToken isPrint "print"
-    expr <- parseExpression  -- Use the full expression parser
-    return $ Print expr
+
+    -- Look ahead to see if there's a left paren
+    state' <- get
+    case stateTokens state' of
+        (tok:_) | locToken tok == TLeftParen -> do
+            -- Function-style print with parentheses
+            _ <- matchToken (== TLeftParen) "("
+            expr <- parseExpression
+            _ <- matchToken (== TRightParen) ")"
+            return $ Call "print" [expr]
+        _ -> do
+            -- Traditional style print without parentheses
+            expr <- parseExpression  -- This will handle variable references
+            return $ Call "print" [expr]
 
 vecTypeFromString :: String -> VecType
 vecTypeFromString "Vec2" = Vec2 Float32
@@ -434,24 +445,3 @@ defaultExprParser = ExprParser
   , parseBreak = parseBreakImpl
   , parseResult = parseResultImpl
   }
-
-parsePrint :: Parser (Located, Located)
-parsePrint = do
-    state <- get
-    traceM $ "parsePrint state: " ++ show state
-    case stateTokens state of
-      (tok:_) -> do
-        traceM $ "Print token: " ++ show tok
-        when (locCol tok /= 1) $
-          throwError $ IndentationError 1 (locCol tok) Equal
-        printTok <- matchToken isPrint "print"
-        let printLine = locLine printTok
-        modify (\s -> s { stateIndent = locCol printTok + 1 })
-        traceM $ "Print statement indent set to: " ++ show (locCol printTok + 1)
-        exprTok <- matchToken isStringLit "string literal"
-        traceM $ "Print expression: " ++ show exprTok
-        when (locLine exprTok > printLine && locCol exprTok <= locCol printTok) $ do
-          traceM $ "Print indentation error: " ++ show exprTok
-          throwError $ IndentationError (locCol printTok + 1) (locCol exprTok) Greater
-        return (printTok, exprTok)
-      [] -> throwError $ EndOfInput "print statement"

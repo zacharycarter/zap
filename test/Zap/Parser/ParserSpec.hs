@@ -16,14 +16,37 @@ import Zap.AST
 spec :: Spec
 spec = do
   describe "Print statement parsing" $ do
-    it "parses hello world" $ do
+    it "parses traditional print syntax" $ do
       let input = "print \"Hello, World!\""
       case parseProgram input of
-        Right [TLExpr (Print (StrLit str))] ->
+        Right [TLExpr (Call "print" [StrLit str])] ->
           str `shouldBe` "Hello, World!"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other
+
+    it "parses function-style print syntax" $ do
+      let input = "print(\"Hello, World!\")"
+      case parseProgram input of
+        Right [TLExpr (Call "print" [StrLit str])] ->
+          str `shouldBe` "Hello, World!"
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+        Right other -> expectationFailure $
+          "Unexpected parse result: " ++ show other
+
+    it "parses print with complex expression" $ do
+      let input = "print(1 + 2 * 3)"
+      case parseProgram input of
+        Right [TLExpr (Call "print" [BinOp Add (NumLit Float32 "1")
+                                   (BinOp Mul (NumLit Float32 "2") (NumLit Float32 "3"))])] ->
+          return ()
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+        Right other -> expectationFailure $
+          "Unexpected parse result: " ++ show other
+
+    it "enforces print statement indentation" $ do
+      let input = "block test:\nprint \"Hello\""  -- Not indented
+      parseProgram input `shouldSatisfy` isLeft
 
   describe "Block parsing" $ do
     it "parses simple block" $ do
@@ -65,9 +88,9 @@ spec = do
             , "  print \"Second\""
             ]
       case parseProgram input of
-        Right [TLExpr (Print (StrLit first)), TLExpr (Block scope)] -> do
+        Right [TLExpr (Call "print" [StrLit first]), TLExpr (Block scope)] -> do
           first `shouldBe` "First"
-          blockExprs scope `shouldBe` [Print (StrLit "Second")]
+          blockExprs scope `shouldBe` [Call "print" [StrLit "Second"]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other

@@ -46,6 +46,7 @@ analyze (Program tops) = runExcept $ evalStateT (checkProgram tops) initialEnv
       [ ("Vec2", FuncSig [TypeNum Float32, TypeNum Float32] (TypeVec (Vec2 Float32)))
       , ("Vec3", FuncSig [TypeNum Float32, TypeNum Float32, TypeNum Float32] (TypeVec (Vec3 Float32)))
       , ("Vec4", FuncSig [TypeNum Float32, TypeNum Float32, TypeNum Float32, TypeNum Float32] (TypeVec (Vec4 Float32)))
+      , ("print", FuncSig [TypeAny] TypeVoid)
       ]
 
 checkProgram :: [TopLevel] -> SemCheck Program
@@ -110,6 +111,11 @@ inferTypeExpr expr = case expr of
         case M.lookup v vars of
             Just t -> return t
             Nothing -> throwError $ UndefinedVariable v
+
+    Call "print" [arg] -> do
+        -- For print, we don't care about the argument type
+        _ <- inferTypeExpr arg
+        return TypeVoid
 
     Call name args -> do
         (_, funcEnv, structEnv, _) <- get
@@ -212,11 +218,6 @@ inferTypeExpr expr = case expr of
         return exprType
 
     BoolLit _ -> return TypeBool
-
-    Print e -> do
-        eType <- inferTypeExpr e
-        -- Print can handle strings, numbers, etc. If previously tested, it must accept them.
-        return TypeString
 
     Block scope -> do
         mapM_ inferTypeExpr (blockExprs scope)

@@ -95,10 +95,20 @@ parseTopLevel = do
 parseLetBlock :: Parser Expr
 parseLetBlock = do
     traceM "Parsing let block"
-    firstBinding <- parseLetBinding defaultExprParser
-    traceM $ "First let binding parsed: " ++ show firstBinding
-    moreBindings <- parseMoreBindings
+    _ <- matchToken (\t -> t == TWord "let") "let keyword"
+
+    -- Get first binding and determine block indent level
+    firstBinding <- do
+        (name, expr) <- parseSingleBindingLine
+        return $ Let name expr
+
+    traceM $ "First binding parsed: " ++ show firstBinding
+
+    -- Parse additional bindings at same indentation level
+    let blockIndent = 2  -- standard indentation for let blocks
+    moreBindings <- parseMoreBindings blockIndent
     traceM $ "Additional bindings parsed: " ++ show moreBindings
+
     let allBindings = firstBinding : map (\(n,v) -> Let n v) moreBindings
     let blockExpr = Block $ BlockScope
           { blockLabel = "top_let"
@@ -107,25 +117,36 @@ parseLetBlock = do
     traceM $ "Constructed let block expr: " ++ show blockExpr
     return blockExpr
   where
-    parseMoreBindings :: Parser [(String, Expr)]
-    parseMoreBindings = do
+    parseMoreBindings :: Int -> Parser [(String, Expr)]
+    parseMoreBindings indent = do
         state <- get
-        traceM $ "Checking for more bindings at: " ++ show (take 3 $ stateTokens state)
+        traceM $ "Checking for more bindings at indent " ++ show indent ++ ": " ++ show (take 3 $ stateTokens state)
         case stateTokens state of
-            (tok:_) ->
-                if isValidName (locToken tok) then do
-                    traceM "Found another binding line"
-                    (n,v) <- parseSingleBindingLine
-                    traceM $ "Parsed binding: " ++ n ++ " = " ++ show v
-                    rest <- parseMoreBindings
-                    traceM $ "Bindings after this: " ++ show rest
-                    return ((n,v):rest)
-                else do
-                    traceM "No more bindings found"
+            [] -> return []
+            (tok:_)
+                | locToken tok == TEOF -> return []
+                | locCol tok < indent -> do
+                    -- Only end if we actually dedent
+                    traceM $ "Let block ended due to dedent: " ++ show (locCol tok) ++ " < " ++ show indent
                     return []
-            [] -> do
-                traceM "No tokens left for more bindings"
-                return []
+                | locToken tok == TWord "print" && locCol tok == 1 -> do
+                    -- End block when we see a non-indented print
+                    traceM "Let block ended due to top-level print"
+                    return []
+                | locCol tok == indent || locCol tok > indent -> do
+                    -- Continue parsing bindings at same or greater indentation
+                    if isValidName (locToken tok)
+                        then do
+                            traceM "Found another binding line"
+                            (n,v) <- parseSingleBindingLine
+                            rest <- parseMoreBindings indent
+                            return ((n,v):rest)
+                        else do
+                            traceM $ "No more bindings (token not a name): " ++ show tok
+                            return []
+                | otherwise -> do
+                    traceM $ "Let block ended due to other token: " ++ show tok
+                    return []
 
 parseTypeDefinition :: T.Text -> Parser Type
 parseTypeDefinition givenName = do

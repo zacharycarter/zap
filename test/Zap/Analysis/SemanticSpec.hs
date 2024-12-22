@@ -182,7 +182,7 @@ spec = do
         let ast = Program
               [ TLExpr $ Block $ BlockScope
                   { blockLabel = "test"
-                  , blockExprs = [Print (StrLit "Hello")]
+                  , blockExprs = [Call "print" [StrLit "Hello"]]
                   , blockResult = Just (NumLit Int32 "42")
                   }
               ]
@@ -197,7 +197,7 @@ spec = do
                   (TypeNum Int32)
                   (Block $ BlockScope
                     { blockLabel = "inner"
-                    , blockExprs = [Print (StrLit "Hello")]
+                    , blockExprs = [Call "print" [StrLit "Hello"]]
                     , blockResult = Just (Var "x")
                     })
               ]
@@ -210,7 +210,7 @@ spec = do
                   (TypeNum Int32)
                   (Block $ BlockScope
                     { blockLabel = "inner"
-                    , blockExprs = [Print (StrLit "Hello")]
+                    , blockExprs = [Call "print" [StrLit "Hello"]]
                     , blockResult = Just (StrLit "wrong type")
                     })
               ]

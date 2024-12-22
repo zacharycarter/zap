@@ -32,6 +32,8 @@ data Type
   | TypeBool
   | TypeStruct String [(String, Type)]  -- Name and fields
   | TypeArray Type                      -- Array of any type
+  | TypeVoid
+  | TypeAny
   deriving (Show, Eq)
 
 data Op
@@ -77,7 +79,6 @@ data Expr
   | BoolLit Bool
   | Var String
   | Let String Expr
-  | Print Expr
   | Block BlockScope
   | Break String
   | Result Expr

@@ -19,7 +19,6 @@ import Zap.IR.Conversion
 import Zap.IR.Core (IR)
 import Zap.Codegen.C (generateC, CGenError)
 import Zap.Analysis.Lexical (tokenize, Token, Located, LexError)
-import Zap.Parser.Translate (translateToAST, TranslateError)
 
 data CompileStage
   = Lexing
@@ -46,7 +45,6 @@ defaultCompileOptions = CompileOptions
 data CompileError
   = LexicalError LexError
   | ParserError ParseError
-  | TranslationError TranslateError
   | AnalysisError SemanticError
   | IRConversionError IRConversionError
   | GenerationError CGenError

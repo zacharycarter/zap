@@ -158,12 +158,6 @@ convertExpr expr = do
 
                 _ -> throwError $ InvalidType "Unsupported operation"
 
-        Print e -> do
-            traceM "Converting print expression"
-            converted <- convertExpr e
-            traceM $ "Print expression converted to: " ++ show converted
-            return $ IRPrint converted
-
         Block scope -> do
             traceM $ "Converting block: " ++ blockLabel scope
             exprs' <- mapM convertExpr (blockExprs scope)
@@ -197,6 +191,11 @@ convertExpr expr = do
             convertedExpr <- convertExpr expr
             traceM $ "Base expression converted: " ++ show convertedExpr
             return $ IRFieldAccess convertedExpr (T.pack field)
+
+        Call "print" [e] -> do
+            traceM "Converting print call"
+            convertedE <- convertExpr e
+            return $ IRPrint convertedE
 
         Call name args -> do
             traceM $ "Converting function call: " ++ name
@@ -258,6 +257,8 @@ convertType TypeBool = IRTypeBool
 convertType (TypeStruct name fields) =
     IRTypeStruct (T.pack name) [(T.pack n, convertType t) | (n, t) <- fields]
 convertType (TypeArray elemType) = IRTypeArray (convertType elemType)
+convertType TypeVoid = IRTypeVoid
+convertType TypeAny = IRTypeAny
 
 convertNumType :: NumType -> IRNumType
 convertNumType Int32 = IRInt32

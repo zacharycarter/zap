@@ -23,18 +23,44 @@ spec = do
 
     describe "Print Statements" $ do
       it "converts print with string literal" $ do
-        let ast = Program [TLExpr (Print (StrLit "Hello"))]
+        let ast = Program [TLExpr (Call "print" [StrLit "Hello"])]
         case convertToIR ast of
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
             exprs `shouldBe` [IRPrint (IRString "Hello")]
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
+      it "converts print with numeric expression" $ do
+        let ast = Program [TLExpr (Call "print" [BinOp Add
+                                  (NumLit Int32 "1")
+                                  (NumLit Int32 "2")])]
+        case convertToIR ast of
+          Right (IRProgram decls exprs) -> do
+            decls `shouldBe` []
+            exprs `shouldBe` [IRPrint (IRBinOp IRAdd
+                                     (IRNum IRInt32 "1")
+                                     (IRNum IRInt32 "2"))]
+          Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+      it "converts print with variable reference" $ do
+        let ast = Program [
+              TLExpr (Let "x" (NumLit Int32 "42")),
+              TLExpr (Call "print" [Var "x"])
+              ]
+        case convertToIR ast of
+          Right (IRProgram decls exprs) -> do
+            decls `shouldBe` []
+            length exprs `shouldBe` 2
+            case exprs of
+              [_, IRPrint (IRVar "x")] -> return ()
+              _ -> expectationFailure $ "Unexpected IR: " ++ show exprs
+          Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
     describe "Block Expressions" $ do
       it "converts simple block" $ do
         let ast = Program [TLExpr (Block $ BlockScope
               { blockLabel = "test"
-              , blockExprs = [Print (StrLit "Inside")]
+              , blockExprs = [Call "print" [StrLit "Inside"]]
               , blockResult = Nothing
               })]
         case convertToIR ast of
@@ -66,6 +92,23 @@ spec = do
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
     describe "Type Conversion" $ do
+      it "converts basic types" $ do
+        convertType (TypeNum Int32) `shouldBe` IRTypeNum IRInt32
+        convertType TypeString `shouldBe` IRTypeString
+        convertType TypeBool `shouldBe` IRTypeBool
+        convertType TypeVoid `shouldBe` IRTypeVoid
+        convertType TypeAny `shouldBe` IRTypeAny
+
+      it "handles print function type" $ do
+        let ast = Program [
+              TLExpr (Call "print" [StrLit "test"])
+              ]
+        case convertToIR ast of
+          Right (IRProgram _ exprs) -> do
+            case exprs of
+              [IRPrint (IRString "test")] -> return ()
+              _ -> expectationFailure $ "Unexpected IR: " ++ show exprs
+          Left err -> expectationFailure $ "Conversion failed: " ++ show err
       it "converts numeric types correctly" $ do
         let testCases =
               [ (TypeNum Int32, IRTypeNum IRInt32)

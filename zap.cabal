@@ -42,7 +42,6 @@ library
       Zap.Parser.Core
       Zap.Parser.Expr
       Zap.Parser.Program
-      Zap.Parser.Translate
       Zap.Parser.Types
   other-modules:
       Paths_zap
