@@ -29,6 +29,7 @@ library
       Syntax.Token
       Zap.Analysis.Allocation
       Zap.Analysis.AllocationOpt
+      Zap.Analysis.CFG
       Zap.Analysis.Lexical
       Zap.Analysis.Semantic
       Zap.AST
@@ -101,6 +102,7 @@ test-suite zap-test
       TestRunner
       Zap.Analysis.AllocationOptSpec
       Zap.Analysis.AllocationSpec
+      Zap.Analysis.CFGSpec
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
       Zap.Codegen.CSpec

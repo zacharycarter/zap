@@ -20,6 +20,7 @@ import Zap.IR.Core (IR)
 import Zap.Analysis.AllocationOpt (optimizeAllocations, OptimizationStats(..))
 import Zap.Codegen.C (generateC, CGenError)
 import Zap.Analysis.Lexical (tokenize, Token, Located, LexError)
+import Zap.Analysis.CFG
 
 data CompileStage
   = Lexing
