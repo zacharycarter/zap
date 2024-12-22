@@ -104,8 +104,8 @@ print 4 / 2
 
 ### Vector Operations
 ```zap
-let vec1 = Vec3 1.0 2.0 3.0
-let vec2 = Vec3 4.0 5.0 6.0
+let vec1 = Vec3(1.0, 2.0, 3.0)
+let vec2 = Vec3 4.0, 5.0, 6.0
 print (vec1 + vec2)
 ```
 
@@ -120,7 +120,7 @@ type
     x: Float32
     y: Float32
 
-let origin = Point 0.0 0.0
+let origin = Point 0.0, 0.0
 print origin.x
 ```
 
