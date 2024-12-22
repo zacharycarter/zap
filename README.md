@@ -117,8 +117,8 @@ print (vec1 + vec2)
 ```zap
 type
   Point = struct
-    x: Float32
-    y: Float32
+    x: f32
+    y: f32
 
 let origin = Point 5.0, 2.5
 print origin.x

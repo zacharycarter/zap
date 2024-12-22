@@ -192,24 +192,18 @@ parseType = do
     traceM "Parsing type"
     tok <- matchToken isValidName "type name"
     case locToken tok of
-        TWord "Float32" -> do
+        TWord "f32" -> do
             traceM "Recognized Float32"
             return $ TypeNum Float32
-        TWord "Float64" -> do
+        TWord "f64" -> do
             traceM "Recognized Float64"
             return $ TypeNum Float64
-        TWord "Int32"   -> do
+        TWord "i32"   -> do
             traceM "Recognized Int32"
             return $ TypeNum Int32
-        TWord "Int64"   -> do
+        TWord "i64"   -> do
             traceM "Recognized Int64"
             return $ TypeNum Int64
-        TWord "f32"     -> do
-            traceM "Recognized f32"
-            return $ TypeNum Float32
-        TWord "f64"     -> do
-            traceM "Recognized f64"
-            return $ TypeNum Float64
         TWord other     -> do
             traceM $ "Unrecognized type name: " ++ other
             throwError $ UnexpectedToken tok "type name"
