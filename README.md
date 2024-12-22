@@ -120,8 +120,12 @@ type
     x: Float32
     y: Float32
 
-let origin = Point 0.0, 0.0
+let origin = Point 5.0, 2.5
 print origin.x
+```
+
+``` shell
+5.000000
 ```
 
 ## Contributing
