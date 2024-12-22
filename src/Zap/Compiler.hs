@@ -16,16 +16,18 @@ import Zap.Parser.Program (parseProgram)
 import Zap.Parser.Core (ParseError(..))
 import Zap.Analysis.Semantic (analyze, SemanticError)
 import Zap.IR.Conversion
-import Zap.IR.Core (IR)
+import Zap.IR.Core (IR(..), IRExpr)
 import Zap.Analysis.AllocationOpt (optimizeAllocations, OptimizationStats(..))
 import Zap.Codegen.C (generateC, CGenError)
 import Zap.Analysis.Lexical (tokenize, Token, Located, LexError)
-import Zap.Analysis.CFG
+import Zap.Analysis.CFG (CFG, CFGError, buildCFG)
 
 data CompileStage
   = Lexing
   | Parsing
   | SemanticAnalysis
+  | IRConversion
+  | CFGAnalysis
   | IROptimization
   | CodeGeneration
   deriving (Show, Eq, Ord)
@@ -50,6 +52,7 @@ data CompileError
   | ParserError ParseError
   | AnalysisError SemanticError
   | IRConversionError IRConversionError
+  | CFGError CFGError
   | OptimizationError String
   | GenerationError CGenError
   deriving (Show, Eq)
@@ -59,12 +62,14 @@ data CompileResult = CompileResult
   , parsedAST :: Maybe [TopLevel]
   , program :: Maybe Program
   , analyzed :: Maybe Program
+  , irProgram :: Maybe IR
+  , cfg :: Maybe CFG
   , optimizationStats :: Maybe OptimizationStats
   , generatedCode :: Maybe T.Text
   } deriving (Show, Eq)
 
 emptyResult :: CompileResult
-emptyResult = CompileResult Nothing Nothing Nothing Nothing Nothing Nothing
+emptyResult = CompileResult Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 compile :: CompileOptions -> T.Text -> Either CompileError CompileResult
 compile opts source = do
@@ -100,30 +105,40 @@ compile opts source = do
       Nothing -> return astResult
     else return astResult
 
-  -- IR Generation and Optimization
-  irOptResult <- if targetStage opts >= IROptimization
+  -- IR Conversion
+  irResult <- if targetStage opts >= IRConversion
     then case analyzed semanticResult of
       Just prog -> do
         ir <- mapLeft IRConversionError $ convertToIR prog
-        case optimizeAllocations ir of
-          Right (optimizedIr, stats) ->
-            return $ semanticResult { optimizationStats = Just stats }
-          Left err -> Left $ OptimizationError (show err)
+        return $ semanticResult { irProgram = Just ir }
       Nothing -> return semanticResult
     else return semanticResult
 
+  -- CFG Analysis
+  cfgResult <- if targetStage opts >= CFGAnalysis
+    then case irProgram irResult of
+      Just (IRProgram _ exprs) -> do
+        cfg <- mapLeft CFGError $ buildCFG exprs
+        return $ irResult { cfg = Just cfg }
+      Nothing -> return irResult
+    else return irResult
+
+  -- IR Optimization
+  irOptResult <- if targetStage opts >= IROptimization
+    then case irProgram cfgResult of
+      Just ir ->
+        case optimizeAllocations ir of
+          Right (optimizedIr, stats) ->
+            return $ cfgResult { optimizationStats = Just stats }
+          Left err -> Left $ OptimizationError (show err)
+      Nothing -> return cfgResult
+    else return cfgResult
+
   -- Code Generation
   if targetStage opts >= CodeGeneration
-    then case analyzed semanticResult of
-      Just prog -> do
-        ir <- mapLeft IRConversionError $ convertToIR prog
-        -- Apply optimizations if enabled
-        finalIr <- if optimizationLevel opts > 0
-          then case optimizeAllocations ir of
-            Right (optimized, _) -> Right optimized
-            Left err -> Left $ OptimizationError (show err)
-          else Right ir
-        code <- mapLeft GenerationError $ generateC finalIr
+    then case irProgram irOptResult of
+      Just ir -> do
+        code <- mapLeft GenerationError $ generateC ir
         return $ irOptResult { generatedCode = Just code }
       Nothing -> return irOptResult
     else return irOptResult
