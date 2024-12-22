@@ -99,6 +99,7 @@ test-suite zap-test
   main-is: Spec.hs
   other-modules:
       TestRunner
+      Zap.Analysis.AllocationOptSpec
       Zap.Analysis.AllocationSpec
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
