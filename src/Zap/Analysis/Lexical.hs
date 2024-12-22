@@ -9,6 +9,8 @@ module Zap.Analysis.Lexical
   , LexError(..)
   ) where
 
+import Control.Monad (when)
+import Control.Monad.Except
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (isAlpha, isAlphaNum, isDigit)
@@ -25,6 +27,7 @@ data Token
   | TVec String        -- Vector constructors
   | TEquals            -- Assignment operator
   | TDot               -- Struct field access
+  | TComment String    -- Single-line comment
   | TType              -- Type keyword
   | TStruct            -- Struct keyword
   | TEOF               -- End of file
@@ -46,78 +49,132 @@ data LexError
   | InvalidCharacter Char Int Int -- Character, line, and column
   deriving (Show, Eq)
 
+data LexerState = LexerState
+  { inVectorLit :: Bool
+  , lastToken :: String
+  } deriving (Show, Eq)
+
+initialLexerState :: LexerState
+initialLexerState = LexerState False ""
+
 -- Main tokenize function
 tokenize :: Text -> Either LexError [Located]
 tokenize input = scanTokens 1 1 (T.unpack input)
 
--- Token scanner
+-- Token scanner with state
 scanTokens :: Int -> Int -> String -> Either LexError [Located]
-scanTokens line col [] = do
+scanTokens = scanTokensWithState initialLexerState
+
+scanTokensWithState :: LexerState -> Int -> Int -> String -> Either LexError [Located]
+scanTokensWithState state line col [] = do
     traceM $ "scanTokens: Reached end of input at line " ++ show line ++ ", col " ++ show col
     Right [Located TEOF col line]
 
-scanTokens line col (c:cs) = do
+scanTokensWithState state line col (c:cs) = do
     traceM $ "scanTokens: Processing character '" ++ [c] ++ "' at line " ++ show line ++ ", col " ++ show col
     case c of
+        '#' -> do
+            traceM $ "scanTokens: Found comment at line " ++ show line ++ ", col " ++ show col
+            let (comment, rest) = span (/= '\n') cs
+            traceM $ "scanTokens: Comment content: " ++ comment
+            case rest of
+                '\n':rs -> scanTokensWithState state (line + 1) 1 rs
+                [] -> Right [Located TEOF col line]
+                rs -> scanTokensWithState state line (col + length comment + 1) rs
+
         '(' -> do
             traceM $ "scanTokens: Found left paren at line " ++ show line ++ ", col " ++ show col
-            rest <- scanTokens line (col + 1) cs
+            let newState = state { inVectorLit = lastToken state `elem` ["Vec2", "Vec3", "Vec4"] }
+            rest <- scanTokensWithState newState line (col + 1) cs
             Right (Located TLeftParen col line : rest)
+
         ')' -> do
             traceM $ "scanTokens: Found right paren at line " ++ show line ++ ", col " ++ show col
-            rest <- scanTokens line (col + 1) cs
+            let newState = state { inVectorLit = False }
+            rest <- scanTokensWithState newState line (col + 1) cs
             Right (Located TRightParen col line : rest)
+
+        -- ',' -> do
+        --     traceM $ "Found comma at line " ++ show line ++ ", col " ++ show col
+        --     traceM $ "Vector literal context: " ++ show (inVectorLit state)
+        --     traceM $ "Next char: " ++ take 1 (show cs)
+
+        --     let noSpaceAfterComma = null cs || not (isSpace (head cs))
+        --     if inVectorLit state || noSpaceAfterComma
+        --         then do
+        --             traceM "Accepting comma"
+        --             rest <- scanTokensWithState state line (col + 1) cs
+        --             Right (Located TComma col line : rest)
+        --         else do
+        --             traceM "Rejecting comma - requires space after"
+        --             throwError $ InvalidCharacter ',' line col
+
         ',' -> do
-            traceM $ "scanTokens: Found comma at line " ++ show line ++ ", col " ++ show col
-            rest <- scanTokens line (col + 1) cs
-            Right (Located TComma col line : rest)
+            traceM $ "Found comma at line " ++ show line ++ ", col " ++ show col
+            let skipWhitespace = dropWhile isSpace cs
+            case skipWhitespace of
+                ',':_ -> do
+                    let errorCol = col + (length $ takeWhile isSpace cs)
+                    throwError $ InvalidCharacter ',' line errorCol
+                _ -> do
+                    rest <- scanTokensWithState state line (col + 1) cs
+                    Right (Located TComma col line : rest)
+
         '.' -> do
             traceM $ "scanTokens: Found field access dot at line " ++ show line ++ ", col " ++ show col
-            rest <- scanTokens line (col + 1) cs
+            rest <- scanTokensWithState state line (col + 1) cs
             Right (Located TDot col line : rest)
+
         ':' -> do
             traceM $ "scanTokens: Found colon at line " ++ show line ++ ", col " ++ show col
-            rest <- scanTokens line (col + 1) cs
+            rest <- scanTokensWithState state line (col + 1) cs
             Right (Located TColon col line : rest)
-        '"' -> do  -- Add this case
+
+        '"' -> do
             traceM $ "scanTokens: Starting string literal"
             lexString line col "" cs
+
         _ | isSpace c -> do
             traceM $ "scanTokens: Processing whitespace"
             case c of
-                '\n' -> scanTokens (line + 1) 1 cs
-                _ -> scanTokens line (col + 1) cs
+                '\n' -> scanTokensWithState state (line + 1) 1 cs
+                _ -> scanTokensWithState state line (col + 1) cs
+
         _ | isOperator c -> do
             traceM $ "scanTokens: Starting operator"
-            lexOperator line col [c] cs
+            lexOperator line col [c] cs state  -- Pass state to lexOperator
+
         _ | isDigit c -> do
             traceM $ "scanTokens: Starting number"
             lexNumber line col [c] cs
+
         _ | isAlpha c -> do
             traceM $ "scanTokens: Starting word"
             lexWord line col [c] cs
+
         _ -> Left $ InvalidCharacter c line col
 
--- Lexer for operators
-lexOperator :: Int -> Int -> String -> String -> Either LexError [Located]
-lexOperator line col acc [] = do
-    traceM $ "lexOperator: End of input with operator: " ++ show acc
-    let tok = case reverse acc of
-            "=" -> Located TEquals col line
-            op -> Located (TOperator op) col line
-    Right [tok, Located TEOF (col + length acc) line]
-
-lexOperator line col acc (c:cs)
-    | isOperator c = do
-        traceM $ "lexOperator: Found operator char: " ++ [c] ++ " with accumulated: " ++ show acc
-        lexOperator line col (c:acc) cs
-    | otherwise = do
-        traceM $ "lexOperator: Non-operator char: " ++ [c] ++ " with accumulated: " ++ show acc
-        let tok = case reverse acc of
-              "=" -> Located TEquals col line
-              op -> Located (TOperator op) col line
-        rest <- scanTokens line (col + length acc) (c:cs)
-        Right (tok : rest)
+lexOperator :: Int -> Int -> String -> String -> LexerState -> Either LexError [Located]
+lexOperator line col acc cs state = do
+    case cs of
+        [] -> do
+            let tok = case reverse acc of
+                    "=" -> Located TEquals col line
+                    op -> Located (TOperator op) col line
+            Right [tok, Located TEOF (col + length acc) line]
+        (c:rest)
+            | isOperator c -> lexOperator line col (c:acc) rest state
+            | c == '(' && reverse acc `elem` ["Vec2", "Vec3", "Vec4"] -> do
+                let newState = state { inVectorLit = True }
+                rest' <- scanTokensWithState newState line (col + length acc + 1) rest
+                let tok = Located (TVec (reverse acc)) col line
+                Right (tok : Located TLeftParen (col + length acc) line : rest')
+            | otherwise -> do
+                let tok = case reverse acc of
+                        "=" -> Located TEquals col line
+                        op -> Located (TOperator op) col line
+                rest' <- scanTokensWithState state line (col + length acc) (c:rest)
+                Right (tok : rest')
 
 isOperator :: Char -> Bool
 isOperator c = c `elem` ("+-*/<>=&|" :: String)

@@ -87,3 +87,22 @@ spec = do
     it "handles unterminated strings" $ do
       let input = T.pack "print \"unterminated"
       tokenize input `shouldBe` Left (UnterminatedString 1 7)
+
+    it "reports error for malformed vector literal" $ do
+      let input = T.pack "Vec3(1.0, , 3.0)"  -- Missing middle component
+      tokenize input `shouldBe` Left (InvalidCharacter ',' 1 10)
+
+    it "tracks position correctly with comments" $ do
+      let input = T.unlines
+            [ "# This is a comment"
+            , "print \"Hello\"  # End comment"
+            ]
+      case tokenize input of
+        Right tokens ->
+          let printTok = head tokens
+          in locLine printTok `shouldBe` 2
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+
+    it "handles errors after unterminated string" $ do
+      let input = T.pack "print \"unterminated\nprint \"next\""
+      tokenize input `shouldBe` Left (UnterminatedString 1 7)
