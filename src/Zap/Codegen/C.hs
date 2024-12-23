@@ -168,8 +168,12 @@ generateTypedExpr irExpr = do
             case baseType of
                 IRTypeStruct sName fields ->
                     case lookup field fields of
-                        Just fType -> return (T.concat [baseVal, ".", field], fType)
-                        Nothing -> throwError $ UnsupportedType IRTypeString
+                        Just fType -> do
+                            traceM $ "Accessing field " ++ T.unpack field ++ " of type " ++ show fType
+                            return (T.concat [baseVal, ".", field], fType)
+                        Nothing -> do
+                            traceM $ "Field " ++ T.unpack field ++ " not found in struct " ++ T.unpack sName
+                            throwError $ UnsupportedType (IRTypeStruct sName [])
 
                 IRTypeVec (IRVec3 IRFloat32) -> do
                     let compIndex = case field of
@@ -210,21 +214,16 @@ generateTypedExpr irExpr = do
             return (T.concat [typeStr, " ", name, " = ", valExpr, ";"], valType)
 
         IRPrint printExpr -> do
+            traceM $ "Generating print statement for expr: " ++ show printExpr
             (val, typ) <- generateTypedExpr printExpr
+            traceM $ "Print expression generated with type: " ++ show typ
             fmt <- getPrintfFormat typ
-            case typ of
-                IRTypeVec (IRVec3 _) ->
-                    return (T.concat ["printf(\"", fmt, "\\n\", ", val, ".x, ", val, ".y, ", val, ".z);"], typ)
-                IRTypeVec (IRVec4 _) ->
-                    return (T.concat ["printf(\"", fmt, "\\n\", ",
-                                      -- For IRVec4 we did not store as struct with .x, .y...
-                                      -- but we extracted components with IRFieldAccess if needed.
-                                      -- If we need to print vector directly, handle similarly:
-                                      -- Let's assume we can't print IRVec4 directly without error
-                                      -- This code may never run for IRVec4 print in the tests
-                                      val, ");"], typ)
-                _ ->
-                    return (T.concat ["printf(\"", fmt, "\\n\", ", val, ");"], typ)
+            traceM $ "Selected printf format: " ++ show fmt
+            let printStmt = case typ of
+                    IRTypeVec (IRVec3 _) -> T.concat ["printf(\"", fmt, "\\n\", ", val, ".x, ", val, ".y, ", val, ".z)"]
+                    IRTypeVec (IRVec4 _) -> T.concat ["printf(\"", fmt, "\\n\", ", val, ")"]
+                    _ -> T.concat ["printf(\"", fmt, "\\n\", ", val, ")"]
+            return (printStmt, IRTypeVoid)
 
         IRBlockAlloc name exprs mResult -> do
             stmts <- mapM generateStmt exprs
@@ -235,27 +234,48 @@ generateTypedExpr irExpr = do
                 Nothing -> return ("", IRTypeNum IRInt32)
             return (T.unlines stmts <> fst res, snd res)
 
-        IRCall fname args -> do
-            traceM $ "Generating function call: " ++ show fname
+        IRCall name args -> do
+            traceM $ "Generating function call: " ++ T.unpack name
             state <- get
             argVals <- mapM generateTypedExpr args
-            let argStrs = map fst argVals
-                argTypes = map snd argVals
+            case (M.lookup name (varEnv state), M.lookup name (funcEnv state)) of
+                -- Struct constructor case
+                (Just (IRTypeStruct sName fields), _) -> do
+                    let fieldNames = map fst fields
+                    let argStrs = map fst argVals
+                    let initStrs = T.intercalate ", " $
+                          zipWith (\f v -> f <> ": " <> v) fieldNames argStrs
+                    return ("(" <> name <> "_t){" <> initStrs <> "}", IRTypeStruct name fields)
 
-            (returnType, paramTypes) <- case M.lookup fname (funcEnv state) of
-                Just sig -> return sig
+                -- Regular function call case
+                (_, Just (retType, _)) -> do
+                    let argStrs = map fst argVals
+                    let callExpr = T.concat [name, "(", T.intercalate ", " argStrs, ")"]
+                    return (callExpr, retType)
+
+                -- Unknown function - maintain existing function environment
+                _ -> do
+                    traceM $ "Unknown function: " ++ T.unpack name
+                    let argStrs = map fst argVals
+                    let callExpr = T.concat [name, "(", T.intercalate ", " argStrs, ")"]
+                    -- Return IRTypeAny since we don't know the return type
+                    return (callExpr, IRTypeAny)
+        IRCall name args -> do
+            traceM $ "Generating function call: " ++ T.unpack name
+            state <- get
+            argVals <- mapM generateTypedExpr args
+            case M.lookup name (varEnv state) of
+                Just (IRTypeStruct sName fields) -> do
+                    -- Use actual field names from struct definition
+                    let fieldNames = map fst fields
+                    let argStrs = map fst argVals
+                    let initStrs = T.intercalate ", " $
+                          zipWith (\f v -> f <> ": " <> v) fieldNames argStrs
+                    return ("(" <> name <> "_t){" <> initStrs <> "}", IRTypeStruct name fields)
+                Just _ -> throwError $ UnsupportedType IRTypeString
                 Nothing -> do
-                    traceM $ "Function " ++ show fname ++ " not found in environment"
+                    traceM $ "Unknown function: " ++ T.unpack name
                     throwError $ UnsupportedType IRTypeString
-
-            when (length argTypes /= length paramTypes) $
-                throwError $ UnsupportedOperation IRAdd IRTypeString IRTypeString
-
-            forM_ (zip argTypes paramTypes) $ \(argType, paramType) ->
-                when (argType /= paramType) $
-                    throwError $ UnsupportedOperation IRAdd argType paramType
-
-            return (T.concat [fname, "(", T.intercalate ", " argStrs, ")"], returnType)
 
         _ -> throwError $ UnsupportedType IRTypeString
 
@@ -305,6 +325,7 @@ generateStmt irExpr = do
                 return $ T.concat ["    ", tmpName, ".", fn, " = ", fv, ";"]
             return $ T.concat ["    ", cType, " ", tmpName, ";\n", T.unlines stmts]
 
+        
         IRFieldAccess base f -> do
             (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    " <> val <> ";"
@@ -392,7 +413,8 @@ generateStructDef :: IRDecl -> Codegen Text
 generateStructDef (IRStruct name fields) = do
     fieldDefs <- mapM generateField fields
     let structName = name <> T.pack "_t"
-    modify $ \s -> s { structDefs = structName : structDefs s }
+    modify $ \s -> s { structDefs = structName : structDefs s,
+                      varEnv = M.insert name (IRTypeStruct name fields) (varEnv s) }
 
 
     -- Generate constructor function parameters with proper type conversion

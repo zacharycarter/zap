@@ -23,6 +23,7 @@ data IRConversionError
   = UnsupportedExpression String
   | InvalidType String
   | UnknownVariable String
+  | TypeMismatch String
   deriving (Show, Eq)
 
 type IRConverter = ExceptT IRConversionError (State IRGenState)
@@ -47,6 +48,7 @@ convertProgram (Program tops) = do
     -- Process type declarations first to build environment
     forM_ tops $ \case
         TLType name typ@(TypeStruct sName fields) -> do
+            traceM $ "Adding struct type to environment: " ++ show sName
             let irFields = [(T.pack fn, convertType ft) | (fn, ft) <- fields]
             modify $ \s -> s { varEnvironment = M.insert sName (IRTypeStruct (T.pack sName) irFields) (varEnvironment s) }
         _ -> return ()
@@ -85,120 +87,201 @@ convertDecl (DStruct name fields) = do
 
 convertExpr :: Expr -> IRConverter IRExpr
 convertExpr expr = do
-    traceM $ "\nConverting expression: " ++ show expr
-    let withMetadata node typ effects = IRExpr
-          { metadata = IRMetadata
+    traceM $ "\n=== Converting Expression ==="
+    traceM $ "Input expression: " ++ show expr
+
+    let withMetadata node typ effects = do
+          traceM $ "\nCreating metadata:"
+          traceM $ "  Node: " ++ show node
+          traceM $ "  Type: " ++ show typ
+          traceM $ "  Effects: " ++ show effects
+          return $ IRExpr
+            { metadata = IRMetadata
               { exprType = typ
               , metaEffects = effects
               , metaSourcePos = Nothing
               }
-          , expr = node
-          }
-
-    let withPureEffect node typ =
-          withMetadata node typ (S.singleton PureEffect)
+            , expr = node
+            }
 
     case expr of
         StrLit s -> do
             traceM "Converting string literal"
-            return $ withPureEffect (IRString (T.pack s)) IRTypeString
+            withMetadata (IRString (T.pack s)) IRTypeString (S.singleton PureEffect)
 
         NumLit numType val -> do
             traceM $ "Converting numeric literal: " ++ val
-            let irNum = IRNum (convertNumType numType) (T.pack val)
-            return $ withPureEffect irNum (IRTypeNum (convertNumType numType))
+            traceM $ "Numeric type: " ++ show numType
+            let irType = IRTypeNum (convertNumType numType)
+            withMetadata (IRNum (convertNumType numType) (T.pack val)) irType (S.singleton PureEffect)
 
         BoolLit b -> do
             traceM $ "Converting boolean literal: " ++ show b
-            return $ withPureEffect (IRBool b) IRTypeBool
+            withMetadata (IRBool b) IRTypeBool (S.singleton PureEffect)
 
-        -- For block results, preserve IRTypeAny
         Block scope -> do
-            traceM $ "Converting block: " ++ blockLabel scope
+            traceM $ "\nConverting block: " ++ blockLabel scope
+            traceM $ "Block expressions count: " ++ show (length $ blockExprs scope)
             convertedExprs <- mapM convertExpr (blockExprs scope)
+            forM_ convertedExprs $ \expr ->
+                traceM $ "Block expression type: " ++ show (exprType $ metadata expr)
+
             convertedResult <- mapM convertExpr (blockResult scope)
-            return $ withMetadata
+            forM_ convertedResult $ \result ->
+                traceM $ "Block result type: " ++ show (exprType $ metadata result)
+
+            let blockType = case (convertedExprs, convertedResult) of
+                    ([], Nothing) -> IRTypeNum IRInt32
+                    (exprs, Nothing) -> exprType $ metadata $ last exprs
+                    (_, Just result) -> exprType $ metadata result
+
+            traceM $ "Final block type: " ++ show blockType
+            withMetadata
                 (IRBlockAlloc (T.pack $ blockLabel scope) convertedExprs convertedResult)
-                IRTypeAny  -- Use IRTypeAny for block results
+                blockType
                 (inferBlockEffects convertedExprs convertedResult)
 
         Result expr -> do
-            traceM "Converting result expression"
+            traceM "\nConverting result expression"
             converted <- convertExpr expr
-            let typ = exprType (metadata converted)
-            return $ withMetadata (IRResult converted) typ (metaEffects $ metadata converted)
+            let resultType = exprType (metadata converted)
+            traceM $ "Result expression type: " ++ show resultType
+            withMetadata
+                (IRResult converted)
+                resultType
+                (metaEffects $ metadata converted)
 
         If cond thenExpr elseExpr -> do
-            traceM "Converting if expression"
+            traceM "\nConverting if expression"
             convertedCond <- convertExpr cond
+            traceM $ "Condition type: " ++ show (exprType $ metadata convertedCond)
             convertedThen <- convertExpr thenExpr
+            traceM $ "Then branch type: " ++ show (exprType $ metadata convertedThen)
             convertedElse <- convertExpr elseExpr
-            let typ = exprType (metadata convertedThen)
-            let effects = S.unions [
-                    metaEffects $ metadata convertedCond,
-                    metaEffects $ metadata convertedThen,
-                    metaEffects $ metadata convertedElse
-                    ]
-            return $ withMetadata
+            traceM $ "Else branch type: " ++ show (exprType $ metadata convertedElse)
+
+            let resultType = exprType $ metadata convertedThen
+            let combinedEffects = S.unions [
+                  metaEffects $ metadata convertedCond,
+                  metaEffects $ metadata convertedThen,
+                  metaEffects $ metadata convertedElse
+                  ]
+            let effects = if S.null (S.delete PureEffect combinedEffects)
+                         then S.singleton PureEffect
+                         else combinedEffects
+
+            traceM $ "Selected if expression type: " ++ show resultType
+            withMetadata
                 (IRIf convertedCond convertedThen convertedElse)
-                typ
+                resultType
                 effects
 
-        -- For binary operations, always use IRTypeAny
         BinOp op e1 e2 -> do
-            traceM $ "Converting binary operation: " ++ show op
+            traceM $ "\nConverting binary operation: " ++ show op
             converted1 <- convertExpr e1
+            traceM $ "Left operand type: " ++ show (exprType $ metadata converted1)
             converted2 <- convertExpr e2
-            -- Validate operand types first
-            validateBinaryOp op converted1 converted2
-            return $ withMetadata
+            traceM $ "Right operand type: " ++ show (exprType $ metadata converted2)
+            resultType <- getBinOpType (convertOp op) converted1 converted2
+            traceM $ "Binary operation result type: " ++ show resultType
+            withMetadata
                 (IRBinOp (convertOp op) converted1 converted2)
-                IRTypeAny  -- Always use IRTypeAny for binary ops
+                resultType
                 (S.singleton PureEffect)
 
-        Call "print" [e] -> do
-            traceM "Converting print call"
-            convertedE <- convertExpr e
-            return $ withMetadata
-                (IRPrint convertedE)
-                IRTypeAny
+        Call "print" [arg] -> do
+            traceM "\nConverting print call"
+            convertedArg <- convertExpr arg
+            traceM $ "Print argument type: " ++ show (exprType $ metadata convertedArg)
+            withMetadata
+                (IRPrint convertedArg)
+                IRTypeVoid
                 (S.singleton IOEffect)
 
         Call fname args -> do
-            traceM $ "Converting function call: " ++ show fname
+            traceM $ "\nConverting function call: " ++ fname
+            traceM $ "Argument count: " ++ show (length args)
+            state <- get
             convertedArgs <- mapM convertExpr args
-            (node, (typ, effects)) <- case fname of
-                "Vec2" -> return (IRVec (IRVec2 IRFloat32) convertedArgs,
-                                (IRTypeVec (IRVec2 IRFloat32), S.singleton PureEffect))
-                "Vec3" -> return (IRVec (IRVec3 IRFloat32) convertedArgs,
-                                (IRTypeVec (IRVec3 IRFloat32), S.singleton PureEffect))
-                "Vec4" -> return (IRVec (IRVec4 IRFloat32) convertedArgs,
-                                (IRTypeVec (IRVec4 IRFloat32), S.singleton PureEffect))
-                _ -> return (IRCall (T.pack fname) convertedArgs,
-                           inferCallType fname convertedArgs)
-            return $ withMetadata node typ effects
+            forM_ (zip [1..] convertedArgs) $ \(i, arg) ->
+                traceM $ "Argument " ++ show i ++ " type: " ++ show (exprType $ metadata arg)
+
+            state <- get
+            traceM $ "Looking up struct type for " ++ fname
+            traceM $ "Current environment: " ++ show (varEnvironment state)
+
+            case M.lookup fname (varEnvironment state) of
+                Just structType ->
+                    withMetadata
+                        (IRCall (T.pack fname) convertedArgs)
+                        structType
+                        (S.singleton PureEffect)
+                Nothing -> do
+                    let (resultType, effects) = inferCallType fname convertedArgs
+                    traceM $ "Inferred call type: " ++ show resultType
+                    traceM $ "Inferred effects: " ++ show effects
+
+                    case fname of
+                        "Vec2" -> withMetadata (IRVec (IRVec2 IRFloat32) convertedArgs)
+                                             (IRTypeVec (IRVec2 IRFloat32))
+                                             (S.singleton PureEffect)
+                        "Vec3" -> withMetadata (IRVec (IRVec3 IRFloat32) convertedArgs)
+                                             (IRTypeVec (IRVec3 IRFloat32))
+                                             (S.singleton PureEffect)
+                        "Vec4" -> withMetadata (IRVec (IRVec4 IRFloat32) convertedArgs)
+                                             (IRTypeVec (IRVec4 IRFloat32))
+                                             (S.singleton PureEffect)
+                        _ -> withMetadata (IRCall (T.pack fname) convertedArgs)
+                                         resultType
+                                         effects
 
         Let name val -> do
-            traceM $ "Converting let binding: " ++ name
+            traceM $ "\nConverting let binding: " ++ name
             convertedVal <- convertExpr val
-            modify $ \s -> s { varEnvironment = M.insert name (exprType $ metadata convertedVal) (varEnvironment s) }
-            return $ withMetadata
+            let valType = exprType $ metadata convertedVal
+            traceM $ "Let binding value type: " ++ show valType
+
+            modify $ \s -> s { varEnvironment = M.insert name valType (varEnvironment s) }
+            withMetadata
                 (IRLetAlloc (T.pack name) convertedVal IRAllocDefault)
-                (exprType $ metadata convertedVal)
+                valType
                 (S.insert WriteEffect $ metaEffects $ metadata convertedVal)
 
         Var name -> do
-            traceM $ "Converting variable reference: " ++ name
+            traceM $ "\nConverting variable reference: " ++ name
             state <- get
             case M.lookup name (varEnvironment state) of
-                Nothing -> throwError $ UnknownVariable name
-                Just t -> return $ withMetadata
-                    (IRVar (T.pack name))
-                    t
-                    (S.singleton ReadEffect)
+                Nothing -> do
+                    traceM $ "ERROR: Unknown variable: " ++ name
+                    throwError $ UnknownVariable name
+                Just t -> do
+                    traceM $ "Found variable type: " ++ show t
+                    withMetadata
+                        (IRVar (T.pack name))
+                        t
+                        (S.singleton ReadEffect)
+
+        FieldAccess expr field -> do
+            traceM $ "\nConverting field access expression: " ++ field
+            convertedBase <- convertExpr expr
+            traceM $ "Base expression type: " ++ show (exprType $ metadata convertedBase)
+            case exprType (metadata convertedBase) of
+                IRTypeStruct name fields -> do
+                    traceM $ "Found struct type " ++ show name ++ " with fields: " ++ show fields
+                    case lookup (T.pack field) fields of
+                        Just fieldType -> do
+                            traceM $ "Found field type: " ++ show fieldType
+                            withMetadata
+                                (IRFieldAccess convertedBase (T.pack field))
+                                fieldType
+                                (S.singleton ReadEffect)
+                        Nothing -> throwError $ InvalidType $ "Field not found: " ++ field
+                other -> do
+                    traceM $ "Not a struct type: " ++ show other
+                    throwError $ InvalidType "Field access on non-struct type"
 
         _ -> do
-            traceM $ "Encountered unsupported expression type: " ++ show expr
+            traceM $ "\nERROR: Unsupported expression: " ++ show expr
             throwError $ UnsupportedExpression "Unsupported expression type"
 
 validateBinaryOp :: Op -> IRExpr -> IRExpr -> IRConverter ()
@@ -259,19 +342,26 @@ convertVecType (Vec3 nt) = IRVec3 (convertNumType nt)
 convertVecType (Vec4 nt) = IRVec4 (convertNumType nt)
 
 -- Helper functions for type and effect inference
-getBinOpType :: IROp -> IRExpr -> IRExpr -> IRType
-getBinOpType op e1 e2 =
-    -- For arithmetic operations, we should always return IRTypeAny
-    -- to match test expectations and allow for proper type propagation
-    case op of
-        IRAdd -> IRTypeAny
-        IRSub -> IRTypeAny
-        IRMul -> IRTypeAny
-        IRDiv -> IRTypeAny
-        IRDot -> case (exprType $ metadata e1, exprType $ metadata e2) of
-            (IRTypeVec v1, IRTypeVec v2) | v1 == v2 -> IRTypeNum IRFloat32
-            _ -> IRTypeAny
-        _ -> IRTypeAny
+getBinOpType :: IROp -> IRExpr -> IRExpr -> IRConverter IRType
+getBinOpType op e1 e2 = case (op, exprType $ metadata e1, exprType $ metadata e2) of
+    (IRAdd, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return $ IRTypeNum t1
+    (IRSub, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return $ IRTypeNum t1
+    (IRMul, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return $ IRTypeNum t1
+    (IRDiv, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return $ IRTypeNum t1
+    (IRAdd, IRTypeVec v1, IRTypeVec v2) | v1 == v2 ->
+        return $ IRTypeVec v1
+    (IRDot, IRTypeVec v1, IRTypeVec v2) | v1 == v2 ->
+        return $ case v1 of
+            IRVec2 t -> IRTypeNum t
+            IRVec3 t -> IRTypeNum t
+            IRVec4 t -> IRTypeNum t
+    _ -> throwError $ InvalidType $ "Type mismatch in binary operation: " ++
+         show (exprType $ metadata e1) ++ " and " ++
+         show (exprType $ metadata e2)
 
 mergeNumericTypes :: IRType -> IRType -> IRType
 mergeNumericTypes (IRTypeNum t1) (IRTypeNum t2) | t1 == t2 = IRTypeNum t1

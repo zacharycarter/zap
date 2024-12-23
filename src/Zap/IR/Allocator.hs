@@ -14,6 +14,7 @@ import qualified Data.Map.Strict as M
 import Control.Monad.State
 import Control.Monad.Except
 import Zap.IR.Core
+import Debug.Trace
 
 -- | Types of allocation
 data AllocKind
@@ -125,6 +126,7 @@ allocateExpr expr@(IRExpr meta node) = do
     let wrap newNode = IRExpr meta { metaEffects = updateEffects expr newNode } newNode
 
     -- Handle each expression type
+    traceM $ "Adding allocation to expression: " ++ show expr
     case node of
         IRNum t val ->
             return $ wrap node  -- Numeric literals don't need allocation

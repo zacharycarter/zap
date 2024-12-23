@@ -7,6 +7,7 @@ import qualified Data.Map.Strict as M
 import Control.Monad.State
 import Control.Monad.Except
 import Data.List (sort)
+import Debug.Trace
 
 import Zap.IR.Core
 import Zap.Analysis.AllocationOpt
@@ -68,6 +69,7 @@ checkVectorAlignment other =
 
 checkParameterOrder :: IRDecl -> Expectation
 checkParameterOrder (IRFunc _ params _ _) = do
+  traceM $ "checking parameter order for params: " ++ show params
   -- Verify that vector parameters come first (for alignment)
   let (vectors, rest) = span (isVectorType . snd) params
   not (null vectors) `shouldBe` True

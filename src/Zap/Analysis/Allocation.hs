@@ -178,6 +178,12 @@ analyzeExpr (IRExpr meta node) = do
             mResult' <- mapM analyzeExpr mResult
             return $ wrap $ IRBlock name exprs' mResult'
 
+        IRLetAlloc name expr strat -> do
+          traceM $ "Analyzing let binding allocation: " ++ show name ++ " for expression: " ++ show expr ++ " with strategy: " ++ show strat
+          validateAllocation (exprType (metadata expr)) strat
+          trackAllocation name strat
+          return $ wrap $ IRLetAlloc name expr strat
+
         IRBlockAlloc name exprs mResult -> do
             let isArena = name == "arena"
             when isArena $ do
