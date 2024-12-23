@@ -25,8 +25,6 @@ source-repository head
 library
   exposed-modules:
       Lib
-      Syntax.Lexer
-      Syntax.Token
       Zap.Analysis.Allocation
       Zap.Analysis.AllocationOpt
       Zap.Analysis.CFG
@@ -99,7 +97,6 @@ test-suite zap-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      TestRunner
       Zap.Analysis.AllocationOptSpec
       Zap.Analysis.AllocationSpec
       Zap.Analysis.CFGSpec
