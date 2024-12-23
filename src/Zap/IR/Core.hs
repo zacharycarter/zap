@@ -2,28 +2,35 @@
 module Zap.IR.Core
   ( IR(..)
   , IRExpr(..)
+  , IRExprNode(..)
   , IROp(..)
   , IRType(..)
   , IRDecl(..)
   , IRNumType(..)
   , IRVecType(..)
   , IRAllocStrat(..)
+  , IRMetadata(..)
+  , Effect(..)
+  , mkPureExpr
+  , mkEffectfulExpr
+  , getMetadata
   ) where
 
 import qualified Data.Text as T
+import qualified Data.Set as S
 
 data IRNumType
   = IRInt32
   | IRInt64
   | IRFloat32
   | IRFloat64
-  deriving (Eq, Show, Ord)  -- Added Ord
+  deriving (Eq, Show, Ord)
 
 data IRVecType
   = IRVec2 IRNumType
   | IRVec3 IRNumType
   | IRVec4 IRNumType
-  deriving (Eq, Show, Ord)  -- Added Ord
+  deriving (Eq, Show, Ord)
 
 data IRType
   = IRTypeNum IRNumType
@@ -49,7 +56,6 @@ instance Ord IRType where
   compare (IRTypeArray t1) (IRTypeArray t2) = compare t1 t2
   compare IRTypeVoid IRTypeVoid = EQ
   compare IRTypeAny IRTypeAny = EQ
-
   -- Define total ordering between different constructors
   compare (IRTypeNum _) _ = LT
   compare _ (IRTypeNum _) = GT
@@ -73,9 +79,31 @@ data IROp
   | IRDiv
   | IRDot
   | IRCross
-  deriving (Show, Eq, Ord)  -- Added Ord
+  deriving (Show, Eq, Ord)
 
-data IRExpr
+-- | Effects that expressions can have
+data Effect
+  = ReadEffect      -- Reads from variables
+  | WriteEffect     -- Writes to variables
+  | IOEffect        -- Performs IO
+  | PureEffect      -- Has no effects
+  deriving (Eq, Ord, Show)
+
+-- | Expression metadata
+data IRMetadata = IRMetadata
+  { exprType :: IRType             -- Type of the expression
+  , metaEffects :: S.Set Effect    -- Effects this expression may have
+  , metaSourcePos :: Maybe (Int, Int)  -- Source line and column if available
+  } deriving (Eq, Show)
+
+-- | Enhanced IR expression type combining metadata with node
+data IRExpr = IRExpr
+  { metadata :: IRMetadata
+  , expr :: IRExprNode
+  } deriving (Eq, Show)
+
+-- | Core expression constructors moved to separate type
+data IRExprNode
   = IRString T.Text
   | IRNum IRNumType T.Text
   | IRVar T.Text
@@ -83,11 +111,11 @@ data IRExpr
   | IRPrint IRExpr
   | IRBinOp IROp IRExpr IRExpr
   | IRBool Bool
-  | IRIf IRExpr IRExpr IRExpr     -- Added
+  | IRIf IRExpr IRExpr IRExpr
   | IRCall T.Text [IRExpr]
   | IRBlock T.Text [IRExpr] (Maybe IRExpr)
   | IRBreak T.Text
-  | IRResult IRExpr               -- Added
+  | IRResult IRExpr
   | IRVec IRVecType [IRExpr]
   | IRStructLit T.Text [(T.Text, IRExpr)]
   | IRFieldAccess IRExpr T.Text
@@ -116,4 +144,28 @@ data IRAllocStrat
   | IRAllocDefault   -- Use default strategy
   | IRAllocScoped    -- Use enclosing scope's allocator
   | IRAllocCustom T.Text  -- Use named custom allocator
-  deriving (Show, Eq, Ord)  -- Added Ord
+  deriving (Show, Eq, Ord)
+
+-- Helper functions for metadata
+mkPureExpr :: IRType -> IRExprNode -> IRExpr
+mkPureExpr typ node = IRExpr
+  { metadata = IRMetadata
+      { exprType = typ
+      , metaEffects = S.singleton PureEffect
+      , metaSourcePos = Nothing
+      }
+  , expr = node
+  }
+
+mkEffectfulExpr :: IRType -> S.Set Effect -> IRExprNode -> IRExpr
+mkEffectfulExpr typ effs node = IRExpr
+  { metadata = IRMetadata
+      { exprType = typ
+      , metaEffects = effs
+      , metaSourcePos = Nothing
+      }
+  , expr = node
+  }
+
+getMetadata :: IRExpr -> IRMetadata
+getMetadata (IRExpr meta _) = meta

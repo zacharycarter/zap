@@ -104,40 +104,42 @@ createBlocks exprs = do
 -- | Process expressions and create blocks
 processExprs :: [IRExpr] -> CFGBuilder ()
 processExprs [] = finalizeCurrentBlock
-processExprs (expr:rest) = case expr of
-  IRIf cond thenExpr elseExpr -> do
-    -- Finalize current block with if as terminator
-    modifyCurrentBlock (\b -> b { blockTerminator = Just expr })
-    currentId <- getCurrentBlockId
-    finalizeCurrentBlock
+processExprs (irExpr:rest) = do
+  let IRExpr meta exprNode = irExpr
+  case exprNode of
+    IRIf cond thenExpr elseExpr -> do
+      -- Finalize current block with if as terminator
+      modifyCurrentBlock (\b -> b { blockTerminator = Just irExpr })
+      currentId <- getCurrentBlockId
+      finalizeCurrentBlock
 
-    -- Create then block
-    thenId <- freshNodeId
-    startNewBlock thenId
-    processExprs [thenExpr]
-    finalizeCurrentBlock
+      -- Create then block
+      thenId <- freshNodeId
+      startNewBlock thenId
+      processExprs [thenExpr]
+      finalizeCurrentBlock
 
-    -- Create else block
-    elseId <- freshNodeId
-    startNewBlock elseId
-    processExprs [elseExpr]
-    finalizeCurrentBlock
+      -- Create else block
+      elseId <- freshNodeId
+      startNewBlock elseId
+      processExprs [elseExpr]
+      finalizeCurrentBlock
 
-    -- Create merge block
-    mergeId <- freshNodeId
-    startNewBlock mergeId
+      -- Create merge block
+      mergeId <- freshNodeId
+      startNewBlock mergeId
 
-    -- Record edges to be created later
-    addPendingEdge currentId thenId
-    addPendingEdge currentId elseId
-    addPendingEdge thenId mergeId
-    addPendingEdge elseId mergeId
+      -- Record edges to be created later
+      addPendingEdge currentId thenId
+      addPendingEdge currentId elseId
+      addPendingEdge thenId mergeId
+      addPendingEdge elseId mergeId
 
-    processExprs rest
+      processExprs rest
 
-  _ -> do
-    modifyCurrentBlock (\b -> b { blockStmts = blockStmts b ++ [expr] })
-    processExprs rest
+    _ -> do
+      modifyCurrentBlock (\b -> b { blockStmts = blockStmts b ++ [irExpr] })
+      processExprs rest
 
 -- Helper functions
 freshNodeId :: CFGBuilder NodeId

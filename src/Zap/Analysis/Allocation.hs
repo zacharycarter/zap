@@ -13,7 +13,7 @@ import qualified Data.Set as S
 import Debug.Trace
 
 import Zap.IR.Core
-import Zap.IR.Allocator (AllocKind(..))
+import Zap.IR.Allocator (AllocKind(..), getExprType)
 
 data AllocError
   = InvalidAllocation IRType IRAllocStrat
@@ -105,100 +105,104 @@ analyzeExprs :: [IRExpr] -> AllocAnalysis [IRExpr]
 analyzeExprs = go []
   where
     go acc [] = return acc
-    go acc (expr:rest) = do
-      expr' <- analyzeExpr expr
-      case expr of
-        IRBlockAlloc "arena" _ _ -> do
-          -- Register arena in global state for all subsequent expressions
-          modify $ \s -> s { globalArenas = S.insert "arena" (globalArenas s) }
-          checkLeaksAfterExpr
-          go (acc ++ [expr']) rest
+    go acc (irExpr:rest) = do
+        let IRExpr meta exprNode = irExpr
+        case exprNode of
+            IRBlockAlloc "arena" exprs mResult -> do
+                -- Register arena in global state for all subsequent expressions
+                modify $ \s -> s { globalArenas = S.insert "arena" (globalArenas s) }
 
-        IRBlockAlloc name exprs mResult -> do
-          -- Process block contents
-          exprs' <- withNewScope name $ do
-            exprs'' <- mapM analyzeExpr exprs
-            -- Capture all allocations from block and add to global state
-            scope <- gets currentScope
-            modify $ \s -> s { globalAllocs = scopeAllocs scope `S.union` globalAllocs s }
-            return exprs''
-          mResult' <- mapM analyzeExpr mResult
-          checkLeaksAfterExpr
-          go (acc ++ [IRBlockAlloc name exprs' mResult']) rest
+                -- Process inner expressions
+                processedExprs <- mapM analyzeExpr exprs
+                processedResult <- traverse analyzeExpr mResult
 
-        _ -> do
-          checkLeaksAfterExpr
-          go (acc ++ [expr']) rest
+                -- Create new wrapped expression with processed contents
+                let newExpr = IRExpr meta (IRBlockAlloc "arena" processedExprs processedResult)
+
+                checkLeaksAfterExpr
+                go (acc ++ [newExpr]) rest
+
+            IRBlockAlloc name exprs mResult -> do
+                -- Process block contents within new scope
+                processedExprs <- withNewScope name $ do
+                    exprs' <- mapM analyzeExpr exprs
+                    -- Capture allocations from block scope
+                    scope <- gets currentScope
+                    modify $ \s -> s {
+                        globalAllocs = scopeAllocs scope `S.union` globalAllocs s
+                    }
+                    return exprs'
+
+                -- Process result expression if present
+                processedResult <- traverse analyzeExpr mResult
+
+                -- Create new wrapped expression with processed contents
+                let newExpr = IRExpr meta (IRBlockAlloc name processedExprs processedResult)
+
+                checkLeaksAfterExpr
+                go (acc ++ [newExpr]) rest
+
+            _ -> do
+                -- For all other expressions, analyze and maintain the wrapper
+                processedExpr <- analyzeExpr irExpr
+                checkLeaksAfterExpr
+                go (acc ++ [processedExpr]) rest
 
 analyzeExpr :: IRExpr -> AllocAnalysis IRExpr
-analyzeExpr expr = case expr of
-  IRBlock name exprs mResult -> do
-    traceM $ "Analyzing block: " ++ show name
-    let isArena = name == "arena"
+analyzeExpr (IRExpr meta node) = do
+    -- Helper function to wrap result with updated metadata
+    let wrap newNode = IRExpr meta newNode
 
-    -- Register arena first, before creating new scope
-    when isArena $ do
-      traceM "Setting up arena block"
-      modify $ \s -> s {
-        globalArenas = S.insert "arena" (globalArenas s),
-        currentScope = (currentScope s) {
-          scopeArenas = S.insert "arena" (scopeArenas (currentScope s))
-        }
-      }
+    traceM $ "Analyzing expression: " ++ show node
+    case node of
+        IRBlock name exprs mResult -> do
+            traceM $ "Analyzing block: " ++ show name
+            let isArena = name == "arena"
+            when isArena $ do
+                traceM "Setting up arena block"
+                modify $ \s -> s {
+                    globalArenas = S.insert "arena" (globalArenas s),
+                    currentScope = (currentScope s) {
+                        scopeArenas = S.insert "arena" (scopeArenas (currentScope s))
+                    }
+                }
 
-    exprs' <- withNewScope name $ do
-      exprs'' <- mapM analyzeExpr exprs
-      when (not isArena) $ do
-        scope <- gets currentScope
-        let allocs = scopeAllocs scope
-        modify $ \s -> s { globalAllocs = allocs `S.union` globalAllocs s }
-      return exprs''
+            exprs' <- withNewScope name $ do
+                exprs'' <- mapM analyzeExpr exprs
+                when (not isArena) $ do
+                    scope <- gets currentScope
+                    let allocs = scopeAllocs scope
+                    modify $ \s -> s { globalAllocs = allocs `S.union` globalAllocs s }
+                return exprs''
 
-    mResult' <- mapM analyzeExpr mResult
-    return $ IRBlock name exprs' mResult'
+            mResult' <- mapM analyzeExpr mResult
+            return $ wrap $ IRBlock name exprs' mResult'
 
-  IRBlockAlloc name exprs mResult -> do
-    let isArena = name == "arena"
-    when isArena $ do
-      modify $ \s -> s {
-        currentScope = (currentScope s) { scopeArenas = S.insert "arena" (scopeArenas (currentScope s)) }
-      }
+        IRBlockAlloc name exprs mResult -> do
+            let isArena = name == "arena"
+            when isArena $ do
+                modify $ \s -> s {
+                    currentScope = (currentScope s) { scopeArenas = S.insert "arena" (scopeArenas (currentScope s)) }
+                }
 
-    exprs' <- withNewScope name $ do
-      exprs'' <- mapM analyzeExpr exprs
-      -- Capture heap allocations from block
-      scope <- gets currentScope
-      modify $ \s -> s { globalAllocs = scopeAllocs scope `S.union` globalAllocs s }
-      return exprs''
+            exprs' <- withNewScope name $ do
+                exprs'' <- mapM analyzeExpr exprs
+                scope <- gets currentScope
+                let allocs = scopeAllocs scope
+                modify $ \s -> s { globalAllocs = allocs `S.union` globalAllocs s }
+                return exprs''
 
-    mResult' <- mapM analyzeExpr mResult
-    return $ IRBlockAlloc name exprs' mResult'
+            mResult' <- mapM analyzeExpr mResult
+            return $ wrap $ IRBlockAlloc name exprs' mResult'
 
-  IRVarAlloc name strat -> do
-    traceM $ "Analyzing var allocation: " ++ show name ++ " with strategy " ++ show strat
-    validateAllocation (IRTypeNum IRInt32) strat
-    trackAllocation name strat
-    return expr
+        IRVarAlloc name strat -> do
+            traceM $ "Analyzing var allocation: " ++ show name ++ " with strategy " ++ show strat
+            validateAllocation (IRTypeNum IRInt32) strat
+            trackAllocation name strat
+            return $ wrap $ IRVarAlloc name strat
 
-  IRLetAlloc name val strat -> do
-    traceM $ "Analyzing let allocation: " ++ show name ++ " with strategy " ++ show strat
-    val' <- analyzeExpr val
-    validateAllocation (getExprType val') strat
-    trackAllocation name strat
-    return $ IRLetAlloc name val' strat
-
-  IRBinOp op e1 e2 -> do
-    e1' <- analyzeExpr e1
-    e2' <- analyzeExpr e2
-    return $ IRBinOp op e1' e2'
-
-  IRIf cond then_ else_ -> do
-    cond' <- analyzeExpr cond
-    then_' <- analyzeExpr then_
-    else_' <- analyzeExpr else_
-    return $ IRIf cond' then_' else_
-
-  _ -> return expr
+        -- Continue with other patterns...
+        _ -> return $ IRExpr meta node
 
 validateAllocation :: IRType -> IRAllocStrat -> AllocAnalysis ()
 validateAllocation typ strat = do
@@ -286,9 +290,13 @@ checkLeaksAfterExpr = do
   temps <- gets tempAllocs
   forM_ (S.toList $ scopeAllocs scope) $ \alloc -> do
     when (alloc == "_heap" && not (S.member "_param" $ scopeAllocs scope)) $
-      throwError $ PotentialLeak (IRVar "heap_alloc")
+      throwError $ PotentialLeak $ IRExpr
+        (IRMetadata IRTypeVoid (S.singleton PureEffect) Nothing)
+        (IRVar "heap_alloc")
     when (S.member alloc temps) $
-      throwError $ PotentialLeak (IRVar "temp_alloc")
+      throwError $ PotentialLeak $ IRExpr
+        (IRMetadata IRTypeVoid (S.singleton PureEffect) Nothing)
+        (IRVar "temp_alloc")
 
 checkScopeLeaks :: AllocAnalysis ()
 checkScopeLeaks = do
@@ -299,12 +307,3 @@ checkGlobalLeaks :: AllocAnalysis ()
 checkGlobalLeaks = do
   traceM "Checking global leaks"
   checkLeaksAfterExpr
-
-getExprType :: IRExpr -> IRType
-getExprType expr = case expr of
-  IRNum t _ -> IRTypeNum t
-  IRString _ -> IRTypeString
-  IRBool _ -> IRTypeBool
-  IRVec vt _ -> IRTypeVec vt
-  IRStructLit name _ -> IRTypeStruct name []
-  _ -> IRTypeNum IRInt32

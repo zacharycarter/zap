@@ -93,9 +93,11 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
     initState = CodegenState M.empty M.empty 0 []
 
 generateTypedExpr :: IRExpr -> Codegen (Text, IRType)
-generateTypedExpr expr = do
-    traceM $ "Generating expression: " ++ show expr
-    case expr of
+generateTypedExpr irExpr = do
+    traceM $ "Generating expression: " ++ show irExpr
+    -- Use pattern matching to deconstruct IRExpr
+    let IRExpr meta exprNode = irExpr
+    case exprNode of
         IRNum t val ->
             return (val, IRTypeNum t)
 
@@ -258,9 +260,10 @@ generateTypedExpr expr = do
         _ -> throwError $ UnsupportedType IRTypeString
 
 generateStmt :: IRExpr -> Codegen Text
-generateStmt expr = do
-    traceM $ "Generating statement for expression: " ++ show expr
-    case expr of
+generateStmt irExpr = do
+    traceM $ "Generating statement for expression: " ++ show irExpr
+    let IRExpr meta exprNode = irExpr
+    case exprNode of
         IRLetAlloc name val strat -> do
             (valExpr, valType) <- generateTypedExpr val
             typeStr <- irTypeToCType valType
@@ -287,20 +290,23 @@ generateStmt expr = do
             return $ T.unlines stmts <> res
 
         IRBinOp _ _ _ -> do
-            (val, _) <- generateTypedExpr expr
+            (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    " <> val <> ";"
 
         IRStructLit sName fields -> do
             traceM $ "Generating statement for struct literal: " ++ T.unpack sName
             let tmpName = T.pack ("tmp_" ++ T.unpack sName)
-            fieldVals <- mapM (\(fn, fe) -> do (fv, ft) <- generateTypedExpr fe; return (fn, fv, ft)) fields
+            fieldVals <- mapM (\(fn, fe) -> do
+                             (fv, ft) <- generateTypedExpr fe
+                             return (fn, fv, ft)) fields
             let structType = IRTypeStruct sName [(fn, ft) | (fn,_,ft) <- fieldVals]
             cType <- irTypeToCType structType
-            stmts <- forM fieldVals $ \(fn,fv,_) -> return $ T.concat ["    ", tmpName, ".", fn, " = ", fv, ";"]
+            stmts <- forM fieldVals $ \(fn,fv,_) ->
+                return $ T.concat ["    ", tmpName, ".", fn, " = ", fv, ";"]
             return $ T.concat ["    ", cType, " ", tmpName, ";\n", T.unlines stmts]
 
         IRFieldAccess base f -> do
-            (val, _) <- generateTypedExpr expr
+            (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    " <> val <> ";"
 
         IRVarAlloc name strat -> do
@@ -315,17 +321,17 @@ generateStmt expr = do
             return $ "    break; // " <> label
 
         IRIf cond then_ else_ -> do
-            (cVal,_) <- generateTypedExpr cond
+            (cVal, _) <- generateTypedExpr cond
             thenSt <- generateStmt then_
             elseSt <- generateStmt else_
             return $ T.concat ["    if (", cVal, ") {\n", thenSt, "\n} else {\n", elseSt, "\n}"]
 
         IRVar name -> do
-            (val, _) <- generateTypedExpr expr
+            (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    // variable ref: " <> val
 
         IRNum {} -> do
-            (val, _) <- generateTypedExpr expr
+            (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    // number: " <> val
 
         IRString s ->
@@ -347,7 +353,7 @@ generateStmt expr = do
             return "    // index not handled yet"
 
         _ -> do
-            (val, _) <- generateTypedExpr expr
+            (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    " <> val <> ";"
 
 generateFuncDef :: IRDecl -> Codegen Text

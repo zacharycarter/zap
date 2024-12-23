@@ -11,14 +11,15 @@ import Data.List (sort)
 import Zap.IR.Core
 import Zap.Analysis.AllocationOpt
 import Zap.Analysis.Allocation (AllocError(..))
+import Zap.Util (mkTestExpr)
 
 spec :: Spec
 spec = describe "Allocation Optimization" $ do
   it "converts heap allocations to stack when possible" $ do
     let ir = IRProgram []
-              [IRLetAlloc "x" (IRNum IRInt32 "42") IRAllocHeap]
+              [mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRNum IRInt32 "42") IRAllocHeap]
     let expected = IRProgram []
-                    [IRLetAlloc "x" (IRNum IRInt32 "42") IRAllocStack]
+                    [mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRNum IRInt32 "42") IRAllocStack]
     case optimizeAllocations ir of
       Right (optimized, stats) -> do
         optimized `shouldBe` expected
@@ -26,17 +27,17 @@ spec = describe "Allocation Optimization" $ do
       Left err -> expectationFailure $ "Optimization failed: " ++ show err
 
   it "preserves heap allocations for large objects" $ do
-    let fields = [(T.pack $ show i, IRNum IRInt32 "0") | i <- [1..100]]
+    let fields = [(T.pack $ show i, mkTestExpr $ IRNum IRInt32 "0") | i <- [1..100]]
     let ir = IRProgram []
-              [IRLetAlloc "x" (IRStructLit "LargeStruct" fields) IRAllocHeap]
+              [mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRStructLit "LargeStruct" fields) IRAllocHeap]
     let Right (optimized, _) = optimizeAllocations ir
     optimized `shouldBe` ir
 
   it "aligns vector allocations for SIMD" $ do
-    let vecElements = replicate 4 (IRNum IRFloat32 "1.0")
+    let vecElements = replicate 4 (mkTestExpr $ IRNum IRFloat32 "1.0")
     let ir = IRProgram []
-              [IRLetAlloc "v"
-                (IRVec (IRVec4 IRFloat32) vecElements)
+              [mkTestExpr $ IRLetAlloc "v"
+                (mkTestExpr $ IRVec (IRVec4 IRFloat32) vecElements)
                 IRAllocDefault]
     let Right (optimized, stats) = optimizeAllocations ir
     simdOptimizations stats `shouldBe` 1
@@ -48,7 +49,7 @@ spec = describe "Allocation Optimization" $ do
                 , ("large", IRTypeVec (IRVec4 IRFloat32))
                 , ("med", IRTypeNum IRInt64)]
                 IRTypeVoid
-                (IRVar "small")
+                (mkTestExpr $ IRVar "small")
     let ir = IRProgram [func] []
     let Right (IRProgram [optimized] [], stats) = optimizeAllocations ir
     parameterReordering stats `shouldBe` 1
@@ -58,7 +59,7 @@ shouldBePositive :: Integer -> Expectation
 shouldBePositive x = x `shouldSatisfy` (> 0)
 
 checkVectorAlignment :: IR -> Expectation
-checkVectorAlignment (IRProgram _ [IRLetAlloc _ _ strat]) =
+checkVectorAlignment (IRProgram _ [IRExpr _ (IRLetAlloc _ _ strat)]) =
   case strat of
     IRAllocStack -> pure () -- Stack allocations are aligned by default
     other -> expectationFailure $ "Expected stack allocation, got: " ++ show other
@@ -75,10 +76,6 @@ checkParameterOrder (IRFunc _ params _ _) = do
   sizes `shouldBe` reverse (sort sizes)
 checkParameterOrder other =
   expectationFailure $ "Expected function, got: " ++ show other
-
-isVectorType :: IRType -> Bool
-isVectorType (IRTypeVec _) = True
-isVectorType _ = False
 
 typeSizeBytes :: IRType -> Int
 typeSizeBytes (IRTypeNum IRInt32) = 4

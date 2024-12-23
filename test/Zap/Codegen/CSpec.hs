@@ -12,6 +12,7 @@ import Data.Either (isLeft)
 
 import Zap.IR.Core
 import Zap.Codegen.C
+import Zap.Util (mkTestExpr)
 
 spec :: Spec
 spec = do
@@ -70,46 +71,61 @@ spec = do
 
     describe "Vector Operations" $ do
       it "generates SIMD code for vector addition" $ do
-        let expr = IRBinOp IRAdd
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
-                 IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
-        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
-        case result of
-          Right (val, _) -> do
-            T.isInfixOf "_mm_add_ps" val `shouldBe` True
-            T.isInfixOf "_mm_set_ps" val `shouldBe` True
-          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+            let expr = mkTestExpr $ IRBinOp IRAdd
+                    (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [ mkTestExpr $ IRNum IRFloat32 "1.0"
+                        , mkTestExpr $ IRNum IRFloat32 "2.0"
+                        , mkTestExpr $ IRNum IRFloat32 "3.0"
+                        , mkTestExpr $ IRNum IRFloat32 "4.0"
+                        ])
+                    (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [ mkTestExpr $ IRNum IRFloat32 "5.0"
+                        , mkTestExpr $ IRNum IRFloat32 "6.0"
+                        , mkTestExpr $ IRNum IRFloat32 "7.0"
+                        , mkTestExpr $ IRNum IRFloat32 "8.0"
+                        ])
+            let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
+            case result of
+                Right (val, _) -> do
+                    T.isInfixOf "_mm_add_ps" val `shouldBe` True
+                    T.isInfixOf "_mm_set_ps" val `shouldBe` True
+                Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
       it "generates SIMD code for dot product" $ do
-        let expr = IRBinOp IRDot
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
-                 IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"])
-        let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
-        case result of
-          Right (val, typ) -> do
-            T.isInfixOf "_mm_dp_ps" val `shouldBe` True
-            typ `shouldBe` IRTypeNum IRFloat32
-          Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
+            let expr = mkTestExpr $ IRBinOp IRDot
+                    (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [ mkTestExpr $ IRNum IRFloat32 "1.0"
+                        , mkTestExpr $ IRNum IRFloat32 "2.0"
+                        , mkTestExpr $ IRNum IRFloat32 "3.0"
+                        , mkTestExpr $ IRNum IRFloat32 "4.0"
+                        ])
+                    (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [ mkTestExpr $ IRNum IRFloat32 "5.0"
+                        , mkTestExpr $ IRNum IRFloat32 "6.0"
+                        , mkTestExpr $ IRNum IRFloat32 "7.0"
+                        , mkTestExpr $ IRNum IRFloat32 "8.0"
+                        ])
+            let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
+            case result of
+                Right (val, typ) -> do
+                    T.isInfixOf "_mm_dp_ps" val `shouldBe` True
+                    typ `shouldBe` IRTypeNum IRFloat32
+                Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
       it "generates efficient SIMD component access" $ do
-        let expr = IRFieldAccess
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
-              "x"
+        let expr = mkTestExpr $ IRFieldAccess
+                    (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [ mkTestExpr $ IRNum IRFloat32 "1.0"
+                        , mkTestExpr $ IRNum IRFloat32 "2.0"
+                        , mkTestExpr $ IRNum IRFloat32 "3.0"
+                        , mkTestExpr $ IRNum IRFloat32 "4.0"
+                        ])
+                    "x"
         let result = evalState (runExceptT $ generateTypedExpr expr) (CodegenState M.empty M.empty 0 [])
         case result of
           Right (val, typ) -> do
-            T.isInfixOf "_mm_extract_ps" val `shouldBe` True
-            typ `shouldBe` IRTypeNum IRFloat32
+              T.isInfixOf "_mm_extract_ps" val `shouldBe` True
+              typ `shouldBe` IRTypeNum IRFloat32
           Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
     describe "Complete Program Generation" $ do
@@ -126,9 +142,11 @@ spec = do
                   , ("v2", IRTypeVec (IRVec4 IRFloat32))
                   ]
                   (IRTypeVec (IRVec4 IRFloat32))
-                  (IRBinOp IRAdd (IRVar "v1") (IRVar "v2"))
+                  (mkTestExpr $ IRBinOp IRAdd
+                      (mkTestExpr $ IRVar "v1")
+                      (mkTestExpr $ IRVar "v2"))
               ]
-              [ IRPrint (IRString "Vector math test") ]
+              [ mkTestExpr $ IRPrint (mkTestExpr $ IRString "Vector math test") ]
 
         let result = generateC prog
         result `shouldSatisfy` \case
@@ -139,26 +157,33 @@ spec = do
 
     describe "Error Handling" $ do
       it "reports unsupported vector operations" $ do
-        let expr = IRBinOp IRDot
-              (IRVec (IRVec2 IRInt32) [IRNum IRInt32 "1", IRNum IRInt32 "2"])
-              (IRVec (IRVec2 IRInt32) [IRNum IRInt32 "3", IRNum IRInt32 "4"])
+        let expr = mkTestExpr $ IRBinOp IRDot
+              (mkTestExpr $ IRVec (IRVec2 IRInt32)
+                  [mkTestExpr $ IRNum IRInt32 "1", mkTestExpr $ IRNum IRInt32 "2"])
+              (mkTestExpr $ IRVec (IRVec2 IRInt32)
+                  [mkTestExpr $ IRNum IRInt32 "3", mkTestExpr $ IRNum IRInt32 "4"])
         generateC (IRProgram [] [expr]) `shouldSatisfy` isLeft
 
       it "reports type mismatches in vector operations" $ do
-        let expr = IRBinOp IRAdd
-              (IRVec (IRVec4 IRFloat32)
-                [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-                 IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"])
-              (IRVec (IRVec3 IRFloat32)
-                [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
-                 IRNum IRFloat32 "7.0"])
+        let expr = mkTestExpr $ IRBinOp IRAdd
+              (mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                  [ mkTestExpr $ IRNum IRFloat32 "1.0"
+                  , mkTestExpr $ IRNum IRFloat32 "2.0"
+                  , mkTestExpr $ IRNum IRFloat32 "3.0"
+                  , mkTestExpr $ IRNum IRFloat32 "4.0"
+                  ])
+              (mkTestExpr $ IRVec (IRVec3 IRFloat32)
+                  [ mkTestExpr $ IRNum IRFloat32 "5.0"
+                  , mkTestExpr $ IRNum IRFloat32 "6.0"
+                  , mkTestExpr $ IRNum IRFloat32 "7.0"
+                  ])
         generateC (IRProgram [] [expr]) `shouldSatisfy` isLeft
 
     describe "Function Call Generation" $ do
       it "generates code for simple function calls" $ do
-        let expr = IRCall "add"
-                    [ IRNum IRInt32 "1"
-                    , IRNum IRInt32 "2"
+        let expr = mkTestExpr $ IRCall "add"
+                    [ mkTestExpr $ IRNum IRInt32 "1"
+                    , mkTestExpr $ IRNum IRInt32 "2"
                     ]
         let initialState = CodegenState
               { varEnv = M.empty
@@ -172,13 +197,13 @@ spec = do
           Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
       it "propagates correct return types for function calls" $ do
-        let expr = IRCall "vector_add"
-                    [ IRVec (IRVec4 IRFloat32)
-                        [IRNum IRFloat32 "1.0", IRNum IRFloat32 "2.0",
-                         IRNum IRFloat32 "3.0", IRNum IRFloat32 "4.0"]
-                    , IRVec (IRVec4 IRFloat32)
-                        [IRNum IRFloat32 "5.0", IRNum IRFloat32 "6.0",
-                         IRNum IRFloat32 "7.0", IRNum IRFloat32 "8.0"]
+        let expr = mkTestExpr $ IRCall "vector_add"
+                    [ mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [mkTestExpr $ IRNum IRFloat32 "1.0", mkTestExpr $ IRNum IRFloat32 "2.0",
+                         mkTestExpr $ IRNum IRFloat32 "3.0", mkTestExpr $ IRNum IRFloat32 "4.0"]
+                    , mkTestExpr $ IRVec (IRVec4 IRFloat32)
+                        [mkTestExpr $ IRNum IRFloat32 "5.0", mkTestExpr $ IRNum IRFloat32 "6.0",
+                         mkTestExpr $ IRNum IRFloat32 "7.0", mkTestExpr $ IRNum IRFloat32 "8.0"]
                     ]
         let initialState = CodegenState
               { varEnv = M.empty
@@ -197,7 +222,9 @@ spec = do
           let decl = IRFunc "multiply"
                 [("x", IRTypeNum IRFloat32), ("y", IRTypeNum IRFloat32)]
                 (IRTypeNum IRFloat32)
-                (IRBinOp IRMul (IRVar "x") (IRVar "y"))
+                (mkTestExpr $ IRBinOp IRMul
+                    (mkTestExpr $ IRVar "x")
+                    (mkTestExpr $ IRVar "y"))
 
           let initialState = CodegenState
                 { varEnv = M.empty
@@ -219,7 +246,7 @@ spec = do
                 , ("v2", IRTypeVec (IRVec4 IRFloat32))
                 ]
                 (IRTypeVec (IRVec4 IRFloat32))
-                (IRBinOp IRAdd (IRVar "v1") (IRVar "v2"))
+                (mkTestExpr $ IRBinOp IRAdd (mkTestExpr $ IRVar "v1") (mkTestExpr $ IRVar "v2"))
 
           let initialState = CodegenState
                 { varEnv = M.empty
@@ -236,11 +263,13 @@ spec = do
             Left err -> expectationFailure $ "Expected Right but got Left " ++ show err
 
       it "maintains function environment during body generation" $ do
-          let innerCall = IRCall "helper" [IRNum IRInt32 "42"]
           let mainFunc = IRFunc "main"
                 []
                 (IRTypeNum IRInt32)
-                innerCall
+                (mkTestExpr $ IRCall "helper" [
+                    mkTestExpr $ IRNum IRInt32 "42"
+                    ]
+                )
 
           let initialState = CodegenState
                 { varEnv = M.empty
@@ -263,9 +292,9 @@ spec = do
                   (IRMul, "*"), (IRDiv, "/")
                   ]
           forM_ testCases $ \(op, symbol) -> do
-              let expr = IRBinOp op
-                      (IRNum IRFloat32 "1.0")
-                      (IRNum IRFloat32 "2.0")
+              let expr = mkTestExpr $ IRBinOp op
+                      (mkTestExpr $ IRNum IRFloat32 "1.0")
+                      (mkTestExpr $ IRNum IRFloat32 "2.0")
               let result = evalState (runExceptT $ generateTypedExpr expr)
                       (CodegenState M.empty M.empty 0 [])
               case result of

@@ -5,8 +5,10 @@ module Zap.IR.Allocator
   , AllocError(..)
   , AllocExpr(..)
   , allocateIR
+  , getExprType
   ) where
 
+import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Map.Strict as M
 import Control.Monad.State
@@ -118,54 +120,57 @@ addAllocation (IRProgram decls exprs) = do
 
 -- | Add allocation to expressions
 allocateExpr :: IRExpr -> AllocM IRExpr
-allocateExpr expr = case expr of
-  IRNum t val -> return expr  -- Numeric literals don't need allocation
+allocateExpr expr@(IRExpr meta node) = do
+    -- Helper to wrap result with metadata
+    let wrap newNode = IRExpr meta { metaEffects = updateEffects expr newNode } newNode
 
-  IRVar name -> do
-    -- Look up variable's allocation strategy
-    strat <- lookupVarStrategy name
-    return $ IRVarAlloc name (convertStrat strat)
+    -- Handle each expression type
+    case node of
+        IRNum t val ->
+            return $ wrap node  -- Numeric literals don't need allocation
 
-  IRLet name val -> do
-    -- Analyze value allocation
-    allocVal <- allocateExpr val
-    -- Determine allocation strategy for binding
-    strat <- determineStrategy (getExprType allocVal)
-    return $ IRLetAlloc name allocVal (convertStrat strat)
+        IRVar name -> do
+            strat <- lookupVarStrategy name
+            return $ wrap $ IRVarAlloc name (convertStrat strat)
 
-  IRVec vt components -> do
-    -- Analyze component allocations
-    allocComps <- mapM allocateExpr components
-    -- Determine vector allocation strategy
-    strat <- determineStrategy (IRTypeVec vt)
-    return $ IRVecAlloc vt allocComps (convertStrat strat)
+        IRLet name val -> do
+            allocVal <- allocateExpr val
+            strat <- determineStrategy (getExprType allocVal)
+            return $ wrap $ IRLetAlloc name allocVal (convertStrat strat)
 
-  IRStructLit name fields -> do
-    -- Analyze field allocations
-    allocFields <- mapM (\(f, e) -> do
-      ae <- allocateExpr e
-      return (f, ae)) fields
-    -- Determine struct allocation strategy
-    strat <- determineStrategy (IRTypeStruct name [])
-    return $ IRStructLitAlloc name allocFields (convertStrat strat)
+        IRVec vt components -> do
+            allocComps <- mapM allocateExpr components
+            strat <- determineStrategy (IRTypeVec vt)
+            return $ wrap $ IRVecAlloc vt allocComps (convertStrat strat)
 
-  IRBlock name exprs mResult -> do
-    -- Create new scope using string concatenation
-    scope <- gets currentScope
-    let scopeName = scope <> "." <> name
-    modify $ \s -> s { currentScope = scopeName }
+        IRStructLit name fields -> do
+            allocFields <- mapM (\(f, e) -> do
+                ae <- allocateExpr e
+                return (f, ae)) fields
+            strat <- determineStrategy (IRTypeStruct name [])
+            return $ wrap $ IRStructLitAlloc name allocFields (convertStrat strat)
 
-    -- Analyze expressions with block scope
-    allocExprs <- mapM allocateExpr exprs
-    allocResult <- mapM allocateExpr mResult
+        IRBlock name exprs mResult -> do
+            scope <- gets currentScope
+            let scopeName = scope <> "." <> name
+            modify $ \s -> s { currentScope = scopeName }
 
-    -- Restore previous scope
-    modify $ \s -> s { currentScope = T.takeWhile (/= '.') scopeName }
+            allocExprs <- mapM allocateExpr exprs
+            allocResult <- mapM allocateExpr mResult
 
-    return $ IRBlockAlloc name allocExprs allocResult
+            modify $ \s -> s { currentScope = T.takeWhile (/= '.') scopeName }
 
-  -- Handle other cases...
-  _ -> return expr
+            return $ wrap $ IRBlockAlloc name allocExprs allocResult
+
+        -- For other cases, preserve the original expression with updated effects
+        _ -> return $ wrap node
+
+-- Helper function to update effects based on allocation
+updateEffects :: IRExpr -> IRExprNode -> S.Set Effect
+updateEffects originalExpr node = case node of
+    IRVarAlloc _ _ -> S.insert WriteEffect (metaEffects $ metadata originalExpr)
+    IRLetAlloc _ _ _ -> S.insert WriteEffect (metaEffects $ metadata originalExpr)
+    _ -> metaEffects $ metadata originalExpr
 
 -- | Look up variable allocation strategy
 lookupVarStrategy :: T.Text -> AllocM InternalAllocStrat
@@ -201,13 +206,30 @@ determineStrategy typ = case typ of
 
 -- | Get type of an expression
 getExprType :: IRExpr -> IRType
-getExprType expr = case expr of
-  IRNum t _ -> IRTypeNum t
-  IRString _ -> IRTypeString
-  IRBool _ -> IRTypeBool
-  IRVec vt _ -> IRTypeVec vt
-  IRStructLit name _ -> IRTypeStruct name []
-  _ -> error "Cannot determine type of expression"
+getExprType (IRExpr metadata node) = case node of
+    IRNum t _ -> IRTypeNum t
+    IRString _ -> IRTypeString
+    IRBool _ -> IRTypeBool
+    IRVec vt _ -> IRTypeVec vt
+    IRVar name -> exprType metadata
+    IRStructLit name _ -> IRTypeStruct name []
+    IRBinOp _ e1 e2 ->
+        case (getExprType e1, getExprType e2) of
+            (t1@(IRTypeVec _), t2@(IRTypeVec _))
+                | t1 == t2 -> t1
+            (IRTypeNum n1, IRTypeNum n2)
+                | n1 == n2 -> IRTypeNum n1
+            _ -> exprType metadata
+    IRFieldAccess base field ->
+        case getExprType base of
+            IRTypeStruct _ fields ->
+                fromMaybe (exprType metadata)
+                    (lookup field [(fn, ft) | (fn, ft) <- fields])
+            _ -> exprType metadata
+    _ -> exprType metadata
+  where
+    fromMaybe def Nothing = def
+    fromMaybe _ (Just x) = x
 
 -- | Add allocation to declarations
 allocateDecl :: IRDecl -> AllocM IRDecl

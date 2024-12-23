@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Zap.Analysis.AllocationOpt
   ( optimizeAllocations
+  , isVectorType
   , OptimizationStats(..)
   ) where
 
@@ -82,65 +83,41 @@ canMoveToStack typ = case typ of
     _ -> False
 
 optimizeExpr :: IRExpr -> OptM IRExpr
-optimizeExpr expr = do
-    traceM $ "Optimizing expression: " ++ show expr
-    case expr of
+optimizeExpr irExpr@(IRExpr meta exprNode) = do
+    case exprNode of
         IRLetAlloc name val strat -> do
-            traceM $ "Found let allocation: " ++ show name
             val' <- optimizeExpr val
             let valType = inferExprType val'
-            traceM $ "Value type: " ++ show valType
+            let newStrat = determineAllocationStrategy valType strat
+            return $ IRExpr meta { exprType = valType } (IRLetAlloc name val' newStrat)
 
-            -- First determine the new strategy purely
-            let newStrat = case (strat, valType) of
-                    (IRAllocHeap, t) | canMoveToStack t -> IRAllocStack
-                    (IRAllocDefault, IRTypeVec _) -> IRAllocStack  -- Convert default vectors to stack
-                    _ -> strat
+        IRVarAlloc name strat ->
+            return $ IRExpr meta (IRVarAlloc name strat)
 
-            -- Update statistics based on the transformation
-            case (strat, valType, newStrat) of
-                -- Count heap-to-stack conversions
-                (IRAllocHeap, _, IRAllocStack) ->
-                    modify $ \s -> s { currentStats = (currentStats s) {
-                        stackSavings = stackSavings (currentStats s) + 1
-                    } }
-                -- Count SIMD optimizations
-                (IRAllocDefault, IRTypeVec _, IRAllocStack) ->
-                    modify $ \s -> s { currentStats = (currentStats s) {
-                        simdOptimizations = simdOptimizations (currentStats s) + 1
-                    } }
-                _ -> return ()
+        IRBlockAlloc name exprs mResult -> do
+            exprs' <- mapM optimizeExpr exprs
+            mResult' <- mapM optimizeExpr mResult
+            return $ IRExpr meta (IRBlockAlloc name exprs' mResult')
 
-            traceM $ "New allocation strategy: " ++ show newStrat
-            return $ IRLetAlloc name val' newStrat
+        -- Add catch-all case
+        _ -> return irExpr
 
-        IRVecAlloc vt components strat -> do
-            traceM $ "Found vector allocation: " ++ show vt
-            components' <- mapM optimizeExpr components
-            -- Mark SIMD optimization
-            modify $ \s -> s { currentStats = (currentStats s) {
-                simdOptimizations = simdOptimizations (currentStats s) + 1
-            } }
-            return $ IRVecAlloc vt components' IRAllocStack
-
-        IRBinOp op e1 e2 -> do
-            e1' <- optimizeExpr e1
-            e2' <- optimizeExpr e2
-            return $ IRBinOp op e1' e2'
-
-        _ -> return expr
+determineAllocationStrategy :: IRType -> IRAllocStrat -> IRAllocStrat
+determineAllocationStrategy typ strat = case (typ, strat) of
+    (_, IRAllocDefault) | isVectorType typ -> IRAllocStack
+    (t, IRAllocHeap) | canMoveToStack t -> IRAllocStack
+    _ -> strat
 
 -- Helper function to infer expression types
 inferExprType :: IRExpr -> IRType
-inferExprType expr = case expr of
+inferExprType (IRExpr meta exprNode) = case exprNode of
     IRNum t _ -> IRTypeNum t
     IRString _ -> IRTypeString
     IRBool _ -> IRTypeBool
     IRVec vt _ -> IRTypeVec vt
     IRStructLit name fields ->
-        -- Preserve field types when inferring struct type
         IRTypeStruct name [(fname, inferExprType fexpr) | (fname, fexpr) <- fields]
-    _ -> IRTypeNum IRInt32  -- Default case
+    _ -> IRTypeNum IRInt32
 
 -- Update the main optimization function
 optimizeIR :: IR -> OptM IR
@@ -212,19 +189,23 @@ analyzeParameterUsage _ = return ()
 
 -- | Analyze parameter access patterns in expressions
 analyzeAccess :: IRExpr -> OptM ()
-analyzeAccess expr = case expr of
+analyzeAccess (IRExpr meta exprNode) = case exprNode of
     IRVar name ->
         modify $ \s -> s { accessPatterns = M.insertWith (+) name 1 (accessPatterns s) }
+
     IRBinOp _ e1 e2 -> do
         analyzeAccess e1
         analyzeAccess e2
+
     IRIf cond then_ else_ -> do
         analyzeAccess cond
         analyzeAccess then_
         analyzeAccess else_
+
     IRBlock _ exprs mResult -> do
         mapM_ analyzeAccess exprs
         mapM_ analyzeAccess mResult
+
     _ -> return ()
 
 -- | Compute size needed for parameter
@@ -245,3 +226,7 @@ computeParameterSize typ = case typ of
         sizes <- mapM (computeParameterSize . snd) fields
         return $ sum sizes
     IRTypeArray _ -> return 8
+
+isVectorType :: IRType -> Bool
+isVectorType (IRTypeVec _) = True
+isVectorType _ = False

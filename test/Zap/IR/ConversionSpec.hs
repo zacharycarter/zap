@@ -8,6 +8,7 @@ import Control.Monad (forM_)
 import Zap.AST
 import Zap.IR.Core
 import Zap.IR.Conversion
+import Zap.Util (mkTestExpr)
 
 spec :: Spec
 spec = do
@@ -18,7 +19,7 @@ spec = do
         case convertToIR ast of
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
-            exprs `shouldBe` [IRString "Hello"]
+            exprs `shouldBe` [mkTestExpr $ IRString "Hello"]
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
     describe "Print Statements" $ do
@@ -27,7 +28,7 @@ spec = do
         case convertToIR ast of
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
-            exprs `shouldBe` [IRPrint (IRString "Hello")]
+            exprs `shouldBe` [mkTestExpr $ IRPrint (mkTestExpr $ IRString "Hello")]
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       it "converts print with numeric expression" $ do
@@ -37,9 +38,9 @@ spec = do
         case convertToIR ast of
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
-            exprs `shouldBe` [IRPrint (IRBinOp IRAdd
-                                     (IRNum IRInt32 "1")
-                                     (IRNum IRInt32 "2"))]
+            exprs `shouldBe` [mkTestExpr $ IRPrint (mkTestExpr $ IRBinOp IRAdd
+                                     (mkTestExpr $ IRNum IRInt32 "1")
+                                     (mkTestExpr $ IRNum IRInt32 "2"))]
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       it "converts print with variable reference" $ do
@@ -52,7 +53,7 @@ spec = do
             decls `shouldBe` []
             length exprs `shouldBe` 2
             case exprs of
-              [_, IRPrint (IRVar "x")] -> return ()
+              [_, IRExpr _ (IRPrint (IRExpr _ (IRVar "x")))] -> return ()
               _ -> expectationFailure $ "Unexpected IR: " ++ show exprs
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
@@ -67,9 +68,9 @@ spec = do
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
             case exprs of
-              [IRBlockAlloc label bodyExprs result] -> do
+              [IRExpr _ (IRBlockAlloc label bodyExprs result)] -> do
                 label `shouldBe` "test"
-                bodyExprs `shouldBe` [IRPrint (IRString "Inside")]
+                bodyExprs `shouldBe` [mkTestExpr $ IRPrint (mkTestExpr $ IRString "Inside")]
                 result `shouldBe` Nothing
               _ -> expectationFailure "Expected block allocation"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
@@ -84,10 +85,10 @@ spec = do
           Right (IRProgram decls exprs) -> do
             decls `shouldBe` []
             case exprs of
-              [IRBlockAlloc label bodyExprs (Just result)] -> do
+              [IRExpr _ (IRBlockAlloc label bodyExprs (Just result))] -> do
                 label `shouldBe` "test"
                 bodyExprs `shouldBe` []
-                result `shouldBe` IRResult (IRString "Done")
+                result `shouldBe` (mkTestExpr $ IRResult (mkTestExpr $ IRString "Done"))
               _ -> expectationFailure "Expected block with result"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
@@ -106,7 +107,7 @@ spec = do
         case convertToIR ast of
           Right (IRProgram _ exprs) -> do
             case exprs of
-              [IRPrint (IRString "test")] -> return ()
+              [IRExpr _ (IRPrint (IRExpr _ (IRString "test")))] -> return ()
               _ -> expectationFailure $ "Unexpected IR: " ++ show exprs
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
       it "converts numeric types correctly" $ do
@@ -160,9 +161,9 @@ spec = do
           case convertToIR ast of
             Right (IRProgram decls exprs) -> do
               decls `shouldBe` []
-              exprs `shouldBe` [IRBinOp IRAdd
-                               (IRNum IRInt32 "1")
-                               (IRNum IRInt32 "2")]
+              exprs `shouldBe` [mkTestExpr $ IRBinOp IRAdd
+                               (mkTestExpr $ IRNum IRInt32 "1")
+                               (mkTestExpr $ IRNum IRInt32 "2")]
             Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
         it "converts simple numeric subtraction" $ do
@@ -172,9 +173,9 @@ spec = do
           case convertToIR ast of
             Right (IRProgram decls exprs) -> do
               decls `shouldBe` []
-              exprs `shouldBe` [IRBinOp IRSub
-                               (IRNum IRInt32 "5")
-                               (IRNum IRInt32 "3")]
+              exprs `shouldBe` [mkTestExpr $ IRBinOp IRSub
+                               (mkTestExpr $ IRNum IRInt32 "5")
+                               (mkTestExpr $ IRNum IRInt32 "3")]
             Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
         it "converts simple numeric multiplication" $ do
@@ -184,9 +185,9 @@ spec = do
           case convertToIR ast of
             Right (IRProgram decls exprs) -> do
               decls `shouldBe` []
-              exprs `shouldBe` [IRBinOp IRMul
-                               (IRNum IRInt32 "4")
-                               (IRNum IRInt32 "3")]
+              exprs `shouldBe` [mkTestExpr $ IRBinOp IRMul
+                               (mkTestExpr $ IRNum IRInt32 "4")
+                               (mkTestExpr $ IRNum IRInt32 "3")]
             Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
         it "converts simple numeric division" $ do
@@ -196,9 +197,9 @@ spec = do
           case convertToIR ast of
             Right (IRProgram decls exprs) -> do
               decls `shouldBe` []
-              exprs `shouldBe` [IRBinOp IRDiv
-                               (IRNum IRInt32 "6")
-                               (IRNum IRInt32 "2")]
+              exprs `shouldBe` [mkTestExpr $ IRBinOp IRDiv
+                               (mkTestExpr $ IRNum IRInt32 "6")
+                               (mkTestExpr $ IRNum IRInt32 "2")]
             Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       describe "Control Flow" $ do
@@ -211,8 +212,36 @@ spec = do
             case convertToIR ast of
               Right (IRProgram decls exprs) -> do
                 decls `shouldBe` []
-                exprs `shouldBe` [IRIf
-                                 (IRBool True)
-                                 (IRNum IRInt32 "1")
-                                 (IRNum IRInt32 "2")]
+                exprs `shouldBe` [mkTestExpr $ IRIf
+                                 (mkTestExpr $ IRBool True)
+                                 (mkTestExpr $ IRNum IRInt32 "1")
+                                 (mkTestExpr $ IRNum IRInt32 "2")]
               Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+      describe "IR Type and Metadata" $ do
+        it "preserves type information through conversion" $ do
+          let ast = Program [TLExpr (BinOp Add
+                      (NumLit Int32 "1")
+                      (NumLit Int32 "2"))]
+          case convertToIR ast of
+            Right (IRProgram _ exprs) -> do
+              case exprs of
+                [IRExpr meta expr] -> do
+                  exprType meta `shouldBe` IRTypeNum IRInt32
+                  case expr of
+                    IRBinOp _ left right -> do
+                      exprType (getMetadata left) `shouldBe` IRTypeNum IRInt32
+                      exprType (getMetadata right) `shouldBe` IRTypeNum IRInt32
+                    _ -> expectationFailure "Expected binary operation"
+                _ -> expectationFailure "Expected single expression with metadata"
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+        it "tracks simple effects" $ do
+          let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+          case convertToIR ast of
+            Right (IRProgram _ exprs) -> do
+              case exprs of
+                [IRExpr meta _] -> do
+                  IOEffect `elem` metaEffects meta `shouldBe` True
+                _ -> expectationFailure "Expected expression with effects"
+            Left err -> expectationFailure $ "Conversion failed: " ++ show err

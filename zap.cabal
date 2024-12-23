@@ -112,6 +112,7 @@ test-suite zap-test
       Zap.Integration.Runner
       Zap.IR.ConversionSpec
       Zap.Parser.ParserSpec
+      Zap.Util
       Paths_zap
   autogen-modules:
       Paths_zap
