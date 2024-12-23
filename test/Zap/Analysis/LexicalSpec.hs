@@ -4,6 +4,7 @@
 module Zap.Analysis.LexicalSpec (spec) where
 
 import Test.Hspec
+import Data.Either (isLeft)
 import qualified Data.Text as T
 
 import Zap.Analysis.Lexical
@@ -106,3 +107,34 @@ spec = do
     it "handles errors after unterminated string" $ do
       let input = T.pack "print \"unterminated\nprint \"next\""
       tokenize input `shouldBe` Left (UnterminatedString 1 7)
+
+  describe "While loop parsing" $ do
+    it "tokenizes while keyword and condition" $ do
+      let input = T.pack "while x < 3:"
+      let expected = [
+            Located (TWord "while") 1 1,
+            Located (TWord "x") 7 1,
+            Located (TOperator "<") 9 1,
+            Located (TNumber "3") 11 1,
+            Located TColon 12 1,
+            Located TEOF 13 1
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "handles indented while block body" $ do
+      let input = T.unlines
+            [ "while x < 3:"
+            , "  print x"
+            ]
+      let expected = [
+            Located (TWord "while") 1 1,
+            Located (TWord "x") 7 1,
+            Located (TOperator "<") 9 1,
+            Located (TNumber "3") 11 1,
+            Located TColon 12 1,
+            Located (TWord "print") 3 2,
+            Located (TWord "x") 9 2,
+            Located TEOF 1 3  -- Updated location
+            ]
+      tokenize input `shouldBe` Right expected
+

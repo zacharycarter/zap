@@ -94,3 +94,18 @@ spec = do
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other
+
+  describe "While loop parsing" $ do
+    it "parses simple while loop" $ do
+      let input = "while x < 3:\n  print x"
+      case parseProgram input of
+        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Float32 "3"))
+                      (Call "print" [Var "x"]))] -> return ()
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+        Right other -> expectationFailure $
+          "Unexpected parse result: " ++ show other
+
+
+    it "enforces proper while loop structure" $ do
+      let input = "while x < 3"  -- Missing colon
+      parseProgram input `shouldSatisfy` isLeft

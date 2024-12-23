@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (isValidName, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr (isValidName, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -55,6 +55,10 @@ parseTopLevel = do
         (tok:_) -> do
             traceM $ "Processing token: " ++ show tok
             case locToken tok of
+                TWord "while" -> do
+                    traceM "Found while expression at top-level"
+                    expr <- parseWhileExpr
+                    return $ TLExpr expr
                 TType -> do
                     traceM "Found type definition"
                     _ <- matchToken (== TType) "type"

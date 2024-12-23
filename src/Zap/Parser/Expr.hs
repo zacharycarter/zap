@@ -7,6 +7,7 @@ module Zap.Parser.Expr
   , parseLetBinding
   , parsePrintStatement
   , parseSingleBindingLine
+  , parseWhileExpr
   , isPrint
   , isStringLit
   , isValidName
@@ -93,7 +94,25 @@ parseExpr parsers = do
 parseExpression :: Parser Expr
 parseExpression = do
     traceM "Parsing complete expression"
-    parseAdditive
+    parseComparison
+
+parseComparison :: Parser Expr
+parseComparison = do
+    traceM "Parsing comparison expression"
+    left <- parseAdditive
+    remainingComparison left
+  where
+    remainingComparison left = do
+      state <- get
+      case stateTokens state of
+        (tok:_) -> case locToken tok of
+          TOperator "<" -> do
+            traceM "Found less than operator"
+            _ <- matchToken isOperator "<"
+            right <- parseAdditive
+            return $ BinOp Lt left right
+          _ -> return left
+        [] -> return left
 
 -- Parse addition and subtraction with proper precedence
 parseAdditive :: Parser Expr
@@ -106,6 +125,7 @@ parseAdditive = do
       state <- get
       case stateTokens state of
         (tok:_) -> case locToken tok of
+
           TOperator "+" -> do
             traceM "Found addition operator"
             _ <- matchToken isOperator "+"
@@ -431,6 +451,15 @@ parsePrintStatement = do
             -- Traditional style print without parentheses
             expr <- parseExpression  -- This will handle variable references
             return $ Call "print" [expr]
+
+parseWhileExpr :: Parser Expr
+parseWhileExpr = do
+  traceM "Parsing while expression"
+  _ <- matchToken (\t -> t == TWord "while") "while keyword"
+  condition <- parseExpression
+  _ <- matchToken isColon ":"
+  body <- parseExpression
+  return $ While condition body
 
 vecTypeFromString :: String -> VecType
 vecTypeFromString "Vec2" = Vec2 Float32

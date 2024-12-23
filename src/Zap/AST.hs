@@ -90,4 +90,5 @@ data Expr
   | ArrayLit Type [Expr]               -- Array literal
   | Index Expr Expr                    -- Array indexing
   | VarLit String Expr
+  | While Expr Expr  -- Condition and body expressions
   deriving (Show, Eq)
