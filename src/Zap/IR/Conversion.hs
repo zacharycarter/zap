@@ -32,18 +32,12 @@ data IRGenState = IRGenState
   { tempCounter :: Int
   , blockCounter :: Int
   , varEnvironment :: M.Map String IRType
+  , funcEnvironment :: M.Map String (IRType, [IRType])  -- Return type and param types
   }
 
-initialState :: IRGenState
-initialState = IRGenState 0 0 M.empty
-
 convertToIR :: Program -> Either IRConversionError IR
-convertToIR program = evalState (runExceptT $ convertProgram program) initialState
-
-convertProgram :: Program -> IRConverter IR
-convertProgram (Program tops) = do
+convertToIR (Program tops) = runIRConverter (do
     traceM "\n=== Starting IR Conversion ==="
-    traceM $ "Converting program with " ++ show (length tops) ++ " top-level expressions"
 
     -- Process type declarations first to build environment
     forM_ tops $ \case
@@ -55,16 +49,24 @@ convertProgram (Program tops) = do
 
     -- Convert declarations
     decls <- mapM convertDecl [d | TLDecl d <- tops]
-
-    -- Convert all TLType struct definitions into IRStruct declarations
     let structDecls = [ IRStruct (T.pack name) [(T.pack fn, convertType ft) | (fn,ft) <- fields]
                       | TLType name (TypeStruct sName fields) <- tops, name == sName ]
-
-    -- Convert expressions
     exprs <- concat <$> sequence [convertTopLevel t | t@(TLExpr _) <- tops]
 
     traceM "Finished converting all top-level expressions"
-    return $ IRProgram (decls ++ structDecls) exprs
+    return $ IRProgram (decls ++ structDecls) exprs) initState
+  where
+    initState = IRGenState
+      { varEnvironment = M.empty
+      , funcEnvironment = M.fromList
+        [ ("print", (IRTypeVoid, [IRTypeAny]))  -- Built-in print function
+        ]
+      , tempCounter = 0
+      , blockCounter = 0
+      }
+
+runIRConverter :: IRConverter a -> IRGenState -> Either IRConversionError a
+runIRConverter m s = evalState (runExceptT m) s
 
 convertTopLevel :: TopLevel -> IRConverter [IRExpr]
 convertTopLevel (TLExpr expr) = do
@@ -76,14 +78,36 @@ convertTopLevel _ = return []
 convertDecl :: Decl -> IRConverter IRDecl
 convertDecl (DFunc name params retType body) = do
     traceM $ "Converting function declaration: " ++ name
+
+    -- Save current environments
+    originalVarEnv <- gets varEnvironment
+
+    -- Add function to environment for recursive calls
+    let paramTypes = [convertType t | Param _ t <- params]
+    let irRetType = convertType retType
+    modify $ \s -> s { funcEnvironment = M.insert name (irRetType, paramTypes) (funcEnvironment s) }
+
+    -- Add parameters to var environment
+    let paramVars = M.fromList [(name, convertType typ) | Param name typ <- params]
+    modify $ \s -> s { varEnvironment = M.union paramVars (varEnvironment s) }
+
+    -- Convert function body with parameters in scope
     convertedBody <- convertExpr body
-    return $ IRFunc (T.pack name)
-                    [(T.pack n, convertType t) | Param n t <- params]
-                    (convertType retType)
-                    convertedBody
+
+    -- Restore original var environment
+    modify $ \s -> s { varEnvironment = originalVarEnv }
+
+    return $ IRFunc
+        (T.pack name)
+        [(T.pack n, convertType t) | Param n t <- params]
+        (convertType retType)
+        convertedBody
+
 convertDecl (DStruct name fields) = do
     traceM $ "Converting struct declaration: " ++ name
-    return $ IRStruct (T.pack name) [(T.pack fname, convertType ftype) | (fname, ftype) <- fields]
+    return $ IRStruct
+        (T.pack name)
+        [(T.pack fname, convertType ftype) | (fname, ftype) <- fields]
 
 convertExpr :: Expr -> IRConverter IRExpr
 convertExpr expr = do

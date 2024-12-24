@@ -2,11 +2,14 @@
 module Zap.Parser.Expr
   ( ExprParser(..)
   , defaultExprParser
+  , mapLexError
   , parseExpr
+  , parseExprFromText
   , parseExpression
   , parseLetBinding
   , parsePrintStatement
   , parseSingleBindingLine
+  , parseFuncDecl
   , parseVarDecl
   , parseWhileExpr
   , isPrint
@@ -19,6 +22,7 @@ import Control.Monad.State
 import Control.Monad.Error.Class
 import qualified Data.Text as T
 import Debug.Trace
+
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
@@ -241,8 +245,11 @@ parseBaseTerm = do
                 return $ StrLit s
 
             TNumber n -> do
+                traceM $ "Found numeric literal: " ++ n
                 _ <- matchToken isNumber "number"
-                return $ NumLit Float32 n
+                if '.' `elem` n
+                    then return $ NumLit Float32 n
+                    else return $ NumLit Int32 n
 
             TWord name | isValidName (locToken tok) -> do
                 traceM $ "Found identifier: " ++ name
@@ -542,6 +549,69 @@ parseWhileBody indent = do
             , blockResult = bodyResult
             }
 
+parseFuncDecl :: Parser Decl
+parseFuncDecl = do
+    traceM "Parsing function declaration"
+    _ <- matchToken (\t -> t == TWord "fn") "fn"
+    nameTok <- matchToken isValidName "function name"
+    _ <- matchToken (== TLeftParen) "("
+
+    -- Parse parameters
+    params <- parseParams
+    traceM $ "Parsed parameters: " ++ show params
+
+    -- Parse return type
+    _ <- matchToken (== TColon) ":"
+    retTypeTok <- matchToken isValidName "return type"
+    retType <- parseTypeToken retTypeTok
+
+    _ <- matchToken (== TEquals) "="
+    body <- parseExpression
+
+    case locToken nameTok of
+        TWord name -> return $ DFunc name params retType body
+        _ -> throwError $ UnexpectedToken nameTok "function name"
+
+-- Helper to parse parameters with shared type annotation
+parseParams :: Parser [Param]
+parseParams = do
+    traceM "Parsing function parameters"
+    -- Parse comma-separated parameter names
+    names <- parseParamNames
+    traceM $ "Parsed parameter names: " ++ show names
+
+    -- Parse shared type annotation
+    _ <- matchToken (== TColon) ":"
+    typeTok <- matchToken isValidName "parameter type"
+    paramType <- parseTypeToken typeTok
+    traceM $ "Parsed parameter type: " ++ show paramType
+
+    _ <- matchToken (== TRightParen) ")"
+
+    -- Create params with shared type
+    return [Param name paramType | name <- names]
+  where
+    parseParamNames :: Parser [String]
+    parseParamNames = do
+        nameTok <- matchToken isValidName "parameter name"
+        case locToken nameTok of
+            TWord name -> do
+                state <- get
+                case stateTokens state of
+                    (tok:_) | locToken tok == TComma -> do
+                        _ <- matchToken (== TComma) ","
+                        rest <- parseParamNames
+                        return (name : rest)
+                    _ -> return [name]
+            _ -> throwError $ UnexpectedToken nameTok "parameter name"
+
+-- Helper to parse type tokens
+parseTypeToken :: Located -> Parser Type
+parseTypeToken tok = case locToken tok of
+    TWord "i32" -> return $ TypeNum Int32
+    TWord "f32" -> return $ TypeNum Float32
+    TWord other -> throwError $ UnexpectedToken tok "valid type"
+
 parseVarDecl :: Parser Expr
 parseVarDecl = do
     traceM "Parsing variable declaration"
@@ -552,6 +622,11 @@ parseVarDecl = do
     case locToken nameTok of
         TWord name -> return $ VarDecl name value
         _ -> throwError $ UnexpectedToken nameTok "identifier"
+
+parseExprFromText :: T.Text -> Either ParseError Expr
+parseExprFromText input = do
+    tokens <- mapLexError $ tokenize input
+    runParser parseExpression tokens
 
 vecTypeFromString :: String -> VecType
 vecTypeFromString "Vec2" = Vec2 Float32
@@ -566,3 +641,10 @@ defaultExprParser = ExprParser
   , parseBreak = parseBreakImpl
   , parseResult = parseResultImpl
   }
+
+mapLexError :: Either LexError a -> Either ParseError a
+mapLexError (Left (UnterminatedString line col)) =
+    Left $ EndOfInput $ "Unterminated string at line " ++ show line ++ ", column " ++ show col
+mapLexError (Left (InvalidCharacter c line col)) =
+    Left $ EndOfInput $ "Invalid character '" ++ [c] ++ "' at line " ++ show line ++ ", column " ++ show col
+mapLexError (Right a) = Right a

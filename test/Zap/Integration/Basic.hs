@@ -58,7 +58,13 @@ basicTests =
   , TestCase
       { testName = "while_loop"
       , sourceCode = "var n = 0\nwhile n < 3:\n  print n\n  n += 1"
-      , expectedOutput = ""
+      , expectedOutput = "0\n1\n2"
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "function_call_with_params_and_return_val"
+      , sourceCode = "fn add(x, y: i32): i32 =\n  x + y\n\nprint add(1, 2)"
+      , expectedOutput = "3"
       , expectedExitCode = ExitSuccess
       }
   ]

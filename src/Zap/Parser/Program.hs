@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (isValidName, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr (mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -93,6 +93,11 @@ parseTopLevel = do
                     expr <- parseLetBlock
                     traceM $ "Parsed let block: " ++ show expr
                     return $ TLExpr expr
+                TWord "fn" -> do
+                    traceM "Found function declaration at top-level"
+                    decl <- parseFuncDecl
+                    traceM $ "Parsed func decl: " ++ show decl
+                    return $ TLDecl decl
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"
@@ -217,9 +222,3 @@ parseType = do
             throwError $ UnexpectedToken tok "type name"
         _ -> throwError $ UnexpectedToken tok "type name"
 
-mapLexError :: Either LexError a -> Either ParseError a
-mapLexError (Left (UnterminatedString line col)) =
-    Left $ EndOfInput $ "Unterminated string at line " ++ show line ++ ", column " ++ show col
-mapLexError (Left (InvalidCharacter c line col)) =
-    Left $ EndOfInput $ "Invalid character '" ++ [c] ++ "' at line " ++ show line ++ ", column " ++ show col
-mapLexError (Right a) = Right a

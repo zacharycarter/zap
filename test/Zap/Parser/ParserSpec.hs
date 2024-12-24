@@ -35,14 +35,11 @@ spec = do
           "Unexpected parse result: " ++ show other
 
     it "parses print with complex expression" $ do
-      let input = "print(1 + 2 * 3)"
-      case parseProgram input of
-        Right [TLExpr (Call "print" [BinOp Add (NumLit Float32 "1")
-                                   (BinOp Mul (NumLit Float32 "2") (NumLit Float32 "3"))])] ->
-          return ()
-        Left err -> expectationFailure $ "Parse failed: " ++ show err
-        Right other -> expectationFailure $
-          "Unexpected parse result: " ++ show other
+      parseProgram "print(1 + 2 * 3)" `shouldBe`
+        Right [TLExpr (Call "print" [
+            BinOp Add
+                (NumLit Int32 "1")
+                (BinOp Mul (NumLit Int32 "2") (NumLit Int32 "3"))])]
 
     it "enforces print statement indentation" $ do
       let input = "block test:\nprint \"Hello\""  -- Not indented
@@ -99,7 +96,7 @@ spec = do
     it "parses simple while loop" $ do
       let input = "while x < 3:\n  print x"
       case parseProgram input of
-        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Float32 "3")) (Block scope))] ->
+        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Int32 "3")) (Block scope))] ->
           blockExprs scope `shouldBe` [Call "print" [Var "x"]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -109,3 +106,10 @@ spec = do
     it "enforces proper while loop structure" $ do
       let input = "while x < 3"  -- Missing colon
       parseProgram input `shouldSatisfy` isLeft
+
+  describe "Numeric literal parsing" $ do
+    it "parses integer literals as Int32" $ do
+      parseExprFromText "42" `shouldBe` Right (NumLit Int32 "42")
+
+    it "parses decimal literals as Float32" $ do
+      parseExprFromText "42.0" `shouldBe` Right (NumLit Float32 "42.0")

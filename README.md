@@ -138,9 +138,22 @@ while n < 3:
 ```
 
 ``` shell
-0.000000
-1.000000
-2.000000
+0
+1
+2
+```
+
+### Functions With Implicit Result
+
+``` zap
+fn add(x, y: i32): i32 =
+  x + y
+
+print add(1, 2)
+```
+
+``` shell
+3
 ```
 
 ## Contributing
