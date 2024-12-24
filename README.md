@@ -137,6 +137,12 @@ while n < 3:
   n += 1
 ```
 
+``` shell
+0.000000
+1.000000
+2.000000
+```
+
 ## Contributing
 Contributions are welcome! Please follow these steps:
 1. Fork the repository.
