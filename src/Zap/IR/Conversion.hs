@@ -189,6 +189,30 @@ convertExpr expr = do
                 resultType
                 (S.singleton PureEffect)
 
+        AssignOp name op expr -> do
+          traceM $ "\nConverting binary assignment operation: " ++ show op
+          val <- convertExpr expr
+          traceM $ "Converted binary assignment operation expression: " ++ show val
+          let varExpr = IRExpr
+                { metadata = IRMetadata
+                  { exprType = IRTypeNum IRInt32  -- We should infer this from context
+                  , metaEffects = S.singleton ReadEffect
+                  , metaSourcePos = Nothing
+                  }
+              , expr = IRVar (T.pack name)
+              }
+              binOp = IRBinOp (convertAssignOp op) varExpr val
+              result = IRExpr
+                { metadata = IRMetadata
+                  { exprType = exprType (metadata val)
+                  , metaEffects = S.fromList [ReadEffect, WriteEffect]
+                  , metaSourcePos = Nothing
+                  }
+                , expr = binOp
+                }
+
+          return $ result
+
         Call "print" [arg] -> do
             traceM "\nConverting print call"
             convertedArg <- convertExpr arg
@@ -280,6 +304,28 @@ convertExpr expr = do
                     traceM $ "Not a struct type: " ++ show other
                     throwError $ InvalidType "Field access on non-struct type"
 
+        VarDecl name val -> do
+            traceM $ "Converting variable declaration: " ++ name
+            convertedVal <- convertExpr val
+            let valType = exprType $ metadata convertedVal
+            -- Add variable to environment
+            modify $ \s -> s { varEnvironment = M.insert name valType (varEnvironment s) }
+            -- Variable declarations use let allocation with default strategy
+            return $ mkPureExpr valType $ IRLetAlloc (T.pack name) convertedVal IRAllocDefault
+
+        While cond body -> do
+            traceM $ "Converting while expression"
+            -- Convert condition
+            convertedCond <- convertExpr cond
+            traceM $ "Converted condition: " ++ show convertedCond
+
+            -- Convert body
+            convertedBody <- convertExpr body
+            traceM $ "Converted body: " ++ show convertedBody
+
+            return $ mkEffectfulExpr IRTypeVoid (S.fromList [ReadEffect, WriteEffect]) $
+                IRBlock (T.pack "while") [convertedCond, convertedBody] Nothing
+
         _ -> do
             traceM $ "\nERROR: Unsupported expression: " ++ show expr
             throwError $ UnsupportedExpression "Unsupported expression type"
@@ -317,6 +363,14 @@ convertOp op = case op of
     Mul -> IRMul
     Div -> IRDiv
     Dot -> IRDot
+    Lt -> IRLt
+    Gt -> IRGt
+    Eq -> IREq
+    _ -> error "Unsupported operator"
+
+convertAssignOp :: Op -> IROp
+convertAssignOp op = case op of
+    Add -> IRAddAssign
     _ -> error "Unsupported operator"
 
 convertType :: Type -> IRType
@@ -359,6 +413,12 @@ getBinOpType op e1 e2 = case (op, exprType $ metadata e1, exprType $ metadata e2
             IRVec2 t -> IRTypeNum t
             IRVec3 t -> IRTypeNum t
             IRVec4 t -> IRTypeNum t
+    (IRLt, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return IRTypeBool
+    (IRGt, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return IRTypeBool
+    (IREq, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+        return IRTypeBool
     _ -> throwError $ InvalidType $ "Type mismatch in binary operation: " ++
          show (exprType $ metadata e1) ++ " and " ++
          show (exprType $ metadata e2)

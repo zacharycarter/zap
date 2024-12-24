@@ -47,6 +47,7 @@ data Op
   | And
   | Or
   | Dot
+  | AddAssign
   deriving (Show, Eq)
 
 data Param = Param String Type
@@ -91,4 +92,7 @@ data Expr
   | Index Expr Expr                    -- Array indexing
   | VarLit String Expr
   | While Expr Expr  -- Condition and body expressions
+  | VarDecl String Expr  -- Variable declaration with initial value
+  | Assign String Expr -- Assignment operator
+  | AssignOp String Op Expr  -- Assignment with operator (e.g. +=)
   deriving (Show, Eq)

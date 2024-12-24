@@ -7,6 +7,7 @@ module Zap.Parser.Expr
   , parseLetBinding
   , parsePrintStatement
   , parseSingleBindingLine
+  , parseVarDecl
   , parseWhileExpr
   , isPrint
   , isStringLit
@@ -65,7 +66,7 @@ isNumber (TNumber _) = True
 isNumber _ = False
 
 isOperator :: Token -> Bool
-isOperator (TOperator op) = op `elem` ["+","-","*","/","<", ">", "=", "&", "|"]
+isOperator (TOperator op) = op `elem` ["+","-","*","/","<", ">", "=", "&", "|", "+="]
 isOperator _ = False
 
 isVecConstructor :: Token -> Bool
@@ -94,7 +95,28 @@ parseExpr parsers = do
 parseExpression :: Parser Expr
 parseExpression = do
     traceM "Parsing complete expression"
-    parseComparison
+    left <- parseComparison
+    traceM $ "Parsed comparison expression: " ++ show left
+    -- Add more detailed state logging
+    state <- get
+    traceM $ "Expression state before operator check: " ++ show (take 3 $ stateTokens state)
+    case stateTokens state of
+        (tok:_) -> case locToken tok of
+            TOperator "+=" -> do
+                traceM $ "Found += operator at col " ++ show (locCol tok)
+                _ <- matchToken (\t -> t == TOperator "+=") "+="
+                right <- parseComparison
+                case left of
+                    Var name -> do
+                        traceM $ "Creating += assignment for " ++ name
+                        return $ AssignOp name Add right
+                    _ -> do
+                        traceM $ "Invalid left side for +=: " ++ show left
+                        throwError $ UnexpectedToken tok "variable name before +="
+            _ -> do
+                traceM $ "No += found, token was: " ++ show tok
+                return left
+        [] -> return left
 
 parseComparison :: Parser Expr
 parseComparison = do
@@ -123,14 +145,21 @@ parseAdditive = do
   where
     remainingAdditive left = do
       state <- get
+      traceM $ "Parsing remaining additive with left: " ++ show left
       case stateTokens state of
         (tok:_) -> case locToken tok of
-
           TOperator "+" -> do
             traceM "Found addition operator"
             _ <- matchToken isOperator "+"
             right <- parseMultiplicative
             remainingAdditive (BinOp Add left right)
+          TOperator "+=" -> do
+            traceM "Found += operator"
+            _ <- matchToken (\t -> t == TOperator "+=") "+="
+            right <- parseMultiplicative
+            case left of
+              Var name -> return $ AssignOp name Add right
+              _ -> throwError $ UnexpectedToken tok "variable for assignment"
           TOperator "-" -> do
             traceM "Found subtraction operator"
             _ <- matchToken isOperator "-"
@@ -171,10 +200,34 @@ parseTerm = do
     traceM "Parsing term"
     state <- get
     case stateTokens state of
-        (tok:_) -> case locToken tok of
+        (tok:rest) -> case locToken tok of
+            TWord name | isValidName (locToken tok) -> do
+                _ <- matchToken isValidName "identifier"
+                parseFieldOrCallChain (Var name)
             TWord "print" -> parsePrintStatement
             _ -> parseBaseTerm >>= parseFieldAccess
         [] -> throwError $ EndOfInput "term"
+
+parseFieldOrCallChain :: Expr -> Parser Expr
+parseFieldOrCallChain expr = do
+    state <- get
+    case stateTokens state of
+        (tok:_) -> case locToken tok of
+            TDot -> do
+                _ <- matchToken (== TDot) "dot"
+                fieldTok <- matchToken isValidName "field name"
+                case locToken fieldTok of
+                    TWord field -> parseFieldOrCallChain (FieldAccess expr field)
+                    _ -> throwError $ UnexpectedToken fieldTok "field name"
+            TLeftParen -> do
+                _ <- matchToken (== TLeftParen) "("
+                args <- parseCallArgs
+                _ <- matchToken (== TRightParen) ")"
+                case expr of
+                    Var name -> parseFieldOrCallChain (Call name args)
+                    _ -> throwError $ UnexpectedToken tok "expected a function name for the call"
+            _ -> return expr
+        [] -> return expr
 
 parseBaseTerm :: Parser Expr
 parseBaseTerm = do
@@ -206,18 +259,22 @@ parseBaseTerm = do
 
 parseMaybeCall :: String -> Parser Expr
 parseMaybeCall fname = do
+    traceM $ "parseMaybeCall: fname = " ++ fname
     state <- get
     case stateTokens state of
         (tok:_)
             | locToken tok == TLeftParen -> do
+                traceM $ "Found constructor/function call with parens"
                 _ <- matchToken (== TLeftParen) "opening parenthesis"
                 args <- parseCallArgs
                 _ <- matchToken (== TRightParen) "closing parenthesis"
                 return (Call fname args)
             | locToken tok == TComma || isCallArgToken (locToken tok) -> do
+                traceM $ "Found constructor/function call with args"
                 args <- parseCallArgs
                 return (Call fname args)
-            | otherwise ->
+            | otherwise -> do
+                traceM $ "Found identifier: falling back to Var"
                 return (Var fname)
         [] -> return (Var fname)
   where
@@ -367,9 +424,14 @@ parseBlockExprs baseIndent = do
                             blockExpr <- parseBlockImpl
                             (moreExprs, resultExpr) <- parseBlockExprs baseIndent
                             return (blockExpr : moreExprs, resultExpr)
+                        TWord "print" -> do
+                            traceM "Found print statement in block"
+                            printExpr <- parsePrintStatement
+                            (moreExprs, resultExpr) <- parseBlockExprs baseIndent
+                            return (printExpr : moreExprs, resultExpr)
                         _ -> do
-                            traceM "Parsing basic expression"
-                            expr <- parseBasicExprImpl
+                            traceM "Parsing block expression"
+                            expr <- parseExpression  -- Change from parseBasicExpr to parseExpression
                             (moreExprs, resultExpr) <- parseBlockExprs baseIndent
                             return (expr : moreExprs, resultExpr)
 
@@ -454,12 +516,42 @@ parsePrintStatement = do
 
 parseWhileExpr :: Parser Expr
 parseWhileExpr = do
-  traceM "Parsing while expression"
-  _ <- matchToken (\t -> t == TWord "while") "while keyword"
-  condition <- parseExpression
-  _ <- matchToken isColon ":"
-  body <- parseExpression
-  return $ While condition body
+    traceM "Parsing while expression"
+    _ <- matchToken (\t -> t == TWord "while") "while keyword"
+    condition <- parseExpression
+    _ <- matchToken isColon ":"
+    bodyState <- get
+    traceM $ "While loop body state: " ++ show bodyState
+    let currentIndent = stateIndent bodyState
+    let newIndent = currentIndent + 2
+    modify (\s -> s { stateIndent = newIndent })
+    (bodyExprs, mResult) <- parseBlockExprs newIndent
+    let blockScope = BlockScope "while_body" bodyExprs mResult
+    let body = Block blockScope
+    traceM $ "Parsed while body: " ++ show body
+    return $ While condition body
+
+parseWhileBody :: Int -> Parser Expr
+parseWhileBody indent = do
+    (bodyExprs, bodyResult) <- parseBlockExprs indent
+    case bodyExprs of
+        [] -> throwError $ EndOfInput "while body"
+        _ -> return $ Block $ BlockScope
+            { blockLabel = "while_body"
+            , blockExprs = bodyExprs
+            , blockResult = bodyResult
+            }
+
+parseVarDecl :: Parser Expr
+parseVarDecl = do
+    traceM "Parsing variable declaration"
+    _ <- matchToken (\t -> t == TWord "var") "var"
+    nameTok <- matchToken isValidName "identifier"
+    _ <- matchToken (== TEquals) "equals sign"
+    value <- parseExpression
+    case locToken nameTok of
+        TWord name -> return $ VarDecl name value
+        _ -> throwError $ UnexpectedToken nameTok "identifier"
 
 vecTypeFromString :: String -> VecType
 vecTypeFromString "Vec2" = Vec2 Float32

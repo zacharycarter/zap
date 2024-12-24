@@ -113,7 +113,7 @@ print (vec1 + vec2)
 (5.000000, 7.000000, 9.000000)
 ```
 
-### Struct Definitions (WIP)
+### Struct Definitions
 ```zap
 type
   Point = struct
@@ -126,6 +126,15 @@ print origin.x
 
 ``` shell
 5.000000
+```
+
+### While Loops
+
+``` zap
+var n = 0
+while n < 3:
+  print n
+  n += 1
 ```
 
 ## Contributing

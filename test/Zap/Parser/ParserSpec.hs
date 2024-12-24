@@ -99,8 +99,8 @@ spec = do
     it "parses simple while loop" $ do
       let input = "while x < 3:\n  print x"
       case parseProgram input of
-        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Float32 "3"))
-                      (Call "print" [Var "x"]))] -> return ()
+        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Float32 "3")) (Block scope))] ->
+          blockExprs scope `shouldBe` [Call "print" [Var "x"]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other

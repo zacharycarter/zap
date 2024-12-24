@@ -138,3 +138,47 @@ spec = do
             ]
       tokenize input `shouldBe` Right expected
 
+  describe "Operator lexing" $ do
+    it "tokenizes simple operators correctly" $ do
+      let input = T.pack "a + b"
+      let expected = [
+            Located (TWord "a") 1 1,
+            Located (TOperator "+") 3 1,
+            Located (TWord "b") 5 1,
+            Located TEOF 6 1
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "tokenizes compound += operator" $ do
+      let input = T.pack "x += 1"
+      let expected = [
+            Located (TWord "x") 1 1,
+            Located (TOperator "+=") 3 1,
+            Located (TNumber "1") 6 1,
+            Located TEOF 7 1
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "correctly handles += within expressions" $ do
+      let input = T.pack "a += b + c"
+      let expected = [
+            Located (TWord "a") 1 1,
+            Located (TOperator "+=") 3 1,
+            Located (TWord "b") 6 1,
+            Located (TOperator "+") 8 1,
+            Located (TWord "c") 10 1,
+            Located TEOF 11 1
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "distinguishes between + and += operators" $ do
+      let input = T.pack "a + b += c"
+      let expected = [
+            Located (TWord "a") 1 1,
+            Located (TOperator "+") 3 1,
+            Located (TWord "b") 5 1,
+            Located (TOperator "+=") 7 1,
+            Located (TWord "c") 10 1,
+            Located TEOF 11 1
+            ]
+      tokenize input `shouldBe` Right expected

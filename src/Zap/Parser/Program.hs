@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (isValidName, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr (isValidName, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -58,6 +58,10 @@ parseTopLevel = do
                 TWord "while" -> do
                     traceM "Found while expression at top-level"
                     expr <- parseWhileExpr
+                    return $ TLExpr expr
+                TWord "var" -> do
+                    traceM "Found variable declaration at top-level"
+                    expr <- parseVarDecl
                     return $ TLExpr expr
                 TType -> do
                     traceM "Found type definition"

@@ -79,6 +79,10 @@ data IROp
   | IRDiv
   | IRDot
   | IRCross
+  | IRLt
+  | IRGt
+  | IREq
+  | IRAddAssign
   deriving (Show, Eq, Ord)
 
 -- | Effects that expressions can have

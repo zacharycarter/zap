@@ -160,10 +160,15 @@ lexOperator line col acc cs state = do
         [] -> do
             let tok = case reverse acc of
                     "=" -> Located TEquals col line
+                    "+=" -> Located (TOperator "+=") col line
                     op -> Located (TOperator op) col line
             Right [tok, Located TEOF (col + length acc) line]
         (c:rest)
-            | isOperator c -> lexOperator line col (c:acc) rest state
+            | isOperator c -> do
+                -- Handle potential compound operator
+                case (reverse acc, c) of
+                    ("+", '=') -> lexOperator line col ('=':acc) rest state
+                    _ -> lexOperator line col (c:acc) rest state
             | c == '(' && reverse acc `elem` ["Vec2", "Vec3", "Vec4"] -> do
                 let newState = state { inVectorLit = True }
                 rest' <- scanTokensWithState newState line (col + length acc + 1) rest
@@ -172,6 +177,7 @@ lexOperator line col acc cs state = do
             | otherwise -> do
                 let tok = case reverse acc of
                         "=" -> Located TEquals col line
+                        "+=" -> Located (TOperator "+=") col line
                         op -> Located (TOperator op) col line
                 rest' <- scanTokensWithState state line (col + length acc) (c:rest)
                 Right (tok : rest')

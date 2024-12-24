@@ -153,6 +153,20 @@ generateTypedExpr irExpr = do
                 (IRDiv, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
                     return (T.concat ["(", lval, " / ", rval, ")"], IRTypeNum t1)
 
+                -- Assignment operators
+                (IRAddAssign, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " += ", rval, ")"], IRTypeNum t1)
+
+                -- Comparison operators
+                (IRLt, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " < ", rval, ")"], IRTypeBool)
+
+                (IRGt, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " > ", rval, ")"], IRTypeBool)
+                   
+                (IREq, IRTypeNum t1, IRTypeNum t2) | t1 == t2 ->
+                    return (T.concat ["(", lval, " == ", rval, ")"], IRTypeBool)
+
                 -- Handle incompatible vector types
                 (_, IRTypeVec v1, IRTypeVec v2) | v1 /= v2 ->
                     throwError $ UnsupportedOperation op ltyp rtyp
@@ -301,6 +315,23 @@ generateStmt irExpr = do
                     return $ T.concat ["    printf(\"", fmt, "\\n\", ", val, ");"]
                 _ ->
                     return $ T.concat ["    printf(\"", fmt, "\\n\", ", val, ");"]
+
+        IRBlock "while" (cond:body:_) _ -> do
+            -- Special case for while blocks
+            (condExpr, condType) <- generateTypedExpr cond
+            bodyStmt <- generateStmt body
+            return $ T.concat [
+                "    while (", condExpr, ") {\n",
+                bodyStmt, "\n",
+                "    }"]
+
+        IRBlock name exprs mResult -> do
+            -- General case for other blocks
+            stmts <- mapM generateStmt exprs
+            res <- case mResult of
+                Just r -> generateStmt r
+                Nothing -> return ""
+            return $ T.unlines (stmts ++ [res])
 
         IRBlockAlloc name exprs mResult -> do
             stmts <- mapM generateStmt exprs

@@ -55,4 +55,10 @@ basicTests =
       , expectedOutput = "1.000000"
       , expectedExitCode = ExitSuccess
       }
+  , TestCase
+      { testName = "while_loop"
+      , sourceCode = "var n = 0\nwhile n < 3:\n  print n\n  n += 1"
+      , expectedOutput = ""
+      , expectedExitCode = ExitSuccess
+      }
   ]
