@@ -4,6 +4,7 @@ module Zap.Analysis.CFG
   , BasicBlock(..)
   , CFGNode(..)
   , buildCFG
+  , buildProgramCFG
   , CFGError(..)
   ) where
 
@@ -74,21 +75,21 @@ initialState = CFGState
 buildCFG :: [IRExpr] -> Either CFGError CFG
 buildCFG [] = Left EmptyProgram
 buildCFG exprs = runExcept $ do
-  -- First phase: Create all blocks
   (nodes, edges) <- evalStateT (createBlocks exprs) initialState
-
-  -- Second phase: Add all edges
   let withEdges = addEdgesToGraph nodes edges
-
-  -- Get entry and exit nodes
   let entry = minimum $ M.keys nodes
       exit = maximum $ M.keys nodes
-
   return $ CFG
     { cfgNodes = withEdges
     , cfgEntry = entry
     , cfgExit = exit
     }
+
+buildProgramCFG :: IR -> Either CFGError CFG
+buildProgramCFG (IRProgram decls exprs) =
+  let funcExprs = [body | IRFunc _ _ _ body <- decls]
+      allExprs = funcExprs ++ exprs
+  in buildCFG allExprs
 
 -- | Create all blocks without edges
 createBlocks :: [IRExpr] -> CFGBuilder (M.Map NodeId CFGNode, [Edge])

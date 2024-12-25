@@ -350,6 +350,19 @@ convertExpr expr = do
             return $ mkEffectfulExpr IRTypeVoid (S.fromList [ReadEffect, WriteEffect]) $
                 IRBlock (T.pack "while") [convertedCond, convertedBody] Nothing
 
+        Assign name val -> do
+            -- Convert the value expression
+            convertedVal <- convertExpr val
+            -- Get variable type from environment
+            state <- get
+            case M.lookup name (varEnvironment state) of
+                Just varType -> do
+                    withMetadata
+                        (IRLetAlloc (T.pack name) convertedVal IRAllocDefault)
+                        varType
+                        (S.fromList [WriteEffect])
+                Nothing -> throwError $ UnsupportedExpression $ "Undefined variable: " ++ name
+
         _ -> do
             traceM $ "\nERROR: Unsupported expression: " ++ show expr
             throwError $ UnsupportedExpression "Unsupported expression type"

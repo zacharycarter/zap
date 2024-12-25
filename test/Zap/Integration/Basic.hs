@@ -67,4 +67,15 @@ basicTests =
       , expectedOutput = "3"
       , expectedExitCode = ExitSuccess
       }
+  , TestCase
+    { testName = "function_with_local_var"
+    , sourceCode = T.unlines
+        [ "fn sum_squares(x, y: i32): i32 ="
+        , "  var sum = x * x"  -- Local variable
+        , "  sum = sum + y * y"
+        , "  sum"
+        ]
+    , expectedOutput = ""  -- We'll need to add print to see output
+    , expectedExitCode = ExitSuccess
+    }
   ]

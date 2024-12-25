@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr (parseBlockImpl, parseBlockExprs, mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -27,30 +27,64 @@ parseProgram input = do
 
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
-    state <- get
-    traceM "\n--- Parsing Top Level Expressions ---"
-    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
-    case stateTokens state of
-        [] -> do
-            traceM "No more tokens to parse, returning empty list"
-            pure []
-        (tok:_) -> case locToken tok of
-            TEOF -> do
-                traceM "Found EOF token, returning empty list"
-                pure []
-            _ -> do
-                traceM $ "Parsing top-level expression starting with: " ++ show tok
-                expr <- parseTopLevel
-                traceM $ "Successfully parsed top-level expression: " ++ show expr
-                rest <- parseTopLevels
-                traceM $ "Collected expressions so far: " ++ show (expr:rest)
-                pure (expr : rest)
+  traceM "\n=== Starting parseTopLevels ==="
+  let ctx = makeIndentContext TopLevel 0 0
+  parseTopLevelsWith ctx
+
+parseTopLevelsWith :: IndentContext -> Parser [TopLevel]
+parseTopLevelsWith ctx = do
+  state <- get
+  traceM $ "\n=== parseTopLevelsWith ==="
+  traceM $ "Context type: " ++ show ctx
+  traceM $ "Current state indent: " ++ show (stateIndent state)
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
+  case stateTokens state of
+    [] -> return []
+    (tok:_) -> case locToken tok of
+      TEOF -> do
+        traceM "Encountered TEOF while parsing top level expressions"
+        return []
+      _ -> do
+        -- Reset indentation for each top-level expression
+        modify $ \s -> s { stateIndent = 0 }
+        expr <- parseTopLevel
+        rest <- parseTopLevelsWith ctx
+        traceM $ "Parsed top level: " ++ show expr ++ " " ++ show rest
+        return (expr : rest)
+
+-- parseTopLevels :: Parser [TopLevel]
+-- parseTopLevels = do
+--     state <- get
+--     traceM "\n--- Parsing Top Level Expressions ---"
+--     traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
+--     traceM $ "Current indent: " ++ show (stateIndent state)  -- Add this debug line
+
+--     case stateTokens state of
+--         [] -> do
+--             traceM "No more tokens to parse, returning empty list"
+--             pure []
+--         (tok:_) -> case locToken tok of
+--             TEOF -> do
+--                 traceM "Found EOF token, returning empty list"
+--                 pure []
+--             _ -> do
+--                 -- Ensure we're at top-level indentation before parsing each expression
+--                 modify $ \s -> s { stateIndent = 0 }  -- Add this line
+
+--                 traceM $ "Parsing top-level expression starting with: " ++ show tok
+--                 expr <- parseTopLevel
+--                 traceM $ "Successfully parsed top-level expression: " ++ show expr
+--                 rest <- parseTopLevels
+--                 traceM $ "Collected expressions so far: " ++ show (expr:rest)
+--                 pure (expr : rest)
 
 parseTopLevel :: Parser TopLevel
 parseTopLevel = do
     state <- get
     traceM "\n--- Parsing Single Top Level Expression ---"
     traceM $ "Current state: " ++ show state
+    -- Store original indent level
+    origIndent <- gets stateIndent
     case stateTokens state of
         (tok:_) -> do
             traceM $ "Processing token: " ++ show tok
@@ -78,16 +112,27 @@ parseTopLevel = do
                         _ -> throwError $ UnexpectedToken typeNameTok "type name"
                 TWord "print" -> do
                     traceM "Found print statement at top-level"
-                    expr <- parsePrintStatement
-                    traceM $ "Parsed print statement: " ++ show expr
-                    return $ TLExpr expr
+                    if origIndent > 0
+                        then do
+                            traceM $ "Checking print indentation against level: " ++ show origIndent
+                            when (locCol tok < origIndent) $
+                                throwError $ IndentationError origIndent (locCol tok) GreaterEq
+                            expr <- parsePrintStatement
+                            return $ TLExpr expr
+                        else do
+                            expr <- parsePrintStatement
+                            return $ TLExpr expr
                 TWord "block" -> do
-                    traceM "Found block expression at top-level"
-                    when (locCol tok /= 1) $
-                        throwError $ IndentationError 1 (locCol tok) Equal
-                    expr <- parseBlock defaultExprParser
-                    traceM $ "Parsed block: " ++ show expr
-                    return $ TLExpr expr
+                    traceM "Found block at top level - parsing directly"
+                    expr <- parseBlockImpl  -- Parse block directly
+                    return $ TLExpr expr    -- Don't wrap in extra block
+                -- TWord "block" -> do
+                --     traceM "Found block expression at top-level"
+                --     when (locCol tok /= 1) $
+                --         throwError $ IndentationError 1 (locCol tok) Equal
+                --     expr <- parseBlockExprs BasicBlock 2
+                --     traceM $ "Parsed block: " ++ show expr
+                --     return $ TLExpr (makeBlock "block" expr)
                 TWord "let" -> do
                     traceM "Found let block at top-level"
                     expr <- parseLetBlock
@@ -95,8 +140,13 @@ parseTopLevel = do
                     return $ TLExpr expr
                 TWord "fn" -> do
                     traceM "Found function declaration at top-level"
+                    -- Save current indent before parsing function
+                    modify $ \s -> s { stateIndent = 0 }
+                    -- Parse the full function declaration
                     decl <- parseFuncDecl
-                    traceM $ "Parsed func decl: " ++ show decl
+                    -- Restore indent after function
+                    modify $ \s -> s { stateIndent = origIndent }
+                    traceM $ "Parsed function declaration: " ++ show decl
                     return $ TLDecl decl
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
@@ -104,6 +154,13 @@ parseTopLevel = do
         [] -> do
             traceM "No tokens available for top-level expression"
             throwError $ EndOfInput "expected top-level expression"
+
+makeBlock :: String -> ([Expr], Maybe Expr) -> Expr
+makeBlock label (exprs, mResult) = Block $ BlockScope
+  { blockLabel = label
+  , blockExprs = exprs
+  , blockResult = mResult
+  }
 
 parseLetBlock :: Parser Expr
 parseLetBlock = do

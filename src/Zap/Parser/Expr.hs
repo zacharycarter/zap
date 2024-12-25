@@ -3,12 +3,14 @@ module Zap.Parser.Expr
   ( ExprParser(..)
   , defaultExprParser
   , mapLexError
+  , parseBlockExprs
   , parseExpr
   , parseExprFromText
   , parseExpression
   , parseLetBinding
   , parsePrintStatement
   , parseSingleBindingLine
+  , parseBlockImpl
   , parseFuncDecl
   , parseVarDecl
   , parseWhileExpr
@@ -20,6 +22,7 @@ module Zap.Parser.Expr
 import Control.Monad (when, replicateM)
 import Control.Monad.State
 import Control.Monad.Error.Class
+import Data.Maybe (isJust, listToMaybe)
 import qualified Data.Text as T
 import Debug.Trace
 
@@ -38,7 +41,9 @@ data ExprParser = ExprParser
 -- Token validation helpers
 isValidName :: Token -> Bool
 isValidName (TWord name) = traceShow ("Validating name: " ++ name) $
-  not $ name `elem` ["break", "result", "block", "let"]
+   not (name `elem` ["break", "result", "block", "let", "var", "fn", "print"]) && -- Added "print"
+   not (null name) &&
+   (isAlpha (head name) || head name == '_')
 isValidName _ = False
 
 isBlockKeyword :: Token -> Bool
@@ -92,6 +97,7 @@ parseExpr parsers = do
           TWord "result" -> parseResult parsers
           TVec _ -> parseVectorLiteral
           TWord "print" -> parsePrintStatement
+          TWord "var" -> parseVarDecl
           _ -> parseExpression
       [] -> throwError $ EndOfInput "expression"
 
@@ -99,13 +105,15 @@ parseExpr parsers = do
 parseExpression :: Parser Expr
 parseExpression = do
     traceM "Parsing complete expression"
-    left <- parseComparison
+    left <- parseAssign
     traceM $ "Parsed comparison expression: " ++ show left
     -- Add more detailed state logging
     state <- get
     traceM $ "Expression state before operator check: " ++ show (take 3 $ stateTokens state)
     case stateTokens state of
-        (tok:_) -> case locToken tok of
+        (tok:_) -> do
+          traceM $ "Parsing expression starting with: " ++ show (locToken tok)
+          case locToken tok of
             TOperator "+=" -> do
                 traceM $ "Found += operator at col " ++ show (locCol tok)
                 _ <- matchToken (\t -> t == TOperator "+=") "+="
@@ -117,15 +125,55 @@ parseExpression = do
                     _ -> do
                         traceM $ "Invalid left side for +=: " ++ show left
                         throwError $ UnexpectedToken tok "variable name before +="
+            TEquals -> do
+                traceM $ "Found = operator at col " ++ show (locCol tok)
+                _ <- matchToken (\t -> t == TEquals) "="
+                right <- parseAssign
+                case left of
+                    Var name -> do
+                        traceM $ "Creating = assignment for " ++ name
+                        return $ Assign name right
+                    _ -> do
+                        traceM $ "Invalid left side for =: " ++ show left
+                        throwError $ UnexpectedToken tok "variable name before ="
             _ -> do
                 traceM $ "No += found, token was: " ++ show tok
                 return left
         [] -> return left
 
+
+parseAssign :: Parser Expr
+parseAssign = do
+    traceM "Parsing assignment"
+    left <- parseComparison
+    traceM $ "Parsed comparison: " ++ show left
+    remainingAssign left
+  where
+    remainingAssign left = do
+      state <- get
+      traceM $ "Expression state before operator check: " ++ show (take 3 $ stateTokens state)
+      case stateTokens state of
+        (tok:_) -> case locToken tok of
+          TEquals -> do
+            traceM "Found assignment operator"
+            _ <- matchToken (\t -> t == TEquals) "="
+            right <- parseAdditive
+            case left of
+              Var name -> do
+                traceM $ "Creating = assignment for " ++ name
+                return $ Assign name right
+              _ -> do
+                traceM $ "Invalid left side for =: " ++ show left
+                throwError $ UnexpectedToken tok "variable name before ="
+          _ -> return left 
+        [] -> return left
+
+
 parseComparison :: Parser Expr
 parseComparison = do
     traceM "Parsing comparison expression"
     left <- parseAdditive
+    traceM $ "Parsed additive: " ++ show left
     remainingComparison left
   where
     remainingComparison left = do
@@ -204,11 +252,14 @@ parseTerm = do
     traceM "Parsing term"
     state <- get
     case stateTokens state of
-        (tok:rest) -> case locToken tok of
+        (tok:rest) -> do
+          traceM $ "Parsing term starting with token: " ++ show tok
+          case locToken tok of
             TWord name | isValidName (locToken tok) -> do
                 _ <- matchToken isValidName "identifier"
                 parseFieldOrCallChain (Var name)
             TWord "print" -> parsePrintStatement
+            TWord "var" -> parseVarDecl
             _ -> parseBaseTerm >>= parseFieldAccess
         [] -> throwError $ EndOfInput "term"
 
@@ -378,68 +429,176 @@ parseSingleBindingLine = do
 
 parseBlockImpl :: Parser Expr
 parseBlockImpl = do
-    state <- get
-    traceM $ "Starting block parse with indent: " ++ show (stateIndent state)
-    case stateTokens state of
-      (tok:_) -> do
-        traceM $ "Block token: " ++ show tok
-        blockTok <- matchToken isBlockKeyword "block"
-        nameTok <- matchToken isValidName "block name"
-        traceM $ "Block name: " ++ show (locToken nameTok)
-        _ <- matchToken isColon ":"
-        let currentIndent = locCol blockTok
-        let newIndent = currentIndent + 2
-        traceM $ "Setting block indent from " ++ show currentIndent ++ " to " ++ show newIndent
-        modify (\s -> s { stateIndent = newIndent })
-        (exprs, resultExpr) <- parseBlockExprs newIndent
-        traceM $ "Block contents parsed: " ++ show (length exprs) ++ " expressions"
-        return $ Block $ BlockScope
-          { blockLabel = case locToken nameTok of
-                          TWord name -> name
-                          _ -> error "Invalid block name"
-          , blockExprs = exprs
-          , blockResult = resultExpr
-          }
-      [] -> throwError $ EndOfInput "block"
+  state <- get
+  _ <- matchToken isBlockKeyword "block"
+  nameTok <- matchToken isValidName "block name"
+  _ <- matchToken isColon ":"
 
-parseBlockExprs :: Int -> Parser ([Expr], Maybe Expr)
-parseBlockExprs baseIndent = do
+  let blockName = case locToken nameTok of
+        TWord name -> name
+        _ -> error "Invalid block name"
+
+  let currentIndent = stateIndent state
+  let newIndent = currentIndent + 2
+  let ctx = makeIndentContext BasicBlock newIndent currentIndent
+
+  -- Set new indent context
+  modify $ \s -> s { stateIndent = newIndent }
+
+  -- Parse block contents with context
+  (exprs, resultExpr) <- parseBlockContents ctx
+
+  return $ Block $ BlockScope
+    { blockLabel = blockName
+    , blockExprs = exprs
+    , blockResult = resultExpr
+    }
+
+-- Helper for block contents
+parseBlockContents :: IndentContext -> Parser ([Expr], Maybe Expr)
+parseBlockContents ctx = do
+  modify $ \s -> s { stateIndent = baseIndent ctx }
+
+  state <- get
+  traceM $ "\n=== parseBlockContents ==="
+  traceM $ "Context type: " ++ show ctx
+  traceM $ "Current indent: " ++ show (stateIndent state)
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
+
+  case stateTokens state of
+    (tok:rest) -> do
+      traceM $ "Block contents token: " ++ show tok
+      traceM $ "Current indent context: base=" ++ show (baseIndent ctx)
+      traceM $ "Current state indent: " ++ show (stateIndent state)
+      traceM $ "Token column: " ++ show (locCol tok)
+      traceM $ "Token line: " ++ show (locLine tok)
+      traceM $ "Previous line: " ++ show (locLine (head $ stateTokens state))
+
+      -- Check for line gap first, before any other validation
+      let prevLine = case rest of
+            [] -> locLine tok
+            (prev:_) -> locLine prev
+
+      if locLine tok > prevLine + 1
+        then do
+          traceM $ "Found line gap between lines " ++ show prevLine ++
+                   " and " ++ show (locLine tok) ++ " - ending block"
+          return ([], Nothing)
+        else case locToken tok of
+          TEOF -> return ([], Nothing)
+          _ -> do
+            when (isBlockStatement (locToken tok) && locCol tok < baseIndent ctx) $
+              throwError $ IndentationError (baseIndent ctx) (locCol tok) GreaterEq
+
+            let shouldContinue = locCol tok >= baseIndent ctx
+            if shouldContinue
+              then do
+                expr <- case locToken tok of
+                  TWord "print" -> parsePrintStatement
+                  TWord "block" -> parseBlockImpl
+                  _ -> parseExpression
+                (rest', result) <- parseBlockContents ctx
+                return (expr:rest', result)
+              else return ([], Nothing)
+
+    [] -> return ([], Nothing)
+
+-- Helper to identify statements that must be properly indented in blocks
+isBlockStatement :: Token -> Bool
+isBlockStatement (TWord "print") = True
+isBlockStatement (TWord "var") = True
+isBlockStatement (TWord "let") = True
+isBlockStatement _ = False
+
+parseBlockExprs :: BlockType -> Int -> Parser ([Expr], Maybe Expr)
+parseBlockExprs blockType baseIndent = do
     state <- get
-    traceM $ "parseBlockExprs at indent " ++ show baseIndent ++ " with tokens: " ++ show (take 3 $ stateTokens state)
+    traceM $ "\n=== parseBlockExprs ==="
+    traceM $ "Block type: " ++ show blockType
+    traceM $ "Initial tokens: " ++ show (take 3 $ stateTokens state)
+    traceM $ "Base indent: " ++ show baseIndent
+    traceM $ "Current indent: " ++ show (stateIndent state)
+
     case stateTokens state of
         [] -> return ([], Nothing)
-        (tok:_) ->
+        (tok:_) -> do
+            let tokCol = locCol tok
+            traceM $ "Next token col: " ++ show tokCol
+            traceM $ "Next token: " ++ show (locToken tok)  -- Added debug
+
+            -- Only check indentation if we're not at a block header
+            let shouldCheckIndent = case locToken tok of
+                  TWord "block" -> False
+                  TWord "fn" -> False
+                  _ -> True
+
+            when shouldCheckIndent $ do
+                traceM $ "Checking indentation: token col " ++ show tokCol ++ " against base " ++ show baseIndent
+                checkBlockIndent blockType baseIndent
+
             if locToken tok == TEOF
                 then return ([], Nothing)
-                else do
-                    when (locCol tok < baseIndent) $
-                        throwError $ IndentationError baseIndent (locCol tok) GreaterEq
-                    case locToken tok of
+                else if tokCol < baseIndent && shouldCheckIndent
+                    then do
+                        traceM $ "Token column " ++ show tokCol ++ " < base indent " ++ show baseIndent  -- Added debug
+                        return ([], Nothing)
+                    else case locToken tok of
+                        TWord "print" -> do
+                            traceM "Found print statement in block - handling specially"  -- Added debug
+                            printExpr <- parsePrintStatement
+                            traceM $ "Parsed print statement: " ++ show printExpr  -- Added debug
+                            (moreExprs, resultExpr) <- parseBlockExprs blockType baseIndent
+                            return (printExpr : moreExprs, resultExpr)
+                           
                         TWord "result" -> do
                             traceM "Parsing result expression"
                             resultExpr <- parseResultImpl
                             breaks <- parsePostResult baseIndent
                             traceM $ "Result parsed with " ++ show (length breaks) ++ " following breaks"
                             return (breaks, Just resultExpr)
+
                         TWord "break" -> do
                             traceM "Parsing break statement"
                             breakExpr <- parseBreakImpl
-                            (moreExprs, resultExpr) <- parseBlockExprs baseIndent
+                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
                             return (breakExpr : moreExprs, resultExpr)
+
+                        TWord "var" -> do
+                            traceM "Parsing variable declaration"
+                            varExpr <- parseVarDecl
+                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
+                            return (varExpr : moreExprs, resultExpr)
+
                         TWord "block" -> do
-                            traceM "Parsing nested block"
-                            blockExpr <- parseBlockImpl
-                            (moreExprs, resultExpr) <- parseBlockExprs baseIndent
-                            return (blockExpr : moreExprs, resultExpr)
-                        TWord "print" -> do
-                            traceM "Found print statement in block"
-                            printExpr <- parsePrintStatement
-                            (moreExprs, resultExpr) <- parseBlockExprs baseIndent
-                            return (printExpr : moreExprs, resultExpr)
+                            traceM "Parsing block without wrapping"
+                            expr <- parseBlockImpl  -- Direct parse
+                            return ([expr], Nothing)  -- Don't wrap
+                        -- TWord "block" -> do
+                        --     traceM "Parsing nested block"
+                        --     blockExpr <- parseBlockImpl
+                        --     -- Add remaining tokens debug after block header
+                        --     state' <- get
+                        --     traceM $ "Remaining tokens after block: " ++ show (take 3 $ stateTokens state')
+                        --     (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
+                        --     return (blockExpr : moreExprs, resultExpr)
+
+                        TWord name | isValidName (locToken tok) -> do
+                            -- Look ahead for assignment
+                            state' <- get
+                            case drop 1 $ stateTokens state' of
+                                (t:_) | locToken t == TEquals -> do
+                                    assignExpr <- parseAssign
+                                    (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
+                                    return (assignExpr : moreExprs, resultExpr)
+                                _ -> do
+                                    expr <- parseExpression
+                                    (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
+                                    return (expr : moreExprs, resultExpr)
+
                         _ -> do
                             traceM "Parsing block expression"
-                            expr <- parseExpression  -- Change from parseBasicExpr to parseExpression
-                            (moreExprs, resultExpr) <- parseBlockExprs baseIndent
+                            expr <- parseExpression
+                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock baseIndent
                             return (expr : moreExprs, resultExpr)
 
 parseBreakImpl :: Parser Expr
@@ -518,7 +677,7 @@ parsePrintStatement = do
             return $ Call "print" [expr]
         _ -> do
             -- Traditional style print without parentheses
-            expr <- parseExpression  -- This will handle variable references
+            expr <- parseExpression
             return $ Call "print" [expr]
 
 parseWhileExpr :: Parser Expr
@@ -532,7 +691,7 @@ parseWhileExpr = do
     let currentIndent = stateIndent bodyState
     let newIndent = currentIndent + 2
     modify (\s -> s { stateIndent = newIndent })
-    (bodyExprs, mResult) <- parseBlockExprs newIndent
+    (bodyExprs, mResult) <- parseBlockExprs BasicBlock newIndent
     let blockScope = BlockScope "while_body" bodyExprs mResult
     let body = Block blockScope
     traceM $ "Parsed while body: " ++ show body
@@ -540,7 +699,7 @@ parseWhileExpr = do
 
 parseWhileBody :: Int -> Parser Expr
 parseWhileBody indent = do
-    (bodyExprs, bodyResult) <- parseBlockExprs indent
+    (bodyExprs, bodyResult) <- parseBlockExprs BasicBlock indent
     case bodyExprs of
         [] -> throwError $ EndOfInput "while body"
         _ -> return $ Block $ BlockScope
@@ -551,26 +710,59 @@ parseWhileBody indent = do
 
 parseFuncDecl :: Parser Decl
 parseFuncDecl = do
+    traceM "\n=== parseFuncDecl ==="
+    oldIndent <- gets stateIndent
+    traceM $ "Starting indent: " ++ show oldIndent
+
     traceM "Parsing function declaration"
     _ <- matchToken (\t -> t == TWord "fn") "fn"
     nameTok <- matchToken isValidName "function name"
     _ <- matchToken (== TLeftParen) "("
 
-    -- Parse parameters
     params <- parseParams
-    traceM $ "Parsed parameters: " ++ show params
 
-    -- Parse return type
     _ <- matchToken (== TColon) ":"
     retTypeTok <- matchToken isValidName "return type"
     retType <- parseTypeToken retTypeTok
 
     _ <- matchToken (== TEquals) "="
-    body <- parseExpression
 
-    case locToken nameTok of
-        TWord name -> return $ DFunc name params retType body
-        _ -> throwError $ UnexpectedToken nameTok "function name"
+    -- Create function context with standard indent
+    let indent = 2
+    let ctx = makeIndentContext FunctionBlock indent 0
+
+    -- Parse first expression with indentation
+    traceM "=== Parsing function body ==="
+    state <- get
+
+    case stateTokens state of
+        (tok:_) -> do
+            when (locCol tok < indent) $
+                throwError $ IndentationError indent (locCol tok) GreaterEq
+
+            expr <- parseExpression
+
+            -- Check next token for line gap
+            state' <- get
+            case stateTokens state' of
+                (next:_) | locLine next > locLine tok + 1 -> do
+                    traceM $ "Found line gap - ending function body"
+                    modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
+                    let body = Block $ BlockScope "function_body" [expr] Nothing
+                    case locToken nameTok of
+                        TWord name -> return $ DFunc name params retType body
+                        _ -> throwError $ UnexpectedToken nameTok "function name"
+
+                _ -> do
+                    -- Continue parsing block contents normally
+                    (rest, result) <- parseBlockContents ctx
+                    modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
+                    let body = Block $ BlockScope "function_body" (expr:rest) result
+                    case locToken nameTok of
+                        TWord name -> return $ DFunc name params retType body
+                        _ -> throwError $ UnexpectedToken nameTok "function name"
+
+        [] -> throwError $ EndOfInput "function body"
 
 -- Helper to parse parameters with shared type annotation
 parseParams :: Parser [Param]

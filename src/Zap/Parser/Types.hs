@@ -8,9 +8,22 @@ data IndentRel
   | Any       -- No indent relation enforced (⊛)
   deriving (Show, Eq)
 
+
+data BlockType
+  = TopLevel
+  | BasicBlock      -- For blocks like "block test:"
+  | FunctionBlock
+  deriving (Show, Eq)
+
+data IndentContext = IndentContext
+  { baseIndent :: Int
+  , parentIndent :: Int
+  , blockType :: BlockType
+  } deriving (Show, Eq)
+
 data BlockContext = BlockContext
   { blockIndent :: Int
-  , parentIndent :: Int
+  , parentBlockIndent :: Int
   , isOutermostBlock :: Bool
   } deriving (Show, Eq)
 

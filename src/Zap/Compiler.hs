@@ -20,7 +20,7 @@ import Zap.IR.Core (IR(..), IRExpr)
 import Zap.Analysis.AllocationOpt (optimizeAllocations, OptimizationStats(..))
 import Zap.Codegen.C (generateC, CGenError)
 import Zap.Analysis.Lexical (tokenize, Token, Located, LexError)
-import Zap.Analysis.CFG (CFG, CFGError, buildCFG)
+import Zap.Analysis.CFG (CFG, CFGError, buildProgramCFG)
 
 data CompileStage
   = Lexing
@@ -117,8 +117,8 @@ compile opts source = do
   -- CFG Analysis
   cfgResult <- if targetStage opts >= CFGAnalysis
     then case irProgram irResult of
-      Just (IRProgram _ exprs) -> do
-        cfg <- mapLeft CFGError $ buildCFG exprs
+      Just ir -> do
+        cfg <- mapLeft CFGError $ buildProgramCFG ir
         return $ irResult { cfg = Just cfg }
       Nothing -> return irResult
     else return irResult

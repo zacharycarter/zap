@@ -7,13 +7,15 @@ module Zap.Analysis.Lexical
   , Located(..)
   , tokenize
   , LexError(..)
+  , isAlpha
   ) where
 
 import Control.Monad (when)
 import Control.Monad.Except
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Char (isAlpha, isAlphaNum, isDigit)
+import qualified Data.Char as C
+import Data.Char (isAlphaNum, isDigit)
 import Debug.Trace
 
 -- Token definitions
@@ -108,6 +110,7 @@ scanTokensWithState state line col (c:cs) = do
         --         else do
         --             traceM "Rejecting comma - requires space after"
         --             throwError $ InvalidCharacter ',' line col
+
 
         ',' -> do
             traceM $ "Found comma at line " ++ show line ++ ", col " ++ show col
@@ -217,7 +220,7 @@ lexWord line col acc [] = do
     Right [tok, Located TEOF (col + length acc) line]
 
 lexWord line col acc (c:cs)
-    | isAlphaNum c = lexWord line col (c:acc) cs
+    | isAlphaNum c || c == '_' = lexWord line col (c:acc) cs
     | otherwise = do
         let tok = createWordToken (reverse acc) col line
         rest <- scanTokens line (col + length acc) (c:cs)
@@ -257,3 +260,6 @@ ensureEOF tokens@(tok:_) =
             TWord w -> length w
             TOperator op -> length op
             _ -> 1
+
+isAlpha :: Char -> Bool
+isAlpha c = C.isAlpha c || c == '_'

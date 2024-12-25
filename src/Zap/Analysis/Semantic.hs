@@ -53,9 +53,23 @@ analyze (Program tops) = runExcept $ evalStateT (checkProgram tops) initialEnv
 
 checkProgram :: [TopLevel] -> SemCheck Program
 checkProgram tops = do
+    -- First pass - collect declarations
     mapM_ collectDeclarations tops
-    mapM_ checkTopLevel tops
-    return $ Program tops
+
+    -- Get initial environment
+    (vars, funs, structs, blocks) <- get
+
+    -- Process each top level expression sequentially while accumulating bindings
+    processedTops <- foldM (\acc top -> do
+        top' <- checkTopLevel top  -- Now returns TopLevel
+        -- Get the updated environment with any new bindings
+        (newVars, currFuns, currStructs, currBlocks) <- get
+        -- Restore accumulated bindings for next expression
+        put (newVars, currFuns, currStructs, currBlocks)
+        return $ acc ++ [top']
+      ) [] tops
+
+    return $ Program processedTops
 
 -- Here we collect function and struct declarations before checking the rest
 collectDeclarations :: TopLevel -> SemCheck ()
@@ -84,10 +98,23 @@ collectDeclarations (TLType name typ) = do
         _ -> throwError $ TypeMismatch (TypeStruct name []) typ
 collectDeclarations _ = return ()
 
-checkTopLevel :: TopLevel -> SemCheck ()
-checkTopLevel (TLExpr e) = void $ inferTypeExpr e
-checkTopLevel (TLDecl d) = checkDecl d
-checkTopLevel (TLType _ _) = return ()
+checkTopLevel :: TopLevel -> SemCheck TopLevel
+checkTopLevel (TLExpr (Block scope@(BlockScope label exprs result)))
+  | label == "top_let" = do
+    -- For top-level let blocks, process expressions while preserving environment
+    mapM_ inferTypeExpr exprs
+    -- Explicit environment preservation not needed - bindings from inferTypeExpr persist
+    return $ TLExpr (Block scope)
+
+checkTopLevel (TLExpr e) = do
+    inferTypeExpr e
+    return $ TLExpr e
+
+checkTopLevel (TLDecl d) = do
+    checkDecl d
+    return $ TLDecl d
+
+checkTopLevel tl@(TLType _ _) = return tl
 
 checkDecl :: Decl -> SemCheck ()
 checkDecl (DFunc name params retType body) = do
@@ -132,7 +159,6 @@ inferTypeExpr expr = do
           traceM $ "Looking up function: " ++ name
           case M.lookup name funcEnv of
               Just (FuncSig paramTypes retType) -> do
-                  -- Handle normal function call
                   when (length args /= length paramTypes) $
                       throwError $ ArgumentCountMismatch name (length paramTypes) (length args)
                   argTypes <- mapM inferTypeExpr args
@@ -142,47 +168,36 @@ inferTypeExpr expr = do
                       paramTypes argTypes
                   return retType
               Nothing ->
-                  -- Check if this is a struct constructor
                   case M.lookup name structEnv of
                       Just fields -> do
                           when (length args /= length fields) $
                               throwError $ ArgumentCountMismatch name (length fields) (length args)
                           argTypes <- mapM inferTypeExpr args
-
-                          -- Verify field types match argument types
                           zipWithM_ (\(_, fieldType) argType -> do
                               unless (fieldType == argType) $
                                   throwError $ TypeMismatch fieldType argType)
                               fields argTypes
-
                           return $ TypeStruct name fields
                       Nothing -> throwError $ UndefinedFunction name
+
         BinOp op e1 e2 -> do
             t1 <- inferTypeExpr e1
             t2 <- inferTypeExpr e2
             traceM $ "BinOp " ++ show op ++ " types: " ++ show t1 ++ " and " ++ show t2
             case (op, t1, t2) of
-                -- Keep existing numeric operation cases
                 (Add, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
                 (Sub, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
                 (Mul, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
                 (Div, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
-
-                -- Add comparison operator cases
-                (Lt, TypeNum n1, TypeNum n2) | n1 == n2 -> do
-                    traceM "Inferring Lt comparison between numeric types"
-                    return TypeBool
+                (Lt, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
                 (Gt, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
                 (Eq, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
-
-                -- Keep existing vector operation cases
                 (Add, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeVec v1
                 (Dot, TypeVec v1, TypeVec v2) | v1 == v2 ->
                     case v1 of
                         Vec2 nt -> return $ TypeNum nt
                         Vec3 nt -> return $ TypeNum nt
                         Vec4 nt -> return $ TypeNum nt
-
                 _ -> throwError $ TypeMismatchInOp op t1 t2
 
         FieldAccess expr field -> do
@@ -204,6 +219,7 @@ inferTypeExpr expr = do
                         Just fieldType -> return fieldType
                         Nothing -> throwError $ UndefinedField structName field
                 _ -> throwError $ UndefinedField (show exprType) field
+
         VecLit vecType components -> do
             componentTypes <- mapM inferTypeExpr components
             let expectedCount = case vecType of
@@ -240,22 +256,26 @@ inferTypeExpr expr = do
             return exprType
 
         BoolLit _ -> return TypeBool
-
+       
         Block scope -> do
-                traceM $ "Inferring Block type"
-                -- Log block contents
-                traceM $ "Block expressions: " ++ show (blockExprs scope)
-                mapM_ inferTypeExpr (blockExprs scope)
-                case blockResult scope of
-                    Just result -> inferTypeExpr result
-                    Nothing -> if null (blockExprs scope)
-                              then do
-                                  traceM "Empty block, defaulting to Int32"
-                                  return $ TypeNum Int32
-                              else do
-                                  lastType <- inferTypeExpr (last (blockExprs scope))
-                                  traceM $ "Block type from last expression: " ++ show lastType
-                                  return lastType
+            traceM $ "Inferring Block type"
+            traceM $ "Block expressions: " ++ show (blockExprs scope)
+            -- Save current environment
+            (oldVars, funs, structs, blocks) <- get
+            -- Process block expressions
+            types <- mapM inferTypeExpr (blockExprs scope)
+            -- Restore original environment
+            put (oldVars, funs, structs, blocks)
+            -- Determine block type
+            case (blockExprs scope, blockResult scope) of
+                ([], Nothing) -> do
+                    traceM "Empty block, defaulting to Int32"
+                    return $ TypeNum Int32
+                (exprs, Nothing) -> do
+                    let lastType = last types
+                    traceM $ "Block type from last expression: " ++ show lastType
+                    return lastType
+                (_, Just result) -> inferTypeExpr result
 
         StructLit name fields -> do
             (_, _, structs, _) <- get
@@ -284,12 +304,24 @@ inferTypeExpr expr = do
                             else throwError $ TypeMismatch rhsType varType
                     Nothing -> throwError $ UndefinedVariable name
 
+
         VarDecl name val -> do
-                traceM $ "Inferring VarDecl for " ++ name
-                valType <- inferTypeExpr val
-                traceM $ "VarDecl value type: " ++ show valType
-                addVar name valType
-                return valType
+            traceM $ "Inferring VarDecl for " ++ name
+            valType <- inferTypeExpr val
+            traceM $ "VarDecl value type: " ++ show valType
+            (vars, funs, structs, blocks) <- get
+            put (M.insert name valType vars, funs, structs, blocks)
+            return valType
+
+        Assign name val -> do
+            (vars, _, _, _) <- get
+            case M.lookup name vars of
+                Nothing -> throwError $ UndefinedVariable name
+                Just expectedType -> do
+                    valType <- inferTypeExpr val
+                    unless (valType == expectedType) $
+                        throwError $ TypeMismatch expectedType valType
+                    return expectedType
 
         While cond body -> do
             traceM "Inferring While expression"

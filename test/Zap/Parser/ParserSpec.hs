@@ -113,3 +113,38 @@ spec = do
 
     it "parses decimal literals as Float32" $ do
       parseExprFromText "42.0" `shouldBe` Right (NumLit Float32 "42.0")
+
+  describe "Variable declarations and assignments" $ do
+    it "parses variable declaration with initialization" $ do
+        parseExprFromText "var x = 42" `shouldBe`
+            Right (VarDecl "x" (NumLit Int32 "42"))
+
+    it "parses variable declaration within block" $ do
+        parseProgram "block test:\n  var x = 42" `shouldBe`
+            Right [TLExpr (Block $ BlockScope
+                "test"
+                [VarDecl "x" (NumLit Int32 "42")]
+                Nothing)]
+
+    it "parses variable assignment" $ do
+        parseExprFromText "x = 42" `shouldBe`
+            Right (Assign "x" (NumLit Int32 "42"))
+
+    it "parses variable declaration and assignment in function" $ do
+        let input = T.unlines
+              [ "fn sum_squares(x, y: i32): i32 ="
+              , "  var sum = x * x"
+              , "  sum = sum + y * y"
+              , "  sum"
+              ]
+        parseProgram input `shouldBe`
+            Right [TLDecl (DFunc "sum_squares"
+                [Param "x" (TypeNum Int32), Param "y" (TypeNum Int32)]
+                (TypeNum Int32)
+                (Block $ BlockScope "function_body"
+                    [ VarDecl "sum" (BinOp Mul (Var "x") (Var "x"))
+                    , Assign "sum" (BinOp Add (Var "sum")
+                        (BinOp Mul (Var "y") (Var "y")))
+                    , Var "sum"
+                    ]
+                    Nothing))]
