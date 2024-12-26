@@ -1,4 +1,9 @@
-module Zap.Parser.Types where
+module Zap.Parser.Types
+  ( IndentRel(..)
+  , BlockType(..)
+  , IndentContext(..)
+  , BlockContext(..)
+  ) where
 
 -- | Indentation relations between nodes
 data IndentRel
@@ -36,13 +41,16 @@ data Terminal = Terminal
   , termCol   :: Column  -- ^ The column where it appears
   } deriving (Show, Eq)
 
--- | A non-terminal indented node
+-- | A non-terminal node
+data NonTerminal = NonTerminal
+  { nodeName :: String -- ^ Name of the non-terminal node
+  , nodeCol :: Column -- ^ Column position
+  , children :: [(IndentRel, IndNode)] -- ^ Child nodes with their relation to parent
+  } deriving (Show, Eq)
+
+-- | An indented node
 data IndNode
-  = IndNonTerm
-      { nodeName :: String         -- ^ Name of the non-terminal
-      , nodeCol  :: Column         -- ^ Column position
-      , children :: [(IndentRel, IndNode)]  -- ^ Child nodes with their relation to parent
-      }
+  = IndNonTerm NonTerminal
   | IndTerm Terminal
   deriving (Show, Eq)
 

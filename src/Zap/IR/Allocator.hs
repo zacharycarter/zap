@@ -121,14 +121,14 @@ addAllocation (IRProgram decls exprs) = do
 
 -- | Add allocation to expressions
 allocateExpr :: IRExpr -> AllocM IRExpr
-allocateExpr expr@(IRExpr meta node) = do
+allocateExpr ex@(IRExpr meta node) = do
     -- Helper to wrap result with metadata
-    let wrap newNode = IRExpr meta { metaEffects = updateEffects expr newNode } newNode
+    let wrap newNode = IRExpr meta { metaEffects = updateEffects ex newNode } newNode
 
     -- Handle each expression type
-    traceM $ "Adding allocation to expression: " ++ show expr
+    traceM $ "Adding allocation to expression: " ++ show ex
     case node of
-        IRNum t val ->
+        IRNum _ _ ->
             return $ wrap node  -- Numeric literals don't need allocation
 
         IRVar name -> do
@@ -177,10 +177,10 @@ updateEffects originalExpr node = case node of
 -- | Look up variable allocation strategy
 lookupVarStrategy :: T.Text -> AllocM InternalAllocStrat
 lookupVarStrategy name = do
-  state <- get
-  case M.lookup name (scopeAllocs state) of
+  s <- get
+  case M.lookup name (scopeAllocs s) of
     Just alloc -> return $ SpecificAlloc (allocKind alloc)
-    Nothing -> case M.lookup name (globalAllocs state) of
+    Nothing -> case M.lookup name (globalAllocs s) of
       Just alloc -> return $ SpecificAlloc (allocKind alloc)
       Nothing -> return DefaultAlloc
 
@@ -208,12 +208,12 @@ determineStrategy typ = case typ of
 
 -- | Get type of an expression
 getExprType :: IRExpr -> IRType
-getExprType (IRExpr metadata node) = case node of
+getExprType (IRExpr md node) = case node of
     IRNum t _ -> IRTypeNum t
     IRString _ -> IRTypeString
     IRBool _ -> IRTypeBool
     IRVec vt _ -> IRTypeVec vt
-    IRVar name -> exprType metadata
+    IRVar _ -> exprType md
     IRStructLit name _ -> IRTypeStruct name []
     IRBinOp _ e1 e2 ->
         case (getExprType e1, getExprType e2) of
@@ -221,14 +221,14 @@ getExprType (IRExpr metadata node) = case node of
                 | t1 == t2 -> t1
             (IRTypeNum n1, IRTypeNum n2)
                 | n1 == n2 -> IRTypeNum n1
-            _ -> exprType metadata
+            _ -> exprType md
     IRFieldAccess base field ->
         case getExprType base of
             IRTypeStruct _ fields ->
-                fromMaybe (exprType metadata)
+                fromMaybe (exprType md)
                     (lookup field [(fn, ft) | (fn, ft) <- fields])
-            _ -> exprType metadata
-    _ -> exprType metadata
+            _ -> exprType md
+    _ -> exprType md
   where
     fromMaybe def Nothing = def
     fromMaybe _ (Just x) = x

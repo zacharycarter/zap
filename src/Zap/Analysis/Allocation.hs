@@ -4,7 +4,7 @@ module Zap.Analysis.Allocation
   , AllocError(..)
   ) where
 
-import Control.Monad (foldM, forM_, unless, when)
+import Control.Monad (forM_, unless, when)
 import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.Text as T
@@ -13,7 +13,6 @@ import qualified Data.Set as S
 import Debug.Trace
 
 import Zap.IR.Core
-import Zap.IR.Allocator (AllocKind(..), getExprType)
 
 data AllocError
   = InvalidAllocation IRType IRAllocStrat
@@ -62,10 +61,10 @@ analyzeIR (IRProgram decls exprs) = do
   mapM_ analyzeStructDeps decls
   decls' <- mapM analyzeDecl decls
   exprs' <- analyzeExprs exprs
-  state <- get
-  traceM $ "Final state - global arenas: " ++ show (globalArenas state)
-  traceM $ "Final state - global allocs: " ++ show (globalAllocs state)
-  traceM $ "Final state - temp allocs: " ++ show (tempAllocs state)
+  st <- get
+  traceM $ "Final state - global arenas: " ++ show (globalArenas st)
+  traceM $ "Final state - global allocs: " ++ show (globalAllocs st)
+  traceM $ "Final state - temp allocs: " ++ show (tempAllocs st)
   checkGlobalLeaks
   return $ IRProgram decls' exprs'
 
@@ -178,11 +177,11 @@ analyzeExpr (IRExpr meta node) = do
             mResult' <- mapM analyzeExpr mResult
             return $ wrap $ IRBlock name exprs' mResult'
 
-        IRLetAlloc name expr strat -> do
-          traceM $ "Analyzing let binding allocation: " ++ show name ++ " for expression: " ++ show expr ++ " with strategy: " ++ show strat
-          validateAllocation (exprType (metadata expr)) strat
+        IRLetAlloc name ex strat -> do
+          traceM $ "Analyzing let binding allocation: " ++ show name ++ " for expression: " ++ show ex ++ " with strategy: " ++ show strat
+          validateAllocation (exprType (metadata ex)) strat
           trackAllocation name strat
-          return $ wrap $ IRLetAlloc name expr strat
+          return $ wrap $ IRLetAlloc name ex strat
 
         IRBlockAlloc name exprs mResult -> do
             let isArena = name == "arena"
@@ -213,8 +212,8 @@ analyzeExpr (IRExpr meta node) = do
 validateAllocation :: IRType -> IRAllocStrat -> AllocAnalysis ()
 validateAllocation typ strat = do
   traceM $ "Validating allocation - type: " ++ show typ ++ ", strategy: " ++ show strat
-  state <- get
-  traceM $ "Current global arenas: " ++ show (globalArenas state)
+  st <- get
+  traceM $ "Current global arenas: " ++ show (globalArenas st)
   case strat of
     IRAllocStack -> case typ of
       IRTypeNum _ -> return ()
@@ -223,17 +222,17 @@ validateAllocation typ strat = do
       _ -> throwError $ InvalidAllocation typ strat
 
     IRAllocArena -> do
-      let hasArena = S.member "arena" (globalArenas state)
+      let hasArena = S.member "arena" (globalArenas st)
       traceM $ "Has arena: " ++ show hasArena
       unless hasArena $
-        throwError $ InvalidArenaUse (scopeName (currentScope state))
+        throwError $ InvalidArenaUse (scopeName (currentScope st))
 
     IRAllocHeap -> return ()
 
     IRAllocTemp -> return ()
 
     IRAllocCustom name -> do
-      let allocs = globalAllocs state
+      let allocs = globalAllocs st
       traceM $ "Checking custom allocator " ++ show name ++ " in allocs: " ++ show allocs
       unless (S.member name allocs) $
         throwError $ ScopedAllocationError name

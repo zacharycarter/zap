@@ -10,7 +10,6 @@ module Zap.Analysis.Lexical
   , isAlpha
   ) where
 
-import Control.Monad (when)
 import Control.Monad.Except
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -68,7 +67,7 @@ scanTokens :: Int -> Int -> String -> Either LexError [Located]
 scanTokens = scanTokensWithState initialLexerState
 
 scanTokensWithState :: LexerState -> Int -> Int -> String -> Either LexError [Located]
-scanTokensWithState state line col [] = do
+scanTokensWithState _state line col [] = do
     traceM $ "scanTokens: Reached end of input at line " ++ show line ++ ", col " ++ show col
     Right [Located TEOF col line]
 
@@ -190,7 +189,7 @@ isOperator c = c `elem` ("+-*/<>=&|" :: String)
 
 -- Lexer for strings
 lexString :: Int -> Int -> String -> String -> Either LexError [Located]
-lexString line startCol acc [] =
+lexString line startCol _acc [] =
     Left $ UnterminatedString line startCol
 lexString line startCol acc (c:cs) = case c of
     '"' -> do
@@ -243,23 +242,6 @@ createWordToken word col line = Located token col line
 -- Check for spaces
 isSpace :: Char -> Bool
 isSpace c = c `elem` [' ', '\t', '\n', '\r']
-
--- Helper function to ensure EOF is properly handled in all cases
-ensureEOF :: [Located] -> [Located]
-ensureEOF [] = [Located TEOF 1 1]
-ensureEOF tokens@(tok:_) =
-    if any isEOF tokens
-        then tokens
-        else tokens ++ [Located TEOF (nextCol $ last tokens) (locLine $ last tokens)]
-    where
-        isEOF t = case locToken t of
-            TEOF -> True
-            _ -> False
-        nextCol t = locCol t + tokenLength t
-        tokenLength t = case locToken t of
-            TWord w -> length w
-            TOperator op -> length op
-            _ -> 1
 
 isAlpha :: Char -> Bool
 isAlpha c = C.isAlpha c || c == '_'

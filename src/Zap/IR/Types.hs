@@ -10,8 +10,6 @@ module Zap.IR.Types
 
 import Data.Functor.Identity
 import qualified Data.Text as T
-import Control.Monad.IO.Class
-import Control.Monad.Trans.Class
 
 data IRNumType
   = IRInt32

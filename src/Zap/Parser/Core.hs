@@ -4,6 +4,7 @@ module Zap.Parser.Core
   , ParseError(..)
   , Parser
   , ParserResult
+  , IndentationErrorDetails(..)
   , checkIndent
   , checkBlockIndent
   , makeIndentContext
@@ -28,13 +29,15 @@ data ParseState = ParseState
   } deriving (Show)
 
 -- | Possible parsing errors
+data IndentationErrorDetails = IndentationErrorDetails
+  { expectedCol :: Int
+  , actualCol :: Int
+  , relation :: IndentRel
+  } deriving (Show, Eq)
+
 data ParseError
   = UnexpectedToken Located String  -- Got token, expected description
-  | IndentationError
-      { expectedCol :: Int
-      , actualCol :: Int
-      , relation :: IndentRel
-      }
+  | IndentationError IndentationErrorDetails
   | EndOfInput String  -- Expected description
   deriving (Show, Eq)
 
@@ -53,52 +56,52 @@ runParser p tokens = evalStateT p (ParseState tokens 0 0)
 -- | Check indentation against current level using given relation
 checkIndent :: IndentRel -> Parser ()
 checkIndent rel = do
-  state <- get
-  case stateTokens state of
+  st <- get
+  case stateTokens st of
     (tok:_) -> do
-      let curIndent = stateIndent state
+      let curIndent = stateIndent st
       let tokCol = locCol tok
       case rel of
         Equal     -> unless (tokCol == curIndent) $
-                      throwError $ IndentationError curIndent tokCol rel
+                      throwError $ IndentationError $ IndentationErrorDetails curIndent tokCol rel
         Greater   -> unless (tokCol > curIndent) $
-                      throwError $ IndentationError curIndent tokCol rel
+                      throwError $ IndentationError $ IndentationErrorDetails curIndent tokCol rel
         GreaterEq -> unless (tokCol >= curIndent) $
-                      throwError $ IndentationError curIndent tokCol rel
+                      throwError $ IndentationError $ IndentationErrorDetails curIndent tokCol rel
         Any       -> return ()
     [] -> throwError $ EndOfInput "Expected token for indentation check"
 
 -- Like checkIndent but takes BlockType
 checkBlockIndent :: BlockType -> Int -> Parser ()
-checkBlockIndent blockType baseIndent = do
-    state <- get
-    case stateTokens state of
+checkBlockIndent bt bi = do
+    st <- get
+    case stateTokens st of
         (tok:_) -> do
             let tokCol = locCol tok
-            traceM $ "Checking " ++ show blockType ++
+            traceM $ "Checking " ++ show bt ++
                     " indent: token col " ++ show tokCol ++
-                    " against base " ++ show baseIndent
-            case blockType of
+                    " against base " ++ show bi
+            case bt of
                 TopLevel -> return ()
-                BasicBlock -> when (tokCol < baseIndent) $
-                    throwError $ IndentationError baseIndent tokCol GreaterEq
+                BasicBlock -> when (tokCol < bi) $
+                    throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
                 FunctionBlock -> do
                     -- Special case - allow dedenting to top level after function
-                    when (tokCol > 1 && tokCol < baseIndent) $
-                        throwError $ IndentationError baseIndent tokCol GreaterEq
+                    when (tokCol > 1 && tokCol < bi) $
+                        throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
         [] -> return ()
 
 -- | Get the next token if it matches
 matchToken :: (Token -> Bool) -> String -> Parser Located
-matchToken pred expected = do
-  state <- get
-  traceM $ "Parser state before token match check: " ++ show (take 3 $ stateTokens state)
-  case stateTokens state of
+matchToken p expected = do
+  st <- get
+  traceM $ "Parser state before token match check: " ++ show (take 3 $ stateTokens st)
+  case stateTokens st of
     [] -> throwError $ EndOfInput expected
     (tok:rest) ->
-      if pred (locToken tok)
+      if p (locToken tok)
         then do
-          put state { stateTokens = rest, stateCol = locCol tok }
+          put st { stateTokens = rest, stateCol = locCol tok }
           return tok
         else throwError $ UnexpectedToken tok expected
 
@@ -116,10 +119,10 @@ validateIndent ctx col = do
   case blockType ctx of
     BasicBlock ->
       when (col <= parentIndent ctx) $
-        throwError $ IndentationError (baseIndent ctx) col GreaterEq
+        throwError $ IndentationError $ IndentationErrorDetails (baseIndent ctx) col GreaterEq
 
     FunctionBlock ->
       unless (col > baseIndent ctx) $
-        throwError $ IndentationError (baseIndent ctx) col Greater
+        throwError $ IndentationError $ IndentationErrorDetails (baseIndent ctx) col Greater
 
     TopLevel -> return () -- No indentation rules at top level

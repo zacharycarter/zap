@@ -56,8 +56,9 @@ checkProgram tops = do
     -- First pass - collect declarations
     mapM_ collectDeclarations tops
 
+    -- FIXME: This function doesn't seem to do what it is intended to.
     -- Get initial environment
-    (vars, funs, structs, blocks) <- get
+    -- (vars, funs, structs, blocks) <- get
 
     -- Process each top level expression sequentially while accumulating bindings
     processedTops <- foldM (\acc top -> do
@@ -99,7 +100,7 @@ collectDeclarations (TLType name typ) = do
 collectDeclarations _ = return ()
 
 checkTopLevel :: TopLevel -> SemCheck TopLevel
-checkTopLevel (TLExpr (Block scope@(BlockScope label exprs result)))
+checkTopLevel (TLExpr (Block scope@(BlockScope label exprs _result)))
   | label == "top_let" = do
     -- For top-level let blocks, process expressions while preserving environment
     mapM_ inferTypeExpr exprs
@@ -107,7 +108,7 @@ checkTopLevel (TLExpr (Block scope@(BlockScope label exprs result)))
     return $ TLExpr (Block scope)
 
 checkTopLevel (TLExpr e) = do
-    inferTypeExpr e
+    _ <- inferTypeExpr e
     return $ TLExpr e
 
 checkTopLevel (TLDecl d) = do
@@ -144,9 +145,9 @@ inferTypeExpr expr = do
 
         Var name -> do
             traceM $ "Looking up variable: " ++ name
-            (vars, _, _, _) <- get
-            traceM $ "Looking up in environment: " ++ show vars
-            case M.lookup name vars of
+            (curVars, _, _, _) <- get
+            traceM $ "Looking up in environment: " ++ show curVars
+            case M.lookup name curVars of
                 Nothing -> do
                     traceM $ "ERROR: Undefined variable: " ++ name
                     throwError $ UndefinedVariable name
@@ -161,8 +162,8 @@ inferTypeExpr expr = do
 
         Call name args -> do
           traceM $ "Inferring Call: " ++ name ++ " with " ++ show (length args) ++ " args"
-          argTypes <- mapM inferTypeExpr args
-          traceM $ "Call arg types: " ++ show argTypes
+          curArgTypes <- mapM inferTypeExpr args
+          traceM $ "Call arg types: " ++ show curArgTypes
           (_, funcEnv, structEnv, _) <- get
           traceM $ "Function environment: " ++ show funcEnv
           traceM $ "Struct environment: " ++ show funcEnv
@@ -171,22 +172,22 @@ inferTypeExpr expr = do
               Just (FuncSig paramTypes retType) -> do
                   when (length args /= length paramTypes) $
                       throwError $ ArgumentCountMismatch name (length paramTypes) (length args)
-                  argTypes <- mapM inferTypeExpr args
+                  updatedArgTypes <- mapM inferTypeExpr args
                   zipWithM_ (\expected actual ->
                       unless (expected == actual) $
                           throwError $ TypeMismatchInFunction name expected actual)
-                      paramTypes argTypes
+                      paramTypes updatedArgTypes
                   return retType
               Nothing ->
                   case M.lookup name structEnv of
                       Just fields -> do
                           when (length args /= length fields) $
                               throwError $ ArgumentCountMismatch name (length fields) (length args)
-                          argTypes <- mapM inferTypeExpr args
+                          updatedArgTypes <- mapM inferTypeExpr args
                           zipWithM_ (\(_, fieldType) argType -> do
                               unless (fieldType == argType) $
                                   throwError $ TypeMismatch fieldType argType)
-                              fields argTypes
+                              fields updatedArgTypes
                           return $ TypeStruct name fields
                       Nothing -> throwError $ UndefinedFunction name
 
@@ -210,8 +211,8 @@ inferTypeExpr expr = do
                         Vec4 nt -> return $ TypeNum nt
                 _ -> throwError $ TypeMismatchInOp op t1 t2
 
-        FieldAccess expr field -> do
-            exprType <- inferTypeExpr expr
+        FieldAccess e field -> do
+            exprType <- inferTypeExpr e
             case exprType of
                 TypeVec vecType -> case (vecType, field) of
                     (Vec2 nt, "x") -> return $ TypeNum nt
@@ -259,10 +260,10 @@ inferTypeExpr expr = do
                 throwError $ TypeMismatch (TypeNum Float32) ft
             return $ TypeVec (Vec3 Float32)
 
-        Let name expr -> do
-            exprType <- inferTypeExpr expr
-            (vars, funs, structs, blocks) <- get
-            put (M.insert name exprType vars, funs, structs, blocks)
+        Let name e -> do
+            exprType <- inferTypeExpr e
+            (curVars, funs, structs, blocks) <- get
+            put (M.insert name exprType curVars, funs, structs, blocks)
             return exprType
 
         BoolLit _ -> return TypeBool
@@ -280,7 +281,7 @@ inferTypeExpr expr = do
                     traceM "Empty block, defaulting to Int32"
                     put (oldVars, funs, structs, blocks)
                     return $ TypeNum Int32
-                (exprs, Nothing) -> do
+                (_, Nothing) -> do
                     let lastType = last types
                     traceM $ "Block type from last expression: " ++ show lastType
                     put (oldVars, funs, structs, blocks)
@@ -308,10 +309,10 @@ inferTypeExpr expr = do
                             throwError $ TypeMismatch expectedType actualType
                     return $ TypeStruct name structFields
 
-        AssignOp name op rhs -> do
+        AssignOp name _op rhs -> do
                 -- Look up variable type
-                (vars, _, _, _) <- get
-                case M.lookup name vars of
+                (curVars, _, _, _) <- get
+                case M.lookup name curVars of
                     Just varType -> do
                         -- Verify right hand side matches variable type
                         rhsType <- inferTypeExpr rhs
@@ -325,14 +326,14 @@ inferTypeExpr expr = do
             valType <- inferTypeExpr val
             traceM $ "VarDecl value type: " ++ show valType
             -- Check if variable was actually added
-            addVar name valType
-            (vars, _, _, _) <- get
-            traceM $ "Environment after VarDecl: " ++ show vars
+            _ <- addVar name valType
+            (curVars, _, _, _) <- get
+            traceM $ "Environment after VarDecl: " ++ show curVars
             return valType
 
         Assign name val -> do
-            (vars, _, _, _) <- get
-            case M.lookup name vars of
+            (curVars, _, _, _) <- get
+            case M.lookup name curVars of
                 Nothing -> throwError $ UndefinedVariable name
                 Just expectedType -> do
                     valType <- inferTypeExpr val
@@ -360,62 +361,24 @@ inferTypeExpr expr = do
   traceM $ "Final type for expression: " ++ show expr ++ " is " ++ show result
   return result
 
-inferTypeExpr (StructLit "Vec3" fields) = do
-  -- Check fields
-  let expectedFields = ["x","y","z"]
-  when (map fst fields /= expectedFields) $
-    throwError $ ArgumentCountMismatch "Vec3" (length expectedFields) (length fields)
-  fieldTypes <- mapM (inferTypeExpr . snd) fields
-  forM_ fieldTypes $ \ft -> unless (ft == TypeNum Float32) $
-    throwError $ TypeMismatch (TypeNum Float32) ft
-  return (TypeVec (Vec3 Float32))
-
 addVar :: String -> Type -> SemCheck Type
 addVar name typ = do
     traceM $ "Adding variable to environment: " ++ name ++ " : " ++ show typ
-    (vars, funs, structs, blocks) <- get
-    traceM $ "Current var environment: " ++ show vars
-    put (M.insert name typ vars, funs, structs, blocks)
-    traceM $ "Updated var environment: " ++ show (M.insert name typ vars)
+    (curVars, funs, structs, blocks) <- get
+    traceM $ "Current var environment: " ++ show curVars
+    put (M.insert name typ curVars, funs, structs, blocks)
+    traceM $ "Updated var environment: " ++ show (M.insert name typ curVars)
     return typ
-
-checkBinOp :: Op -> Type -> Type -> SemCheck Type
-checkBinOp op t1 t2 = case (op, t1, t2) of
-    (Add, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
-    (Sub, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
-    (Mul, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
-    (Div, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
-    (Dot, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeNum (getVecNumType v1)
-    (Add, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeVec v1
-    _ -> throwError $ TypeMismatchInOp op t1 t2
-
-inferVecFieldAccess :: VecType -> String -> SemCheck Type
-inferVecFieldAccess vecType field = case (vecType, field) of
-    (Vec2 nt, "x") -> return $ TypeNum nt
-    (Vec2 nt, "y") -> return $ TypeNum nt
-    (Vec3 nt, "x") -> return $ TypeNum nt
-    (Vec3 nt, "y") -> return $ TypeNum nt
-    (Vec3 nt, "z") -> return $ TypeNum nt
-    (Vec4 nt, "x") -> return $ TypeNum nt
-    (Vec4 nt, "y") -> return $ TypeNum nt
-    (Vec4 nt, "z") -> return $ TypeNum nt
-    (Vec4 nt, "w") -> return $ TypeNum nt
-    _ -> throwError $ UndefinedField (show vecType) field
 
 checkTypeExists :: Type -> SemCheck ()
 checkTypeExists typ = case typ of
-    TypeVec vt -> return ()  -- Vector types are built-in
+    TypeVec _ -> return ()  -- Vector types are built-in
     TypeStruct name fields -> do
         (_, _, structs, _) <- get
         unless (M.member name structs) $
             throwError $ UndefinedStruct name
         forM_ fields $ \(_, fieldType) -> checkTypeExists fieldType
     _ -> return ()
-
-getVecNumType :: VecType -> NumType
-getVecNumType (Vec2 nt) = nt
-getVecNumType (Vec3 nt) = nt
-getVecNumType (Vec4 nt) = nt
 
 isNumericType :: Type -> Bool
 isNumericType (TypeNum _) = True

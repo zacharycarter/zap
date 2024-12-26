@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (parseMaybeCall, parseBlockImpl, parseBlockExprs, mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -33,12 +33,12 @@ parseTopLevels = do
 
 parseTopLevelsWith :: IndentContext -> Parser [TopLevel]
 parseTopLevelsWith ctx = do
-  state <- get
+  st <- get
   traceM $ "\n=== parseTopLevelsWith ==="
   traceM $ "Context type: " ++ show ctx
-  traceM $ "Current state indent: " ++ show (stateIndent state)
-  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
-  case stateTokens state of
+  traceM $ "Current state indent: " ++ show (stateIndent st)
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+  case stateTokens st of
     [] -> return []
     (tok:_) -> case locToken tok of
       TEOF -> do
@@ -52,40 +52,14 @@ parseTopLevelsWith ctx = do
         traceM $ "Parsed top level: " ++ show expr ++ " " ++ show rest
         return (expr : rest)
 
--- parseTopLevels :: Parser [TopLevel]
--- parseTopLevels = do
---     state <- get
---     traceM "\n--- Parsing Top Level Expressions ---"
---     traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
---     traceM $ "Current indent: " ++ show (stateIndent state)  -- Add this debug line
-
---     case stateTokens state of
---         [] -> do
---             traceM "No more tokens to parse, returning empty list"
---             pure []
---         (tok:_) -> case locToken tok of
---             TEOF -> do
---                 traceM "Found EOF token, returning empty list"
---                 pure []
---             _ -> do
---                 -- Ensure we're at top-level indentation before parsing each expression
---                 modify $ \s -> s { stateIndent = 0 }  -- Add this line
-
---                 traceM $ "Parsing top-level expression starting with: " ++ show tok
---                 expr <- parseTopLevel
---                 traceM $ "Successfully parsed top-level expression: " ++ show expr
---                 rest <- parseTopLevels
---                 traceM $ "Collected expressions so far: " ++ show (expr:rest)
---                 pure (expr : rest)
-
 parseTopLevel :: Parser TopLevel
 parseTopLevel = do
-    state <- get
+    st <- get
     traceM "\n--- Parsing Single Top Level Expression ---"
-    traceM $ "Current state: " ++ show state
+    traceM $ "Current state: " ++ show st
     -- Store original indent level
     origIndent <- gets stateIndent
-    case stateTokens state of
+    case stateTokens st of
         (tok:_) -> do
             traceM $ "Processing token: " ++ show tok
             case locToken tok of
@@ -116,7 +90,7 @@ parseTopLevel = do
                         then do
                             traceM $ "Checking print indentation against level: " ++ show origIndent
                             when (locCol tok < origIndent) $
-                                throwError $ IndentationError origIndent (locCol tok) GreaterEq
+                                throwError $ IndentationError $ IndentationErrorDetails origIndent (locCol tok) GreaterEq
                             expr <- parsePrintStatement
                             return $ TLExpr expr
                         else do
@@ -126,13 +100,6 @@ parseTopLevel = do
                     traceM "Found block at top level - parsing directly"
                     expr <- parseBlockImpl  -- Parse block directly
                     return $ TLExpr expr    -- Don't wrap in extra block
-                -- TWord "block" -> do
-                --     traceM "Found block expression at top-level"
-                --     when (locCol tok /= 1) $
-                --         throwError $ IndentationError 1 (locCol tok) Equal
-                --     expr <- parseBlockExprs BasicBlock 2
-                --     traceM $ "Parsed block: " ++ show expr
-                --     return $ TLExpr (makeBlock "block" expr)
                 TWord "let" -> do
                     traceM "Found let block at top-level"
                     expr <- parseLetBlock
@@ -159,13 +126,6 @@ parseTopLevel = do
             traceM "No tokens available for top-level expression"
             throwError $ EndOfInput "expected top-level expression"
 
-makeBlock :: String -> ([Expr], Maybe Expr) -> Expr
-makeBlock label (exprs, mResult) = Block $ BlockScope
-  { blockLabel = label
-  , blockExprs = exprs
-  , blockResult = mResult
-  }
-
 parseLetBlock :: Parser Expr
 parseLetBlock = do
     traceM "Parsing let block"
@@ -179,8 +139,8 @@ parseLetBlock = do
     traceM $ "First binding parsed: " ++ show firstBinding
 
     -- Parse additional bindings at same indentation level
-    let blockIndent = 2  -- standard indentation for let blocks
-    moreBindings <- parseMoreBindings blockIndent
+    let bi = 2  -- standard indentation for let blocks
+    moreBindings <- parseMoreBindings bi
     traceM $ "Additional bindings parsed: " ++ show moreBindings
 
     let allBindings = firstBinding : map (\(n,v) -> Let n v) moreBindings
@@ -193,9 +153,9 @@ parseLetBlock = do
   where
     parseMoreBindings :: Int -> Parser [(String, Expr)]
     parseMoreBindings indent = do
-        state <- get
-        traceM $ "Checking for more bindings at indent " ++ show indent ++ ": " ++ show (take 3 $ stateTokens state)
-        case stateTokens state of
+        st <- get
+        traceM $ "Checking for more bindings at indent " ++ show indent ++ ": " ++ show (take 3 $ stateTokens st)
+        case stateTokens st of
             [] -> return []
             (tok:_)
                 | locToken tok == TEOF -> return []
@@ -235,9 +195,9 @@ parseStructFields :: Parser [(String, Type)]
 parseStructFields = do
     traceM "Parsing struct fields"
     let loop acc = do
-          state <- get
-          traceM $ "Struct fields loop, tokens: " ++ show (take 3 $ stateTokens state)
-          case stateTokens state of
+          st <- get
+          traceM $ "Struct fields loop, tokens: " ++ show (take 3 $ stateTokens st)
+          case stateTokens st of
             (tok:_) | isValidName (locToken tok) -> do
                         field <- parseStructField
                         traceM $ "Parsed struct field: " ++ show field

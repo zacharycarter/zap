@@ -18,7 +18,6 @@ import qualified Data.Map.Strict as M
 import Control.Monad (forM, forM_, when)
 import Control.Monad.State
 import Control.Monad.Except
-import Control.Monad.IO.Class (liftIO)
 import Debug.Trace
 import Zap.IR.Core
 
@@ -44,7 +43,7 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
     declsText <- forM decls $ \decl -> do
         traceM $ "\nProcessing declaration:\n" ++ show decl
         case decl of
-            IRStruct name fields -> do
+            IRStruct name _ -> do
                 traceM $ "Generating struct definition '" ++ T.unpack name ++ "'"
                 res <- generateStructDef decl
                 traceM $ "Generated struct:\n" ++ T.unpack res
@@ -59,9 +58,9 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
                 return res
 
     traceM "\n--- Processing Main Function Expressions ---"
-    mainBody <- forM exprs $ \expr -> do
-        traceM $ "\nGenerating statement for:\n" ++ show expr
-        res <- generateStmt expr
+    mainBody <- forM exprs $ \ex -> do
+        traceM $ "\nGenerating statement for:\n" ++ show ex
+        res <- generateStmt ex
         traceM $ "Generated statement:\n" ++ T.unpack res
         return res
 
@@ -97,10 +96,10 @@ generateTypedExpr :: IRExpr -> Codegen (Text, IRType)
 generateTypedExpr irExpr = do
     traceM $ "Generating expression: " ++ show irExpr
     -- Use pattern matching to deconstruct IRExpr
-    let IRExpr meta exprNode = irExpr
+    let IRExpr _ exprNode = irExpr
     case exprNode of
         -- This case should go first
-        IRBlock _ exprs mResult -> do
+        IRBlock _ exprs _ -> do
             -- Generate all statements before the last
             when (not (null exprs)) $ do
                 mapM_ generateStmt (init exprs)
@@ -138,7 +137,7 @@ generateTypedExpr irExpr = do
             (rval, rtyp) <- generateTypedExpr rhs
             case (op, ltyp, rtyp) of
                 -- Add struct-based vector operations
-                (IRAdd, IRTypeStruct "Vec3" fields1, IRTypeStruct "Vec3" fields2) ->
+                (IRAdd, IRTypeStruct "Vec3" _, IRTypeStruct "Vec3" _) ->
                     return (T.concat ["vec3_add(", lval, ", ", rval, ")"], ltyp)
 
                 -- Existing vector operations remain unchanged
@@ -232,7 +231,7 @@ generateTypedExpr irExpr = do
             let assignments = T.intercalate ", " (zipWith (\n v -> n <> ": " <> v) fNames exprVals)
             return ("(" <> cType <> "){" <> assignments <> "}", structType)
 
-        IRLetAlloc name val strat -> do
+        IRLetAlloc name val _ -> do
             (valExpr, valType) <- generateTypedExpr val
             typeStr <- irTypeToCType valType
             modify $ \s -> s { varEnv = M.insert name valType (varEnv s) }
@@ -250,7 +249,7 @@ generateTypedExpr irExpr = do
                     _ -> T.concat ["printf(\"", fmt, "\\n\", ", val, ")"]
             return (printStmt, IRTypeVoid)
 
-        IRBlockAlloc name exprs mResult -> do
+        IRBlockAlloc _ exprs mResult -> do
             stmts <- mapM generateStmt exprs
             res <- case mResult of
                 Just r -> do
@@ -261,11 +260,11 @@ generateTypedExpr irExpr = do
 
         IRCall name args -> do
             traceM $ "Generating function call: " ++ T.unpack name
-            state <- get
+            s <- get
             argVals <- mapM generateTypedExpr args
-            case (M.lookup name (varEnv state), M.lookup name (funcEnv state)) of
+            case (M.lookup name (varEnv s), M.lookup name (funcEnv s)) of
                 -- Struct constructor case
-                (Just (IRTypeStruct sName fields), _) -> do
+                (Just (IRTypeStruct _ fields), _) -> do
                     let fieldNames = map fst fields
                     let argStrs = map fst argVals
                     let initStrs = T.intercalate ", " $
@@ -285,33 +284,17 @@ generateTypedExpr irExpr = do
                     let callExpr = T.concat [name, "(", T.intercalate ", " argStrs, ")"]
                     -- Return IRTypeAny since we don't know the return type
                     return (callExpr, IRTypeAny)
-        IRCall name args -> do
-            traceM $ "Generating function call: " ++ T.unpack name
-            state <- get
-            argVals <- mapM generateTypedExpr args
-            case M.lookup name (varEnv state) of
-                Just (IRTypeStruct sName fields) -> do
-                    -- Use actual field names from struct definition
-                    let fieldNames = map fst fields
-                    let argStrs = map fst argVals
-                    let initStrs = T.intercalate ", " $
-                          zipWith (\f v -> f <> ": " <> v) fieldNames argStrs
-                    return ("(" <> name <> "_t){" <> initStrs <> "}", IRTypeStruct name fields)
-                Just _ -> throwError $ UnsupportedType IRTypeString
-                Nothing -> do
-                    traceM $ "Unknown function: " ++ T.unpack name
-                    throwError $ UnsupportedType IRTypeString
 
         _ -> throwError $ UnsupportedType IRTypeString
 
 generateStmt :: IRExpr -> Codegen Text
 generateStmt irExpr = do
     traceM $ "Generating statement for expression: " ++ show irExpr
-    let IRExpr meta exprNode = irExpr
+    let IRExpr _ exprNode = irExpr
     case exprNode of
-        IRLetAlloc name val strat -> do
-          state <- get
-          case M.lookup name (varEnv state) of
+        IRLetAlloc name val _ -> do
+          st <- get
+          case M.lookup name (varEnv st) of
             -- Variable already exists - generate assignment
             Just _ -> do
               (valExpr, _) <- generateTypedExpr val
@@ -338,14 +321,14 @@ generateStmt irExpr = do
 
         IRBlock "while" (cond:body:_) _ -> do
             -- Special case for while blocks
-            (condExpr, condType) <- generateTypedExpr cond
+            (condExpr, _) <- generateTypedExpr cond
             bodyStmt <- generateStmt body
             return $ T.concat [
                 "    while (", condExpr, ") {\n",
                 bodyStmt, "\n",
                 "    }"]
 
-        IRBlock name exprs mResult -> do
+        IRBlock _ exprs mResult -> do
             -- General case for other blocks
             stmts <- mapM generateStmt exprs
             res <- case mResult of
@@ -353,7 +336,7 @@ generateStmt irExpr = do
                 Nothing -> return ""
             return $ T.unlines (stmts ++ [res])
 
-        IRBlockAlloc name exprs mResult -> do
+        IRBlockAlloc _ exprs mResult -> do
             stmts <- mapM generateStmt exprs
             res <- case mResult of
                 Just r -> generateStmt r
@@ -377,11 +360,11 @@ generateStmt irExpr = do
             return $ T.concat ["    ", cType, " ", tmpName, ";\n", T.unlines stmts]
 
         
-        IRFieldAccess base f -> do
+        IRFieldAccess _ _ -> do
             (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    " <> val <> ";"
 
-        IRVarAlloc name strat -> do
+        IRVarAlloc name _ -> do
             traceM $ "Generating var alloc for " ++ T.unpack name
             return $ "    // var alloc for " <> name
 
@@ -398,7 +381,7 @@ generateStmt irExpr = do
             elseSt <- generateStmt else_
             return $ T.concat ["    if (", cVal, ") {\n", thenSt, "\n} else {\n", elseSt, "\n}"]
 
-        IRVar name -> do
+        IRVar _ -> do
             (val, _) <- generateTypedExpr irExpr  -- Pass whole IRExpr
             return $ "    // variable ref: " <> val
 
@@ -450,8 +433,8 @@ generateFuncDef (IRFunc name params retType body) = do
             -- Generate return value
             retVal <- case (stmts, mResult) of
                 -- Use last statement as return if no explicit result
-                (expr:_, Nothing) -> do
-                    (val, _) <- generateTypedExpr expr
+                (ex:_, Nothing) -> do
+                    (val, _) <- generateTypedExpr ex
                     return val
                 -- Use explicit result expression if provided
                 (_, Just resultExpr) -> do
@@ -493,7 +476,7 @@ generateStructDef (IRStruct name fields) = do
 
     let paramList = T.intercalate ", " [typ <> " " <> fname | (fname, typ) <- fieldTypes]
     let assignments = T.intercalate ", " [fname <> " = " <> fname | (fname, _) <- fields]
-    let constructor = T.unlines
+    let _constructor = T.unlines
           [ structName <> " new_" <> name <> "(" <> paramList <> ") {"
           , "    return (" <> structName <> "){" <> assignments <> "};"
           , "}"
@@ -508,6 +491,8 @@ generateStructDef (IRStruct name fields) = do
         , fieldSection
         , T.pack "} " <> structName <> T.pack ";\n"
         ]
+-- FIXME: This isn't right?
+generateStructDef (IRFunc _ _ _ _) = return ""
 
 generateField :: (Text, IRType) -> Codegen Text
 generateField (fname, ftyp) = do
@@ -550,7 +535,7 @@ getPrintfFormat typ = do
         IRTypeVec (IRVec3 _) -> return "(%f, %f, %f)"
         IRTypeVec (IRVec4 _) -> return "(%f, %f, %f, %f)"
         IRTypeVec _ -> return "(unsupported vector)"
-        IRTypeStruct sName fields ->
+        IRTypeStruct _ _ ->
             -- Just fallback on printing one field if needed
             return "%f"
         _ -> throwError $ UnsupportedType typ

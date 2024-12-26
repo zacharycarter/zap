@@ -9,17 +9,16 @@ module Zap.Compiler
   ) where
 
 import qualified Data.Text as T
-import Control.Monad.Except
 
-import Zap.AST (Program(..), Expr(..), TopLevel(..))
+import Zap.AST (Program(..), TopLevel(..))
 import Zap.Parser.Program (parseProgram)
 import Zap.Parser.Core (ParseError(..))
 import Zap.Analysis.Semantic (analyze, SemanticError)
 import Zap.IR.Conversion
-import Zap.IR.Core (IR(..), IRExpr)
+import Zap.IR.Core (IR(..))
 import Zap.Analysis.AllocationOpt (optimizeAllocations, OptimizationStats(..))
 import Zap.Codegen.C (generateC, CGenError)
-import Zap.Analysis.Lexical (tokenize, Token, Located, LexError)
+import Zap.Analysis.Lexical (tokenize, Located, LexError)
 import Zap.Analysis.CFG (CFG, CFGError, buildProgramCFG)
 
 data CompileStage
@@ -100,8 +99,8 @@ compile opts source = do
   semanticResult <- if targetStage opts >= SemanticAnalysis
     then case program astResult of
       Just prog -> do
-        analyzed <- mapLeft AnalysisError $ analyze prog
-        return $ astResult { analyzed = Just analyzed }
+        a <- mapLeft AnalysisError $ analyze prog
+        return $ astResult { analyzed = Just a }
       Nothing -> return astResult
     else return astResult
 
@@ -118,8 +117,8 @@ compile opts source = do
   cfgResult <- if targetStage opts >= CFGAnalysis
     then case irProgram irResult of
       Just ir -> do
-        cfg <- mapLeft CFGError $ buildProgramCFG ir
-        return $ irResult { cfg = Just cfg }
+        c <- mapLeft CFGError $ buildProgramCFG ir
+        return $ irResult { cfg = Just c }
       Nothing -> return irResult
     else return irResult
 
@@ -128,7 +127,8 @@ compile opts source = do
     then case irProgram cfgResult of
       Just ir ->
         case optimizeAllocations ir of
-          Right (optimizedIr, stats) ->
+          -- FIXME: Is this right?
+          Right (_optimizedIr, stats) ->
             return $ cfgResult { optimizationStats = Just stats }
           Left err -> Left $ OptimizationError (show err)
       Nothing -> return cfgResult

@@ -8,12 +8,10 @@ module Zap.Analysis.CFG
   , CFGError(..)
   ) where
 
-import qualified Data.Text as T
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Control.Monad.State
 import Control.Monad.Except
-import Debug.Trace
 
 import Zap.IR.Core
 
@@ -106,9 +104,9 @@ createBlocks exprs = do
 processExprs :: [IRExpr] -> CFGBuilder ()
 processExprs [] = finalizeCurrentBlock
 processExprs (irExpr:rest) = do
-  let IRExpr meta exprNode = irExpr
+  let IRExpr _ exprNode = irExpr
   case exprNode of
-    IRIf cond thenExpr elseExpr -> do
+    IRIf _ thenExpr elseExpr -> do
       -- Finalize current block with if as terminator
       modifyCurrentBlock (\b -> b { blockTerminator = Just irExpr })
       currentId <- getCurrentBlockId
@@ -145,13 +143,13 @@ processExprs (irExpr:rest) = do
 -- Helper functions
 freshNodeId :: CFGBuilder NodeId
 freshNodeId = do
-  id <- gets nextNodeId
-  modify $ \s -> s { nextNodeId = id + 1 }
-  return id
+  nnid <- gets nextNodeId
+  modify $ \s -> s { nextNodeId = nnid + 1 }
+  return nnid
 
 startNewBlock :: NodeId -> CFGBuilder ()
-startNewBlock id =
-  modify $ \s -> s { currentBlock = Just $ BasicBlock id [] Nothing }
+startNewBlock nbid =
+  modify $ \s -> s { currentBlock = Just $ BasicBlock nbid [] Nothing }
 
 getCurrentBlockId :: CFGBuilder NodeId
 getCurrentBlockId = do

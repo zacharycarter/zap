@@ -11,11 +11,9 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import Control.Monad (foldM, forM_, when)
 import Control.Monad.State
-import Control.Monad.Except
 import Debug.Trace
 
 import Zap.IR.Core
-import Zap.IR.Allocator
 
 data OptimizationStats = OptimizationStats
   { stackSavings :: Integer
@@ -78,8 +76,8 @@ calculateSize typ = case typ of
 
 optimizeAllocations :: IR -> Either String (IR, OptimizationStats)
 optimizeAllocations ir = do
-  (ir', state) <- runStateT (optimizeIR ir) initialState
-  return (ir', currentStats state)
+  (ir', st) <- runStateT (optimizeIR ir) initialState
+  return (ir', currentStats st)
 
 optimizeIR :: IR -> OptM IR
 optimizeIR (IRProgram decls exprs) = do
@@ -106,23 +104,23 @@ buildStructRegistry decls = do
         return $ M.insert name (StructInfo fields size) reg
 
 optimizeExpr :: IRExpr -> OptM IRExpr
-optimizeExpr irExpr@(IRExpr meta exprNode) = case exprNode of
+optimizeExpr _irExpr@(IRExpr meta exprNode) = case exprNode of
     IRLetAlloc name val strat -> do
         traceM $ "Optimizing allocation for " ++ show name
         val' <- optimizeExpr val
         case val' of
-            IRExpr _ (IRStructLit sname fields) -> do
+            IRExpr _ (IRStructLit _ fields) -> do
                 let fieldTypes = map (exprType . metadata . snd) fields
                 reg <- gets structReg
-                let structSize = sum $ map (calculateStructSize reg) fieldTypes
-                traceM $ "Calculated struct size: " ++ show structSize
-                let newStrat = if structSize > largeObjectThreshold
+                let ss = sum $ map (calculateStructSize reg) fieldTypes
+                traceM $ "Calculated struct size: " ++ show ss
+                let newStrat = if ss > largeObjectThreshold
                              then IRAllocHeap
                              else IRAllocStack
 
                 when (strat == IRAllocHeap && newStrat == IRAllocStack) $ do
                     modify $ \s -> s { currentStats = (currentStats s) {
-                        stackSavings = stackSavings (currentStats s) + structSize
+                        stackSavings = stackSavings (currentStats s) + ss
                     }}
 
                 return $ IRExpr meta { exprType = exprType (metadata val') }
@@ -178,33 +176,6 @@ optimizeExpr irExpr@(IRExpr meta exprNode) = case exprNode of
       traceM $ "Skipping optimization for expr node: " ++ show exprNode
       return $ IRExpr meta exprNode
 
-    -- Handle all expression types
-    IRVar name -> return irExpr
-    IRNum _ _ -> return irExpr
-    IRString _ -> return irExpr
-    IRBool _ -> return irExpr
-    IRBinOp op e1 e2 -> do
-        e1' <- optimizeExpr e1
-        e2' <- optimizeExpr e2
-        return $ IRExpr meta (IRBinOp op e1' e2')
-    IRFieldAccess e f -> do
-        e' <- optimizeExpr e
-        return $ IRExpr meta (IRFieldAccess e' f)
-    IRStructLit name fields -> do
-        fields' <- mapM (\(n,e) -> do
-            e' <- optimizeExpr e
-            return (n,e')) fields
-        return $ IRExpr meta (IRStructLit name fields')
-    IRIf cond then_ else_ -> do
-        cond' <- optimizeExpr cond
-        then_' <- optimizeExpr then_
-        else_' <- optimizeExpr else_
-        return $ IRExpr meta (IRIf cond' then_' else_')
-    IRCall name args -> do
-        args' <- mapM optimizeExpr args
-        return $ IRExpr meta (IRCall name args')
-    _ -> return irExpr
-
 alignVectorAllocation :: IRVecType -> IRAllocStrat -> (IRAllocStrat, Bool)
 alignVectorAllocation vt _ = case vt of
     IRVec4 _ -> (IRAllocStack, True)   -- Always SIMD capable
@@ -212,7 +183,7 @@ alignVectorAllocation vt _ = case vt of
     IRVec3 _ -> (IRAllocStack, False)  -- Not SIMD optimal due to padding
 
 optimizeDecl :: IRDecl -> OptM IRDecl
-optimizeDecl decl@(IRFunc name params retType body) = do
+optimizeDecl _decl@(IRFunc name params retType body) = do
     traceM $ "Optimizing function: " ++ show name
     -- Record parameter sizes and SIMD info
     forM_ params $ \(pname, ptype) -> do
@@ -238,9 +209,6 @@ optimizeDecl decl@(IRFunc name params retType body) = do
     traceM $ "Result: " ++ show result
     return $ result
 optimizeDecl other = return other
-
-traceMonad :: (Show a, Monad m) => a -> m a
-traceMonad x = trace ("test: " ++ show x) (return x)
 
 -- optimizeDecl :: IRDecl -> OptM IRDecl
 -- optimizeDecl decl@(IRFunc name params retType body) = do

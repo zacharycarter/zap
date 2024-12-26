@@ -1,11 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Main where
+module Main (main) where
 
 import qualified Data.Text.IO as TIO
 import System.Environment
-import System.FilePath
 import System.Exit
-import Control.Monad
 
 import Zap.Compiler
 
