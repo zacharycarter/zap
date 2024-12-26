@@ -168,7 +168,7 @@ print sumSquares(2, 2)
 ``` 
 
 ``` shell
-4
+8
 ```
 
 ## Contributing
