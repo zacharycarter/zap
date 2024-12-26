@@ -76,9 +76,9 @@ basicTests =
         , "  sum = sum + y * y"
         , "  sum"
         , ""
-        , "print sum_squares(1, 1)"
+        , "print sum_squares(2, 2)"
         ]
-    , expectedOutput = "2\n"
+    , expectedOutput = "8\n"
     , expectedExitCode = ExitSuccess
     }
   ]
