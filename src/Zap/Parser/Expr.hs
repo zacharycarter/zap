@@ -14,6 +14,7 @@ module Zap.Parser.Expr
   , parseFuncDecl
   , parseVarDecl
   , parseWhileExpr
+  , parseMaybeCall
   , isPrint
   , isStringLit
   , isValidName
@@ -457,51 +458,64 @@ parseBlockImpl = do
 -- Helper for block contents
 parseBlockContents :: IndentContext -> Parser ([Expr], Maybe Expr)
 parseBlockContents ctx = do
-  modify $ \s -> s { stateIndent = baseIndent ctx }
+    modify $ \s -> s { stateIndent = baseIndent ctx }
 
-  state <- get
-  traceM $ "\n=== parseBlockContents ==="
-  traceM $ "Context type: " ++ show ctx
-  traceM $ "Current indent: " ++ show (stateIndent state)
-  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
+    state <- get
+    traceM $ "\n=== parseBlockContents ==="
+    traceM $ "Context type: " ++ show ctx
+    traceM $ "Current indent: " ++ show (stateIndent state)
+    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens state)
 
-  case stateTokens state of
-    (tok:rest) -> do
-      traceM $ "Block contents token: " ++ show tok
-      traceM $ "Current indent context: base=" ++ show (baseIndent ctx)
-      traceM $ "Current state indent: " ++ show (stateIndent state)
-      traceM $ "Token column: " ++ show (locCol tok)
-      traceM $ "Token line: " ++ show (locLine tok)
-      traceM $ "Previous line: " ++ show (locLine (head $ stateTokens state))
+    case stateTokens state of
+        [] -> return ([], Nothing)
+        (tok:rest) -> case locToken tok of
+            TEOF -> return ([], Nothing)
+            _ -> do
+                traceM $ "Block contents token: " ++ show tok
+                traceM $ "Current indent context: base=" ++ show (baseIndent ctx)
+                traceM $ "Current state indent: " ++ show (stateIndent state)
+                traceM $ "Token column: " ++ show (locCol tok)
+                traceM $ "Token line: " ++ show (locLine tok)
 
-      -- Check for line gap first, before any other validation
-      let prevLine = case rest of
-            [] -> locLine tok
-            (prev:_) -> locLine prev
+                -- Add line gap detection
+                let nextLineNum = case rest of
+                      (next:_) -> locLine next
+                      [] -> locLine tok
+                let hasLineGap = nextLineNum > locLine tok + 1
 
-      if locLine tok > prevLine + 1
-        then do
-          traceM $ "Found line gap between lines " ++ show prevLine ++
-                   " and " ++ show (locLine tok) ++ " - ending block"
-          return ([], Nothing)
-        else case locToken tok of
-          TEOF -> return ([], Nothing)
-          _ -> do
-            when (isBlockStatement (locToken tok) && locCol tok < baseIndent ctx) $
-              throwError $ IndentationError (baseIndent ctx) (locCol tok) GreaterEq
+                traceM $ "Next line: " ++ show nextLineNum
+                traceM $ "Line gap detected: " ++ show hasLineGap
 
-            let shouldContinue = locCol tok >= baseIndent ctx
-            if shouldContinue
-              then do
-                expr <- case locToken tok of
-                  TWord "print" -> parsePrintStatement
-                  TWord "block" -> parseBlockImpl
-                  _ -> parseExpression
-                (rest', result) <- parseBlockContents ctx
-                return (expr:rest', result)
-              else return ([], Nothing)
+                -- Regular indentation check
+                when (isBlockStatement (locToken tok) && locCol tok < baseIndent ctx) $
+                    throwError $ IndentationError (baseIndent ctx) (locCol tok) GreaterEq
 
-    [] -> return ([], Nothing)
+                let shouldContinue = locCol tok >= baseIndent ctx
+                if shouldContinue
+                    then do
+                        -- Parse current expression
+                        expr <- case locToken tok of
+                            TWord "print" -> parsePrintStatement
+                            TWord "block" -> parseBlockImpl
+                            _ -> parseExpression
+
+                        -- Check if next token is dedented or after gap
+                        case rest of
+                            (next:_)
+                                | hasLineGap && locCol next < baseIndent ctx ->
+                                    -- This expr is last one - make it the result
+                                    return ([], Just expr)
+                                | locCol next < baseIndent ctx ->
+                                    -- This expr is last one - make it the result
+                                    return ([], Just expr)
+                                | otherwise -> do
+                                    -- More expressions follow
+                                    (rest', result) <- parseBlockContents ctx
+                                    return (expr:rest', result)
+                            [] ->
+                                -- Last expression becomes the result
+                                return ([], Just expr)
+                    else return ([], Nothing)
 
 -- Helper to identify statements that must be properly indented in blocks
 isBlockStatement :: Token -> Bool
@@ -742,25 +756,27 @@ parseFuncDecl = do
 
             expr <- parseExpression
 
-            -- Check next token for line gap
+            -- Check next token for line gap and dedent
             state' <- get
             case stateTokens state' of
-                (next:_) | locLine next > locLine tok + 1 -> do
-                    traceM $ "Found line gap - ending function body"
-                    modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                    let body = Block $ BlockScope "function_body" [expr] Nothing
-                    case locToken nameTok of
-                        TWord name -> return $ DFunc name params retType body
-                        _ -> throwError $ UnexpectedToken nameTok "function name"
+                (next:_)
+                    | locLine next > locLine tok + 1 && locCol next < indent -> do
+                        traceM $ "Found line gap and dedent - ending function body"
+                        modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
+                        let body = Block $ BlockScope "function_body" [expr] Nothing
+                        case locToken nameTok of
+                            TWord name -> return $ DFunc name params retType body
+                            _ -> throwError $ UnexpectedToken nameTok "function name"
+                    | otherwise -> do
+                        -- Continue parsing block contents normally
+                        (rest, result) <- parseBlockContents ctx
+                        modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
+                        let body = Block $ BlockScope "function_body" (expr:rest) result
+                        case locToken nameTok of
+                            TWord name -> return $ DFunc name params retType body
+                            _ -> throwError $ UnexpectedToken nameTok "function name"
 
-                _ -> do
-                    -- Continue parsing block contents normally
-                    (rest, result) <- parseBlockContents ctx
-                    modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                    let body = Block $ BlockScope "function_body" (expr:rest) result
-                    case locToken nameTok of
-                        TWord name -> return $ DFunc name params retType body
-                        _ -> throwError $ UnexpectedToken nameTok "function name"
+                [] -> throwError $ EndOfInput "function body"
 
         [] -> throwError $ EndOfInput "function body"
 

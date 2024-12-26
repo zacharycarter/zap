@@ -76,6 +76,7 @@ generateC (IRProgram decls exprs) = evalState (runExceptT $ do
 
     let program = T.unlines
           [ T.pack "#include <stdio.h>"
+          , T.pack "#include <stdint.h>"
           , T.pack "#include <immintrin.h>"
           , T.pack ""
           , vectorOps
@@ -98,6 +99,16 @@ generateTypedExpr irExpr = do
     -- Use pattern matching to deconstruct IRExpr
     let IRExpr meta exprNode = irExpr
     case exprNode of
+        -- This case should go first
+        IRBlock _ exprs mResult -> do
+            -- Generate all statements before the last
+            when (not (null exprs)) $ do
+                mapM_ generateStmt (init exprs)
+            -- Get value of last expression 
+            case last exprs of
+                lastExpr -> do
+                    (val, typ) <- generateTypedExpr lastExpr
+                    return (val, typ)
         IRNum t val ->
             return (val, IRTypeNum t)
 

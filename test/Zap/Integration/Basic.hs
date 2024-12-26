@@ -74,8 +74,10 @@ basicTests =
         , "  var sum = x * x"  -- Local variable
         , "  sum = sum + y * y"
         , "  sum"
+        , ""
+        , "print sum_squares(1, 1)"
         ]
-    , expectedOutput = ""  -- We'll need to add print to see output
+    , expectedOutput = "2"  -- We'll need to add print to see output
     , expectedExitCode = ExitSuccess
     }
   ]

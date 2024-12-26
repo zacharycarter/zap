@@ -12,7 +12,7 @@ import Debug.Trace
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 import Zap.Parser.Core
-import Zap.Parser.Expr (parseBlockImpl, parseBlockExprs, mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
+import Zap.Parser.Expr (parseMaybeCall, parseBlockImpl, parseBlockExprs, mapLexError, isValidName, parseFuncDecl, parseVarDecl, parseWhileExpr, parsePrintStatement, parseBlock, defaultExprParser, parseLetBinding, parseSingleBindingLine)
 import Zap.AST
 
 parseProgram :: T.Text -> Either ParseError [TopLevel]
@@ -148,6 +148,10 @@ parseTopLevel = do
                     modify $ \s -> s { stateIndent = origIndent }
                     traceM $ "Parsed function declaration: " ++ show decl
                     return $ TLDecl decl
+                TWord name | isValidName (locToken tok) -> do
+                    _ <- matchToken isValidName "identifier"
+                    expr <- parseMaybeCall name
+                    return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"

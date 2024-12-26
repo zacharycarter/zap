@@ -130,6 +130,10 @@ checkDecl (DStruct _ _) = return ()
 inferTypeExpr :: Expr -> SemCheck Type
 inferTypeExpr expr = do
   traceM $ "Inferring type of expression: " ++ show expr
+
+  (vars, _, _, _) <- get
+  traceM $ "Current variable environment: " ++ show vars
+ 
   result <- case expr of
         StrLit s ->
           if null s
@@ -138,11 +142,17 @@ inferTypeExpr expr = do
 
         NumLit numType _ -> return $ TypeNum numType
 
-        Var v -> do
+        Var name -> do
+            traceM $ "Looking up variable: " ++ name
             (vars, _, _, _) <- get
-            case M.lookup v vars of
-                Just t -> return t
-                Nothing -> throwError $ UndefinedVariable v
+            traceM $ "Looking up in environment: " ++ show vars
+            case M.lookup name vars of
+                Nothing -> do
+                    traceM $ "ERROR: Undefined variable: " ++ name
+                    throwError $ UndefinedVariable name
+                Just t -> do
+                    traceM $ "Found variable type: " ++ show t
+                    return t
 
         Call "print" [arg] -> do
             -- For print, we don't care about the argument type
@@ -256,26 +266,32 @@ inferTypeExpr expr = do
             return exprType
 
         BoolLit _ -> return TypeBool
-       
+
         Block scope -> do
-            traceM $ "Inferring Block type"
-            traceM $ "Block expressions: " ++ show (blockExprs scope)
             -- Save current environment
             (oldVars, funs, structs, blocks) <- get
             -- Process block expressions
             types <- mapM inferTypeExpr (blockExprs scope)
-            -- Restore original environment
-            put (oldVars, funs, structs, blocks)
+            -- Get updated environment with block's variables
+            (blockVars, _, _, _) <- get
             -- Determine block type
             case (blockExprs scope, blockResult scope) of
                 ([], Nothing) -> do
                     traceM "Empty block, defaulting to Int32"
+                    put (oldVars, funs, structs, blocks)
                     return $ TypeNum Int32
                 (exprs, Nothing) -> do
                     let lastType = last types
                     traceM $ "Block type from last expression: " ++ show lastType
+                    put (oldVars, funs, structs, blocks)
                     return lastType
-                (_, Just result) -> inferTypeExpr result
+                (_, Just result) -> do
+                    -- Use block's variables when analyzing result
+                    put (blockVars, funs, structs, blocks)
+                    resultType <- inferTypeExpr result
+                    -- Restore original environment after
+                    put (oldVars, funs, structs, blocks)
+                    return resultType
 
         StructLit name fields -> do
             (_, _, structs, _) <- get
@@ -304,13 +320,14 @@ inferTypeExpr expr = do
                             else throwError $ TypeMismatch rhsType varType
                     Nothing -> throwError $ UndefinedVariable name
 
-
         VarDecl name val -> do
             traceM $ "Inferring VarDecl for " ++ name
             valType <- inferTypeExpr val
             traceM $ "VarDecl value type: " ++ show valType
-            (vars, funs, structs, blocks) <- get
-            put (M.insert name valType vars, funs, structs, blocks)
+            -- Check if variable was actually added
+            addVar name valType
+            (vars, _, _, _) <- get
+            traceM $ "Environment after VarDecl: " ++ show vars
             return valType
 
         Assign name val -> do
@@ -355,8 +372,11 @@ inferTypeExpr (StructLit "Vec3" fields) = do
 
 addVar :: String -> Type -> SemCheck Type
 addVar name typ = do
+    traceM $ "Adding variable to environment: " ++ name ++ " : " ++ show typ
     (vars, funs, structs, blocks) <- get
+    traceM $ "Current var environment: " ++ show vars
     put (M.insert name typ vars, funs, structs, blocks)
+    traceM $ "Updated var environment: " ++ show (M.insert name typ vars)
     return typ
 
 checkBinOp :: Op -> Type -> Type -> SemCheck Type

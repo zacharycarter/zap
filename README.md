@@ -156,6 +156,21 @@ print add(1, 2)
 3
 ```
 
+### Functions With Local Variables
+
+``` zap
+fn sumSquares(x, y: i32): i32 =
+  var sum = x * x
+  sum = sum + y * y
+  sum
+
+print sumSquares(2, 2)
+``` 
+
+``` shell
+4
+```
+
 ## Contributing
 Contributions are welcome! Please follow these steps:
 1. Fork the repository.

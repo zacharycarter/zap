@@ -141,10 +141,11 @@ spec = do
             Right [TLDecl (DFunc "sum_squares"
                 [Param "x" (TypeNum Int32), Param "y" (TypeNum Int32)]
                 (TypeNum Int32)
-                (Block $ BlockScope "function_body"
-                    [ VarDecl "sum" (BinOp Mul (Var "x") (Var "x"))
-                    , Assign "sum" (BinOp Add (Var "sum")
-                        (BinOp Mul (Var "y") (Var "y")))
-                    , Var "sum"
-                    ]
-                    Nothing))]
+                (Block $ BlockScope
+                    { blockLabel = "function_body"
+                    , blockExprs = [
+                        VarDecl "sum" (BinOp Mul (Var "x") (Var "x")),
+                        Assign "sum" (BinOp Add (Var "sum") (BinOp Mul (Var "y") (Var "y")))
+                        ]
+                    , blockResult = Just (Var "sum")
+                    }))]
