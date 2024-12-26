@@ -1,5 +1,7 @@
 # Zap Programming Language Compiler
 
+![build status](https://github.com/zacharycarter/zap/actions/workflows/haskell.yml/badge.svg)
+
 ## Overview
 The Zap programming language is a general-purpose systems language optimized for game development. This repository contains the source code for the Zap compiler, capable of parsing, analyzing, and generating code for the Zap programming language. The compiler generates C code as an intermediate representation, with plans to extend to other targets in the future.
 
