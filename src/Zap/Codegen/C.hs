@@ -310,10 +310,19 @@ generateStmt irExpr = do
     let IRExpr meta exprNode = irExpr
     case exprNode of
         IRLetAlloc name val strat -> do
-            (valExpr, valType) <- generateTypedExpr val
-            typeStr <- irTypeToCType valType
-            modify $ \s -> s { varEnv = M.insert name valType (varEnv s) }
-            return $ T.concat ["    ", typeStr, " ", name, " = ", valExpr, ";"]
+          state <- get
+          case M.lookup name (varEnv state) of
+            -- Variable already exists - generate assignment
+            Just _ -> do
+              (valExpr, _) <- generateTypedExpr val
+              return $ T.concat ["    ", name, " = ", valExpr, ";\n"]
+            -- New variable - generate declaration
+            Nothing -> do
+              (valExpr, valType) <- generateTypedExpr val
+              typeStr <- irTypeToCType valType
+              -- Add variable to environment when we create it
+              modify $ \s -> s { varEnv = M.insert name valType (varEnv s) }
+              return $ T.concat ["    ", typeStr, " ", name, " = ", valExpr, ";\n"]
 
         IRPrint printExpr -> do
             (val, typ) <- generateTypedExpr printExpr
@@ -433,21 +442,39 @@ generateFuncDef (IRFunc name params retType body) = do
         typeStr <- irTypeToCType ptype
         return $ T.concat [typeStr, " ", pname]
 
-    (bodyExpr, bodyType) <- generateTypedExpr body
+    -- Handle block vs expression return values
+    bodyCode <- case expr body of
+        IRBlockAlloc _ stmts mResult -> do
+            -- Generate statements
+            stmtCode <- T.concat <$> mapM generateStmt stmts
+            -- Generate return value
+            retVal <- case (stmts, mResult) of
+                -- Use last statement as return if no explicit result
+                (expr:_, Nothing) -> do
+                    (val, _) <- generateTypedExpr expr
+                    return val
+                -- Use explicit result expression if provided
+                (_, Just resultExpr) -> do
+                    (val, _) <- generateTypedExpr resultExpr
+                    return val
+                -- Default to 0 for empty block
+                ([], Nothing) -> return "0"
+            return $ stmtCode <> "    return " <> retVal <> ";\n"
+        _ -> do
+            (bodyExpr, _) <- generateTypedExpr body
+            return $ "    return " <> bodyExpr <> ";\n"
 
     oldState <- get
-
     modify $ \s -> s { varEnv = M.empty, funcEnv = M.empty }
 
     let funcSig = T.concat [retTypeStr, " ", name, "(", T.intercalate ", " paramStrs, ")"]
     let result = T.unlines
             [ funcSig <> " {"
-            , "    return " <> bodyExpr <> ";"
+            , bodyCode
             , "}"
             ]
 
     put oldState
-
     return result
 generateFuncDef _ = throwError $ UnsupportedType IRTypeString
 

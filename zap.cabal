@@ -103,10 +103,10 @@ test-suite zap-test
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
       Zap.Codegen.CSpec
-      Zap.Integration
       Zap.Integration.Basic
       Zap.Integration.IntegrationSpec
       Zap.Integration.Runner
+      Zap.Integration.Types
       Zap.IR.ConversionSpec
       Zap.Parser.ParserSpec
       Zap.Util

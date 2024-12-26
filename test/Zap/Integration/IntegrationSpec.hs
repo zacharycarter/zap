@@ -6,8 +6,9 @@ import qualified Data.Text as T
 import System.Exit
 import Control.Monad (forM_)
 
-import Zap.Integration
 import Zap.Integration.Basic
+import Zap.Integration.Runner
+import Zap.Integration.Types
 import Zap.Parser.Core (ParseError(..))
 
 spec :: Spec
