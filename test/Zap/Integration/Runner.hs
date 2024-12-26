@@ -12,16 +12,12 @@ import System.IO
 import System.Process
 import System.Exit
 import System.Directory
-import System.IO.Temp hiding (withTempFile)
 import Control.Exception (bracket, catch)
 import Text.Printf
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 
 import Zap.Compiler
-import Zap.IR.Core
-import Zap.Codegen.C
-import Zap.Parser.Core (ParseError(..))
 import Zap.Integration.Types
 
 -- | Run all integration tests and report results
@@ -62,8 +58,8 @@ runTests tests = do
 runTest :: TestCase -> IO TestResult
 runTest test = do  -- Keep the test parameter
   -- First compile Zap code to C
-  let compileResult = compile defaultCompileOptions (sourceCode test)
-  case (compileResult, expectedExitCode test) of  -- Add test parameter here
+  let cr = compile defaultCompileOptions (sourceCode test)
+  case (cr, expectedExitCode test) of  -- Add test parameter here
     -- For expected failures, we're done
     (Left _, ExitFailure _) -> return TestSuccess
     (Right _, ExitFailure _) -> return $ TestFailure "Compilation succeeded when failure was expected"
@@ -74,8 +70,8 @@ runTest test = do  -- Keep the test parameter
       Nothing -> return $ TestFailure "No code generated when success was expected"
       Just cCode -> do
         -- Compile C code
-        compileResult <- compileCCode cCode
-        case compileResult of
+        cr' <- compileCCode cCode
+        case cr' of
           Left err -> return $ CompilationFailure err
           Right execPath -> do
             -- Run the compiled program
@@ -101,24 +97,24 @@ compileCCode code = withTempFile "test" ".c" $ \sourcePath sourceHandle -> do
   hClose sourceHandle
 
   -- Generate output path
-  let outputPath = sourcePath ++ ".out"
+  let op = sourcePath ++ ".out"
 
   -- Run gcc with all warnings enabled
-  (exitCode, stdout, stderr) <- readProcessWithExitCode "gcc"
-    ["-Wall", sourcePath, "-o", outputPath] ""
+  (exitCode, out, err) <- readProcessWithExitCode "gcc"
+    ["-Wall", sourcePath, "-o", op] ""
 
   case exitCode of
-    ExitSuccess -> return $ Right outputPath
+    ExitSuccess -> return $ Right op
     ExitFailure n -> return $ Left $
       "gcc failed with exit code " ++ show n ++
-      "\nstdout: " ++ stdout ++
-      "\nstderr: " ++ stderr
+      "\nstdout: " ++ out ++
+      "\nstderr: " ++ err
 
 -- | Run a compiled program and capture its output
 runCompiledProgram :: FilePath -> IO (ExitCode, T.Text)
 runCompiledProgram path = do
-  (exitCode, stdout, stderr) <- readProcessWithExitCode path [] ""
-  return (exitCode, T.pack $ stdout ++ stderr)
+  (exitCode, out, err) <- readProcessWithExitCode path [] ""
+  return (exitCode, T.pack $ out ++ err)
 
 -- | Create a temporary file that is deleted after use
 withTempFile :: String -> String -> (FilePath -> Handle -> IO a) -> IO a

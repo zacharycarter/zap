@@ -4,7 +4,6 @@ module Zap.Analysis.CFGSpec (spec) where
 import Test.Hspec
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import Control.Monad (forM_)
 
 import Zap.IR.Core
 import Zap.Analysis.CFG

@@ -5,7 +5,6 @@ module Zap.Util (mkTestExpr) where
 import qualified Data.Set as S
 
 import Zap.IR.Core
-import Zap.Analysis.Allocation
 
 -- Test utilities
 mkTestExpr :: IRExprNode -> IRExpr
@@ -29,7 +28,7 @@ inferInitialType node = case node of
 
     -- Print expressions should use type of printed expression
     -- IRPrint expr -> exprType $ metadata expr
-    IRPrint expr -> IRTypeVoid
+    IRPrint _ -> IRTypeVoid
 
     -- Binary operations should use operand types
     IRBinOp _ e1 e2 ->
@@ -47,7 +46,7 @@ inferInitialType node = case node of
            else IRTypeAny
 
     -- Result expressions should propagate child type
-    IRResult expr -> exprType $ metadata expr
+    IRResult rex -> exprType $ metadata rex
 
     -- Block expressions use result type if available
     IRBlockAlloc _ exprs mResult ->
@@ -60,7 +59,7 @@ inferInitialType node = case node of
     -- Other cases remain unchanged
     IRVar _ -> IRTypeAny
     IRStructLit name _ -> IRTypeStruct name []
-    IRLetAlloc _ expr _ -> exprType $ metadata expr
+    IRLetAlloc _ laex _ -> exprType $ metadata laex
     IRVarAlloc _ _ -> IRTypeAny
     IRFieldAccess _ _ -> IRTypeAny
     IRArrayLit t _ -> IRTypeArray t
@@ -68,6 +67,7 @@ inferInitialType node = case node of
     IRVecAlloc vt _ _ -> IRTypeVec vt
     IRStructLitAlloc name _ _ -> IRTypeStruct name []
     IRCall _ _ -> IRTypeAny
+    _ -> IRTypeAny
 
 -- | Infer initial effects for an IR node
 inferInitialEffects :: IRExprNode -> S.Set Effect
@@ -105,6 +105,8 @@ inferInitialEffects = \case
 
     -- Binary operations are pure
     IRBinOp _ _ _ -> S.singleton PureEffect
+
+    _ -> S.empty
 
 -- inferInitialType :: IRExprNode -> IRType
 -- inferInitialType = \case

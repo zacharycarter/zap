@@ -4,7 +4,6 @@
 module Zap.Analysis.LexicalSpec (spec) where
 
 import Test.Hspec
-import Data.Either (isLeft)
 import qualified Data.Text as T
 
 import Zap.Analysis.Lexical
@@ -100,8 +99,9 @@ spec = do
             ]
       case tokenize input of
         Right tokens ->
-          let printTok = head tokens
-          in locLine printTok `shouldBe` 2
+          case tokens of
+            (pTok:_) -> locLine pTok `shouldBe` 2
+            [] -> expectationFailure $ "Parse failed: empty token list"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
 
     it "handles errors after unterminated string" $ do

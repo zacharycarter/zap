@@ -3,15 +3,11 @@ module Zap.Analysis.AllocationOptSpec (spec) where
 
 import Test.Hspec
 import qualified Data.Text as T
-import qualified Data.Map.Strict as M
-import Control.Monad.State
-import Control.Monad.Except
 import Data.List (sort)
 import Debug.Trace
 
 import Zap.IR.Core
 import Zap.Analysis.AllocationOpt
-import Zap.Analysis.Allocation (AllocError(..))
 import Zap.Util (mkTestExpr)
 
 spec :: Spec
@@ -28,11 +24,13 @@ spec = describe "Allocation Optimization" $ do
       Left err -> expectationFailure $ "Optimization failed: " ++ show err
 
   it "preserves heap allocations for large objects" $ do
-    let fields = [(T.pack $ show i, mkTestExpr $ IRNum IRInt32 "0") | i <- [1..100]]
+    let fields = [(T.pack $ show i, mkTestExpr $ IRNum IRInt32 "0") | i <- [(1 :: Integer)..(100 :: Integer)]]
     let ir = IRProgram []
               [mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRStructLit "LargeStruct" fields) IRAllocHeap]
-    let Right (optimized, _) = optimizeAllocations ir
-    optimized `shouldBe` ir
+    case optimizeAllocations ir of
+      Right (optimized, _) ->
+        optimized `shouldBe` ir
+      Left err -> expectationFailure $ "Optimization failed: " ++ show err
 
   it "aligns vector allocations for SIMD" $ do
     let vecElements = replicate 4 (mkTestExpr $ IRNum IRFloat32 "1.0")
@@ -40,9 +38,11 @@ spec = describe "Allocation Optimization" $ do
               [mkTestExpr $ IRLetAlloc "v"
                 (mkTestExpr $ IRVec (IRVec4 IRFloat32) vecElements)
                 IRAllocDefault]
-    let Right (optimized, stats) = optimizeAllocations ir
-    simdOptimizations stats `shouldBe` 1
-    checkVectorAlignment optimized
+    case optimizeAllocations ir of
+      Right (optimized, stats) -> do
+        simdOptimizations stats `shouldBe` 1
+        checkVectorAlignment optimized
+      Left err -> expectationFailure $ "Optimization failed: " ++ show err
 
   it "reorders parameters for better packing" $ do
     let func = IRFunc "test"
@@ -52,12 +52,12 @@ spec = describe "Allocation Optimization" $ do
                 IRTypeVoid
                 (mkTestExpr $ IRVar "small")
     let ir = IRProgram [func] []
-    let Right (IRProgram [optimized] [], stats) = optimizeAllocations ir
-    parameterReordering stats `shouldBe` 1
-    checkParameterOrder optimized
-
-shouldBePositive :: Integer -> Expectation
-shouldBePositive x = x `shouldSatisfy` (> 0)
+    case optimizeAllocations ir of
+      Right (IRProgram [optimized] [], stats) -> do
+        parameterReordering stats `shouldBe` 1
+        checkParameterOrder optimized
+      Right r -> expectationFailure $ "Optimization failed, unexpected results: " ++ show r
+      Left err -> expectationFailure $ "Optimization failed: " ++ show err
 
 checkVectorAlignment :: IR -> Expectation
 checkVectorAlignment (IRProgram _ [IRExpr _ (IRLetAlloc _ _ strat)]) =

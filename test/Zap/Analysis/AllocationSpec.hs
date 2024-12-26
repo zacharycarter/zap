@@ -3,9 +3,6 @@ module Zap.Analysis.AllocationSpec (spec) where
 
 import Test.Hspec
 import Data.Either (isLeft, isRight)
-import qualified Data.Text as T
-import Control.Monad.State
-import Control.Monad.Except
 
 import Zap.IR.Core
 import Zap.Analysis.Allocation
@@ -16,17 +13,17 @@ spec :: Spec
 spec = do
     describe "Basic Allocations" $ do
         it "allows valid stack allocations" $ do
-            let expr = mkTestExpr $ IRVarAlloc "x" IRAllocStack
-            analyzeAllocations (IRProgram [] [expr]) `shouldBe` Right (IRProgram [] [expr])
+            let ex = mkTestExpr $ IRVarAlloc "x" IRAllocStack
+            analyzeAllocations (IRProgram [] [ex]) `shouldBe` Right (IRProgram [] [ex])
 
         it "prevents invalid stack allocations" $ do
-            let expr = mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRString "hello") IRAllocStack
-            analyzeAllocations (IRProgram [] [expr]) `shouldSatisfy` isLeft
+            let ex = mkTestExpr $ IRLetAlloc "x" (mkTestExpr $ IRString "hello") IRAllocStack
+            analyzeAllocations (IRProgram [] [ex]) `shouldSatisfy` isLeft
 
     describe "Arena Allocations" $ do
         it "detects invalid arena usage" $ do
-            let expr = mkTestExpr $ IRVarAlloc "x" IRAllocArena
-            analyzeAllocations (IRProgram [] [expr]) `shouldSatisfy` isLeft
+            let ex = mkTestExpr $ IRVarAlloc "x" IRAllocArena
+            analyzeAllocations (IRProgram [] [ex]) `shouldSatisfy` isLeft
 
         it "allows valid arena allocations" $ do
             let setup = mkTestExpr $ IRBlockAlloc "arena" [] Nothing

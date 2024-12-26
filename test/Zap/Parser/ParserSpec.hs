@@ -2,13 +2,9 @@
 module Zap.Parser.ParserSpec (spec) where
 
 import Test.Hspec
-import Control.Monad.State
 import Data.Either (isLeft)
 import qualified Data.Text as T
 
-import Zap.Analysis.Lexical
-import Zap.Parser.Types
-import Zap.Parser.Core
 import Zap.Parser.Expr
 import Zap.Parser.Program
 import Zap.AST
@@ -66,8 +62,8 @@ spec = do
       case parseProgram input of
         Right [TLExpr (Block outerScope)] -> do
           blockLabel outerScope `shouldBe` "outer"
-          case head (blockExprs outerScope) of
-            Block innerScope -> do
+          case blockExprs outerScope of
+            (Block innerScope:_) -> do
               blockLabel innerScope `shouldBe` "inner"
               blockExprs innerScope `shouldBe` [StrLit "Hello"]
             _ -> expectationFailure "Expected inner block"

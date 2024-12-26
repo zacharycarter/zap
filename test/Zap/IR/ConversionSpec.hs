@@ -2,7 +2,6 @@
 module Zap.IR.ConversionSpec (spec) where
 
 import Test.Hspec
-import qualified Data.Text as T
 import Control.Monad (forM_)
 
 import Zap.AST
@@ -226,9 +225,9 @@ spec = do
           case convertToIR ast of
             Right (IRProgram _ exprs) -> do
               case exprs of
-                [IRExpr meta expr] -> do
+                [IRExpr meta ex] -> do
                   exprType meta `shouldBe` IRTypeNum IRInt32
-                  case expr of
+                  case ex of
                     IRBinOp _ left right -> do
                       exprType (getMetadata left) `shouldBe` IRTypeNum IRInt32
                       exprType (getMetadata right) `shouldBe` IRTypeNum IRInt32

@@ -2,14 +2,12 @@
 module Zap.Integration.IntegrationSpec (spec) where
 
 import Test.Hspec
-import qualified Data.Text as T
 import System.Exit
 import Control.Monad (forM_)
 
 import Zap.Integration.Basic
 import Zap.Integration.Runner
 import Zap.Integration.Types
-import Zap.Parser.Core (ParseError(..))
 
 spec :: Spec
 spec = do
