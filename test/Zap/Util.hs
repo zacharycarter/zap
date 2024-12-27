@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
-module Zap.Util (mkTestExpr) where
+module Zap.Util (mkTestExpr, mkTypedTestExpr) where
 
 import qualified Data.Set as S
 
@@ -11,6 +11,16 @@ mkTestExpr :: IRExprNode -> IRExpr
 mkTestExpr node = IRExpr
     { metadata = IRMetadata
         { exprType = inferInitialType node
+        , metaEffects = inferInitialEffects node
+        , metaSourcePos = Nothing
+        }
+    , expr = node
+    }
+
+mkTypedTestExpr :: IRType -> IRExprNode -> IRExpr
+mkTypedTestExpr typ node = IRExpr
+    { metadata = IRMetadata
+        { exprType = typ
         , metaEffects = inferInitialEffects node
         , metaSourcePos = Nothing
         }
@@ -31,11 +41,15 @@ inferInitialType node = case node of
     IRPrint _ -> IRTypeVoid
 
     -- Binary operations should use operand types
-    IRBinOp _ e1 e2 ->
-        case (exprType $ metadata e1, exprType $ metadata e2) of
-            (IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> IRTypeNum t1
-            (IRTypeVec v1, IRTypeVec v2) | v1 == v2 -> IRTypeVec v1
-            _ -> IRTypeAny
+    IRBinOp op e1 e2 ->
+        case op of
+            IRLt -> IRTypeBool  -- Comparison operators
+            IRGt -> IRTypeBool
+            IREq -> IRTypeBool
+            _ -> case (exprType $ metadata e1, exprType $ metadata e2) of
+                (IRTypeNum t1, IRTypeNum t2) | t1 == t2 -> IRTypeNum t1
+                (IRTypeVec v1, IRTypeVec v2) | v1 == v2 -> IRTypeVec v1
+                _ -> IRTypeAny
 
     -- If expressions use branch types
     IRIf _ thenExpr elseExpr ->
