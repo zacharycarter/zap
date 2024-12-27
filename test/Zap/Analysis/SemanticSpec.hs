@@ -4,6 +4,7 @@ module Zap.Analysis.SemanticSpec (spec) where
 import Test.Hspec
 import Control.Monad (forM_)
 import qualified Data.Map.Strict as M
+import Debug.Trace
 
 import Zap.AST
 import Zap.Analysis.Semantic
@@ -395,3 +396,89 @@ spec = do
       case getVarTypes ast of
         Right types -> M.lookup "x" types `shouldBe` Just (TypeNum Int32)
         Left err -> expectationFailure $ "Analysis failed: " ++ show err
+
+    describe "Constraint-based type inference" $ do
+      it "infers most general type for identity function" $ do
+        let ast = Program [TLDecl $ DFunc "id"
+              [Param "x" TypeAny]  -- No type annotation
+              TypeAny
+              (Var "x")]
+
+        -- First analyze the AST
+        case analyze ast of
+          Left err ->
+            expectationFailure $ "Analysis failed: " ++ show err
+          Right analyzedAST -> do
+            -- Then get variable types
+            case getVarTypes analyzedAST of
+              Left err ->
+                expectationFailure $ "Type inference failed: " ++ show err
+              Right types ->
+                M.lookup "x" types `shouldBe` Just TypeAny
+
+      it "infers types for let-bound variables based on usage" $ do
+        let ast = Program
+              [ TLExpr $ Let "x" (NumLit Int32 "1")
+              , TLExpr $ Let "y" (Var "x")
+              , TLExpr $ Let "z" (BinOp Add (Var "y") (NumLit Int32 "2"))
+              ]
+
+        case analyze ast >> getVarTypes ast of
+          Right types -> do
+            -- Our current system gets these right
+            M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+            M.lookup "z" types `shouldBe` Just (TypeNum Int32)
+
+            -- But y's type should be inferred from its usage in addition
+            M.lookup "y" types `shouldBe` Just (TypeNum Int32)  -- Currently fails
+          Left err -> expectationFailure $ show err
+
+    it "propagates return type to parameter type during inference" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "f"
+                [Param "x" TypeAny]
+                (TypeNum Int32)
+                (Var "x")
+            ]
+      case analyze ast >>= \_ -> getVarTypes ast of
+        Right types -> do
+          traceM $ "Types after analysis: " ++ show types
+          traceM $ "Looking up type for x"
+          M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+        Left err -> expectationFailure $ show err
+
+    it "infers function parameter types from return type" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "f"
+                [Param "x" TypeAny]  -- Parameter type not specified
+                (TypeNum Int32)      -- But return type is Int32
+                (Var "x")            -- Just returns x directly
+            ]
+      case analyze ast >>= \_ -> getVarTypes ast of
+        Right types ->
+          M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+        Left err ->
+          expectationFailure $ show err
+
+    it "infers types through multiple function calls" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "f"
+                [Param "x" TypeAny]
+                TypeAny
+                (BinOp Add (Var "x") (NumLit Int32 "1"))
+            , TLExpr $ Call "f" [Call "f" [NumLit Int32 "0"]]
+            ]
+      analyze ast `shouldBe` Right ast
+
+    it "handles recursive type inference" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "factorial"
+                [Param "n" TypeAny]
+                TypeAny
+                (If (BinOp Lt (Var "n") (NumLit Int32 "1"))
+                    (NumLit Int32 "1")
+                    (BinOp Mul
+                      (Var "n")
+                      (Call "factorial" [BinOp Sub (Var "n") (NumLit Int32 "1")])))
+            ]
+      analyze ast `shouldBe` Right ast

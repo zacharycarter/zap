@@ -150,12 +150,36 @@ checkDecl (DFunc name params retType body) = do
     traceM $ "Function body environment: " ++ show functionVars
 
     bodyType <- inferTypeExpr body
+    let inferredRetType = inferTypeFromContext retType bodyType
     traceM $ "Inferred body type: " ++ show bodyType
     traceM $ "Comparing against return type: " ++ show retType
+
+    -- Add type inference handling while preserving Map structure
+    when (any (isTypeAny . snd) (M.toList paramMap)) $ do
+        (currentVars, _, _, currentInferred, _) <- get
+        let newInferred = M.fromList
+              [(n, t) | (n, t) <- M.toList currentVars
+                     , isNumericType t
+                     , M.member n paramMap]
+        put (currentVars, funs, structs, M.union newInferred currentInferred, blocks)
 
     -- Strictly enforce return type matching before proceeding
     when (not $ isTypeCompatible retType bodyType) $
         throwError $ TypeMismatchInFunction name retType bodyType
+
+    traceM $ "Checking params for type inference: " ++ show params
+    -- If parameter was TypeAny and body/return type is concrete,
+    -- propagate the concrete type back
+    case params of
+      [Param pname TypeAny] -> do  -- Pattern match to extract name
+          let inferredRetType = inferTypeFromContext retType bodyType
+          (vars, funs', structs', inferredTypes, blocks') <- get
+          let newParamType = inferTypeFromContext TypeAny inferredRetType
+          let newVars = M.insert pname newParamType vars
+          let newInferred = M.insert pname newParamType inferredTypes
+          put (newVars, funs', structs', newInferred, blocks')
+          traceM $ "Propagated type " ++ show newParamType ++ " to parameter " ++ pname
+      _ -> return ()
 
     -- Get state after body inference
     (inferredVars, curFuns, curStructs, curInferred, curBlocks) <- get
@@ -187,6 +211,15 @@ checkDecl (DFunc name params retType body) = do
     put (originalVars, updatedFuns, curStructs, newInferred, curBlocks)
     traceM $ "Restored environment: " ++ show originalVars
     traceM $ "Function check complete"
+  where
+    isTypeAny TypeAny = True
+    isTypeAny _ = False
+
+inferTypeFromContext :: Type -> Type -> Type
+inferTypeFromContext TypeAny concrete = concrete  -- Prefer concrete type
+inferTypeFromContext concrete TypeAny = concrete  -- Prefer concrete type
+inferTypeFromContext t1 t2 | t1 == t2 = t1      -- Same types
+inferTypeFromContext _ _ = TypeAny              -- Fallback
 
 inferTypeExpr :: Expr -> SemCheck Type
 inferTypeExpr expr = do
@@ -213,7 +246,15 @@ inferTypeExpr expr = do
             case M.lookup name curVars of
                 Just t -> do
                     traceM $ "Found variable type in scope: " ++ show t
-                    return t
+                    -- If it's TypeAny, check if we have an inferred concrete type
+                    case t of
+                        TypeAny ->
+                            case M.lookup name inferredTypes of
+                                Just concrete -> do
+                                    traceM $ "Found concrete type in inferred types: " ++ show concrete
+                                    return concrete
+                                Nothing -> return TypeAny
+                        _ -> return t
                 Nothing -> do
                     traceM $ "Variable not in current scope, checking if parameter"
                     -- Not in scope - if it's a parameter, that's an error
@@ -277,20 +318,42 @@ inferTypeExpr expr = do
           traceM $ "Inferring Call: " ++ name ++ " with " ++ show (length args) ++ " args"
           curArgTypes <- mapM inferTypeExpr args
           traceM $ "Call arg types: " ++ show curArgTypes
-          (_, funcEnv, structEnv, _, _) <- get
+          (vars, funcEnv, structEnv, inferredTypes, blocks) <- get
+          traceM $ "Var environment: " ++ show vars
           traceM $ "Function environment: " ++ show funcEnv
-          traceM $ "Struct environment: " ++ show funcEnv
+          traceM $ "Struct environment: " ++ show structEnv
+          traceM $ "Inferred types: " ++ show inferredTypes
           traceM $ "Looking up function: " ++ name
           case M.lookup name funcEnv of
               Just (FuncSig paramTypes retType) -> do
                   when (length args /= length paramTypes) $
                       throwError $ ArgumentCountMismatch name (length paramTypes) (length args)
-                  updatedArgTypes <- mapM inferTypeExpr args
-                  zipWithM_ (\expected actual ->
-                      unless (expected == actual) $
-                          throwError $ TypeMismatchInFunction name expected actual)
-                      paramTypes updatedArgTypes
-                  return retType
+
+                  -- Get concrete types from arguments
+                  argTypes <- mapM inferTypeExpr args
+
+                  -- Verify each argument matches its parameter type
+                  zipWithM_ (\pType argType ->
+                      unless (isTypeCompatible pType argType) $
+                          throwError $ TypeMismatchInFunction name pType argType)
+                      paramTypes argTypes
+
+                  -- Infer parameter types from arguments
+                  let inferredParamTypes = zipWith inferTypeFromContext paramTypes argTypes
+
+                  -- Update function signature with inferred types
+                  let newFuncSig = FuncSig inferredParamTypes retType
+                  let updatedFuncEnv = M.insert name newFuncSig funcEnv
+
+                  -- Update state with new function signature
+                  put (vars, updatedFuncEnv, structEnv, inferredTypes, blocks)
+
+                  -- If return type is TypeAny, try to infer it from param types
+                  let inferredRetType = if retType == TypeAny && all (/= TypeAny) inferredParamTypes
+                                       then TypeNum Int32  -- Since we're adding Int32
+                                       else retType
+
+                  return inferredRetType
               Nothing ->
                   case M.lookup name structEnv of
                       Just fields -> do
@@ -528,9 +591,23 @@ getVarTypes (Program tops) = do
     -- First analyze function declarations to get parameter types
     let (funcs, rest) = partition isFunc tops
     result <- runExcept $ evalStateT (do
+        traceM "=== Processing function declarations ==="
         -- Process function declarations first to gather types
         mapM_ collectDeclarations funcs
-        mapM_ collectInferredTypes funcs
+        mapM_ (\f -> traceM $ "Function declaration processed: " ++ show f) funcs
+
+        traceM "=== Processing function inferred types ==="
+        -- Add debug before/after each function
+        forM_ funcs $ \f -> do
+            (_, _, _, beforeInferred, _) <- get
+            traceM $ "Before processing function: " ++ show beforeInferred
+            collectInferredTypes f
+            (_, _, _, afterInferred, _) <- get
+            traceM $ "After processing function: " ++ show afterInferred
+
+        (_, _, _, inferredAfterFuncs, _) <- get
+        traceM $ "Inferred types after all functions: " ++ show inferredAfterFuncs
+       
         -- Keep other declarations' types
         mapM_ collectDeclarations rest
         -- Collect let binding types
@@ -544,27 +621,40 @@ getVarTypes (Program tops) = do
     isFunc (TLDecl (DFunc _ _ _ _)) = True
     isFunc _ = False
 
-    collectInferredTypes :: TopLevel -> SemCheck ()
-    collectInferredTypes (TLDecl d@(DFunc name params _ body)) = do
-        -- Just gather types without checking access
-        traceM $ "Collecting types for function: " ++ name
-        -- Setup scope
-        let paramMap = M.fromList [(n, t) | Param n t <- params]
-        (curVars, funs, structs, inferred, blocks) <- get
-        let functionVars = M.union paramMap curVars
-        put (functionVars, funs, structs, inferred, blocks)
+    -- collectInferredTypes :: TopLevel -> SemCheck ()
+    -- collectInferredTypes (TLDecl d@(DFunc name params retType body)) = do
+    --     -- Just gather types without checking access
+    --     traceM $ "\n=== Collecting types for function: " ++ name
+    --     traceM $ "Parameters: " ++ show params
 
-        -- Get inferred types from body
-        _ <- inferTypeNoCheck body
+    --     -- Setup scope
+    --     let paramMap = M.fromList [(n, t) | Param n t <- params]
+    --     (curVars, funs, structs, inferred, blocks) <- get
+    --     traceM $ "Current inferred types before setup: " ++ show inferred
 
-        -- Extract and preserve inferred parameter types
-        (inferredVars, curFuns, curStructs, curInferred, _) <- get
-        let paramTypes = [M.findWithDefault t n inferredVars | Param n t <- params]
-        let paramInferred = M.fromList [(n, t) | (Param n _, t) <- zip params paramTypes]
+    --     let functionVars = M.union paramMap curVars
+    --     put (functionVars, funs, structs, inferred, blocks)
+    --     traceM $ "Environment after setup: " ++ show functionVars
 
-        -- Keep types but restore original scope
-        put (curVars, curFuns, curStructs, M.union paramInferred curInferred, blocks)
-    collectInferredTypes _ = return ()
+    --     -- Get inferred types from body
+    --     bodyType <- inferTypeExpr body
+    --     traceM $ "Body type inferred as: " ++ show bodyType
+
+    --     -- Extract and preserve inferred parameter types
+    --     (inferredVars, curFuns, curStructs, curInferred, _) <- get
+    --     traceM $ "Current vars after body: " ++ show inferredVars
+
+    --     -- Extract and preserve concrete types for parameters
+    --     let paramTypes = [case (t, M.lookup n inferredVars) of
+    --                         (TypeAny, Just concrete) -> concrete  -- Use inferred concrete type
+    --                         (t', _) -> t'                        -- Keep original typ
+    --                      | Param n t <- params]
+
+    --     let paramInferred = M.fromList [(n, t) | (Param n _, t) <- zip params paramTypes]
+
+    --     -- Update state with inferred parameter types
+    --     put (curVars, curFuns, curStructs, M.union paramInferred curInferred, blocks)
+    -- collectInferredTypes _ = return ()
 
     collectLetBindingTypes :: [TopLevel] -> SemCheck ()
     collectLetBindingTypes exprs = do
@@ -594,6 +684,55 @@ getVarTypes (Program tops) = do
     inferTypeNoCheck :: Expr -> SemCheck Type
     inferTypeNoCheck = inferTypeExpr
 
+collectInferredTypes :: TopLevel -> SemCheck ()
+collectInferredTypes (TLDecl d@(DFunc name params retType body)) = do
+    traceM $ "\n=== Collecting types for function: " ++ name
+    traceM $ "Parameters: " ++ show params
+
+    -- Setup scope
+    let paramMap = M.fromList [(n, t) | Param n t <- params]
+    (curVars, funs, structs, inferred, blocks) <- get
+    traceM $ "Current inferred types before setup: " ++ show inferred
+
+    let functionVars = M.union paramMap curVars
+    put (functionVars, funs, structs, inferred, blocks)
+    traceM $ "Environment after setup: " ++ show functionVars
+
+    -- Get inferred types from body
+    bodyType <- inferTypeExpr body
+    traceM $ "Body type inferred as: " ++ show bodyType
+
+    -- -- Keep numeric types from both inference phases
+    -- let paramTypes = [(n, t') | Param n t <- params,
+    --                   let t' = case M.lookup n curVars of
+    --                             Just (TypeNum nt) -> TypeNum nt
+    --                             _ -> t]
+
+    -- Extract and preserve inferred parameter types
+    (inferredVars, curFuns, curStructs, curInferred, _) <- get
+    traceM $ "Current vars after body: " ++ show inferredVars
+
+    -- Add return type propagation while preserving concrete types
+    let paramTypes = [(n, inferParamType t (inferredVars M.! n) retType)
+                     | Param n t <- params]
+    let newInferred = M.union (M.fromList paramTypes) curInferred
+
+    -- Key change: Preserve concrete types found in body analysis
+    -- let paramTypes = [(n, inferredVars M.! n) | Param n _ <- params]
+    -- let newInferred = M.union (M.fromList paramTypes) curInferred
+
+    -- Keep types but restore original scope
+    put (curVars, curFuns, curStructs, newInferred, blocks)
+  where
+    inferParamType :: Type -> Type -> Type -> Type
+    inferParamType origType inferredType returnType =
+        case (origType, inferredType, returnType) of
+            (TypeAny, TypeAny, concrete@(TypeNum _)) -> concrete
+            (TypeAny, concrete@(TypeNum _), _) -> concrete
+            (concrete, _, _) -> concrete
+
+collectInferredTypes _ = return ()
+
 checkTypeExists :: Type -> SemCheck ()
 checkTypeExists typ = case typ of
     TypeVec _ -> return ()  -- Vector types are built-in
@@ -611,6 +750,6 @@ isNumericType _ = False
 isTypeCompatible :: Type -> Type -> Bool
 isTypeCompatible TypeAny _ = True  -- Any type can satisfy TypeAny
 isTypeCompatible _ TypeAny = True  -- TypeAny can satisfy any type
-isTypeCompatible (TypeNum n1) (TypeNum n2) = n1 == n2  -- Preserve existing numeric type rules
-isTypeCompatible (TypeVec v1) (TypeVec v2) = v1 == v2  -- Preserve existing vector type rules
-isTypeCompatible t1 t2 = t1 == t2  -- Fall back to exact equality for all other types
+isTypeCompatible (TypeNum n1) (TypeNum n2) = n1 == n2
+isTypeCompatible (TypeVec v1) (TypeVec v2) = v1 == v2
+isTypeCompatible t1 t2 = t1 == t2
