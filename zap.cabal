@@ -102,7 +102,6 @@ test-suite zap-test
       Zap.Analysis.CFGSpec
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
-      Zap.Analysis.TypeInferenceSpec
       Zap.Codegen.CSpec
       Zap.Integration.Basic
       Zap.Integration.IntegrationSpec

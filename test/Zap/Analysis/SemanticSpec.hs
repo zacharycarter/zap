@@ -3,6 +3,7 @@ module Zap.Analysis.SemanticSpec (spec) where
 
 import Test.Hspec
 import Control.Monad (forM_)
+import qualified Data.Map.Strict as M
 
 import Zap.AST
 import Zap.Analysis.Semantic
@@ -329,3 +330,68 @@ spec = do
           Left (TypeMismatchInOp Add
             (TypeVec (Vec2 Float32))
             (TypeVec (Vec3 Float32)))
+
+  describe "Type Inference" $ do
+    describe "Let Binding Type Inference" $ do
+      it "infers types from numeric initialization" $ do
+        let ast = Program [TLExpr (Let "x" (NumLit Int32 "42"))]
+        case analyze ast of
+          Right (Program [TLExpr (Let "x" _)]) -> do
+            case getVarTypes ast of
+              Right types -> M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+              Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
+          Right other -> expectationFailure $
+            "Unexpected AST structure: " ++ show other
+          Left err -> expectationFailure $
+            "Analysis failed: " ++ show err
+
+      it "infers numeric types through binary operations" $ do
+        let ast = Program
+              [ TLExpr $ Let "x" (NumLit Int32 "1")
+              , TLExpr $ Let "y" (BinOp Add (Var "x") (NumLit Int32 "2"))
+              ]
+        case analyze ast of
+          Right _ -> case getVarTypes ast of
+            Right types -> M.lookup "y" types `shouldBe` Just (TypeNum Int32)
+            Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
+          Left err -> expectationFailure $
+            "Analysis failed: " ++ show err
+
+    describe "Function Type Inference" $ do
+      it "infers parameter and return types from numeric operations" $ do
+        let ast = Program
+              [ TLDecl $ DFunc "add"
+                  [Param "x" TypeAny, Param "y" TypeAny]  -- Unspecified types
+                  TypeAny  -- Unspecified return type
+                  (BinOp Add (Var "x") (Var "y"))
+              ]
+        case analyze ast of
+          Right _ -> do
+            case getVarTypes ast of
+              Right types -> do
+                M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+                M.lookup "y" types `shouldBe` Just (TypeNum Int32)
+              Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
+          Left err -> expectationFailure $ "Analysis failed: " ++ show err
+
+    it "handles mixed TypeAny and concrete type parameters" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "mixedTypes"
+                [Param "x" TypeAny, Param "y" (TypeNum Int32)]
+                (TypeNum Int32)  -- Concrete return type
+                (BinOp Add (Var "x") (Var "y"))
+            ]
+      analyze ast `shouldBe` Right ast
+
+    it "infers parameter types without breaking scoping" $ do
+      let ast = Program
+            [ TLDecl $ DFunc "add"
+                [Param "x" TypeAny, Param "y" TypeAny]
+                TypeAny
+                (BinOp Add (Var "x") (Var "y"))
+            , TLExpr $ Var "x"  -- Should fail
+            ]
+      analyze ast `shouldBe` Left (UndefinedVariable "x")
+      case getVarTypes ast of
+        Right types -> M.lookup "x" types `shouldBe` Just (TypeNum Int32)
+        Left err -> expectationFailure $ "Analysis failed: " ++ show err
