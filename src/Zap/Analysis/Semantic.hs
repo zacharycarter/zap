@@ -332,6 +332,15 @@ inferTypeExpr expr = do
                   -- Get concrete types from arguments
                   argTypes <- mapM inferTypeExpr args
 
+                  -- For recursive calls, use any concrete types we've inferred
+                  let inferredParamTypes = zipWith inferTypeFromContext paramTypes argTypes
+
+                  -- Handle recursive case specially
+                  when (any (== TypeAny) paramTypes && all isNumericType argTypes) $ do
+                      let newParamTypes = map (\t -> if t == TypeAny then TypeNum Int32 else t) paramTypes
+                      let newFuncSig = FuncSig newParamTypes retType
+                      put (vars, M.insert name newFuncSig funcEnv, structEnv, inferredTypes, blocks)
+
                   -- Verify each argument matches its parameter type
                   zipWithM_ (\pType argType ->
                       unless (isTypeCompatible pType argType) $
@@ -403,11 +412,23 @@ inferTypeExpr expr = do
                 (Add, TypeNum n1, TypeAny) -> return $ TypeNum n1
                 (Add, TypeAny, TypeNum n2) -> return $ TypeNum n2
                 (Sub, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+                (Sub, TypeNum n1, TypeAny) -> return $ TypeNum n1
+                (Sub, TypeAny, TypeNum n2) -> return $ TypeNum n2
                 (Mul, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+                (Mul, TypeNum n1, TypeAny) -> return $ TypeNum n1
+                (Mul, TypeAny, TypeNum n2) -> return $ TypeNum n2
                 (Div, TypeNum n1, TypeNum n2) | n1 == n2 -> return $ TypeNum n1
+                (Div, TypeNum n1, TypeAny) -> return $ TypeNum n1
+                (Div, TypeAny, TypeNum n2) -> return $ TypeNum n2
                 (Lt, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
+                (Lt, TypeNum n1, TypeAny) -> return $ TypeBool
+                (Lt, TypeAny, TypeNum n2) -> return $ TypeBool
                 (Gt, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
+                (Gt, TypeNum n1, TypeAny) -> return $ TypeBool
+                (Gt, TypeAny, TypeNum n2) -> return $ TypeBool
                 (Eq, TypeNum n1, TypeNum n2) | n1 == n2 -> return TypeBool
+                (Eq, TypeNum n1, TypeAny) -> return $ TypeBool
+                (Eq, TypeAny, TypeNum n2) -> return $ TypeBool
                 (Add, TypeVec v1, TypeVec v2) | v1 == v2 -> return $ TypeVec v1
                 (Dot, TypeVec v1, TypeVec v2) | v1 == v2 ->
                     case v1 of
@@ -567,6 +588,28 @@ inferTypeExpr expr = do
                 _ -> do
                     traceM $ "Invalid condition type: " ++ show condType
                     throwError $ TypeMismatch TypeBool condType
+
+        If cond thenExpr elseExpr -> do
+            traceM "Inferring If exprsesion"
+            -- Check condition evaluates to bool
+            condType <- inferTypeExpr cond
+            traceM $ "If condition type: " ++ show condType
+            case condType of
+              TypeBool -> do
+                -- Return types of sub expressions should match
+                traceM "Valid bool condition"
+                traceM "Inferring then expression type"
+                thenExprType <- inferTypeExpr thenExpr
+                traceM $ "Inferred then expression type: " ++ show thenExprType
+                traceM "Inferring else expression type"
+                elseExprType <- inferTypeExpr elseExpr
+                traceM $ "Inferred else expression type: " ++ show elseExprType
+                unless (thenExprType == elseExprType) $
+                  throwError $ TypeMismatch thenExprType elseExprType
+                return thenExprType
+              _ -> do
+                traceM $ "Invalid condition type: " ++ show condType
+                throwError $ TypeMismatch TypeBool condType
 
         _ -> throwError $ IncompatibleTypes "Unsupported expression" TypeBool TypeBool
 
