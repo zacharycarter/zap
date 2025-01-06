@@ -34,10 +34,10 @@ library
       Zap.Codegen.C
       Zap.Compiler
       Zap.Compiler.OptConfig
+      Zap.IR
       Zap.IR.Allocator
       Zap.IR.Conversion
       Zap.IR.Core
-      Zap.IR.Statement
       Zap.IR.Types
       Zap.Parser.Core
       Zap.Parser.Expr
@@ -105,13 +105,11 @@ test-suite zap-test
       Zap.Analysis.CFGSpec
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
-      Zap.Codegen.CSpec
       Zap.Integration.Basic
       Zap.Integration.IntegrationSpec
       Zap.Integration.Runner
       Zap.Integration.Types
-      Zap.IR.ConversionSpec
-      Zap.IR.StatementSpec
+      Zap.IRSpec
       Zap.Parser.ParserSpec
       Zap.Util
       Paths_zap

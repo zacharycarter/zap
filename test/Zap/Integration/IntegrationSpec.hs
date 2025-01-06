@@ -18,6 +18,11 @@ spec = do
         result <- runTest test
         result `shouldBe` TestSuccess
 
+    forM_ migratedTests $ \test ->
+      it ("compiles and runs " ++ testName test) $ do
+        result <- runTest' test
+        result `shouldBe` TestSuccess
+
     describe "Error handling" $ do
       it "handles syntax errors gracefully" $ do
         let badTest = TestCase

@@ -13,7 +13,7 @@ main = do
   case args of
     [input, output] -> do
       source <- TIO.readFile input
-      case compile defaultCompileOptions source of
+      case compile' defaultCompileOptions source of
         Left err -> do
           putStrLn $ "Compilation failed: " ++ show err
           exitFailure
