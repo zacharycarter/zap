@@ -13,6 +13,7 @@ module Zap.IR
   , Effect(..)
   , IRConversionError(..)
   , convertToIR'
+  , LiteralType(..)
   , TypeError(..)
   , TypeVar(..)
   , TypeConstraint(..)
@@ -32,10 +33,18 @@ import Debug.Trace
 import Zap.AST as A
 
 -- | Metadata for tracking effects and source info
+data LiteralType
+  = LitInt NumType
+  | LitFloat NumType
+  | LitString
+  | LitBoolean
+  deriving (Show, Eq)
+
 data IRMetadata = IRMetadata
   { metaType :: IRType              -- Type information
   , metaEffects :: S.Set Effect     -- Effect tracking
   , metaSourcePos :: Maybe (Int, Int) -- Source location
+  , metaLiteralType :: Maybe LiteralType
   } deriving (Show, Eq)
 
 -- | Effects that nodes can have
@@ -146,6 +155,15 @@ mkMetadata typ effs = IRMetadata
   { metaType = typ
   , metaEffects = effs
   , metaSourcePos = Nothing
+  , metaLiteralType = Nothing
+  }
+
+mkLiteralMetadata :: IRType -> S.Set Effect -> LiteralType -> IRMetadata
+mkLiteralMetadata typ effs litType = IRMetadata
+  { metaType = typ
+  , metaEffects = effs
+  , metaSourcePos = Nothing
+  , metaLiteralType = Just litType
   }
 
 -- Loop context to track break targets
@@ -168,13 +186,13 @@ convertToIR' (Program tops) = do
     traceM $ "Found expressions: " ++ show exprs
 
     convertedFuncs <- mapM convertFuncDecl funcs
-    mainBlock <- convertTops exprs Nothing
+    (mainBlock, mainMeta) <- convertTops exprs Nothing
     let mainFunc = (IRFuncDecl
           { fnName = "main"
           , fnParams = []
           , fnRetType = IRTypeVoid
           , fnBody = mainBlock
-          }, mkMetadata IRTypeVoid (S.singleton PureEffect))
+          }, mainMeta)
 
     return $ IRProgram (convertedFuncs ++ [mainFunc])
   where
@@ -243,13 +261,25 @@ convertExprToStmts expr = do
         Let name val -> do
             traceM $ "Converting Let binding for: " ++ name
             convertedExpr <- convertToIRExpr val
+            -- Extract literal type from value if present
+            let meta = case val of
+                  Lit (IntLit _) ->
+                    mkLiteralMetadata IRTypeInt32 (S.singleton WriteEffect) (LitInt Int32)
+                  Lit (FloatLit _) ->
+                    mkLiteralMetadata IRTypeFloat32 (S.singleton WriteEffect) (LitFloat Float32)
+                  Lit (StringLit _) ->
+                    mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
+                  _ ->
+                    mkMetadata IRTypeVoid (S.singleton WriteEffect)
+            traceM $ "Meta type: " ++ show (metaType meta)
             -- For struct literals, extract proper type
             let irType = case val of
                   StructLit typeName fields ->
                     IRTypeStruct typeName [(fname, typeFromExpr fexpr) | (fname, fexpr) <- fields]
                   _ -> IRTypeVoid  -- Default case
             traceM $ "Assigned type: " ++ show irType
-            let meta = mkMetadata irType (S.singleton WriteEffect)
+            let stmt = IRVarDecl name (metaType meta) convertedExpr
+            traceM $ "Created statement: " ++ show stmt
             return [(IRVarDecl name irType convertedExpr, meta)]
         BinOp op e1 e2 -> do
             -- For binary operations that will be returned, don't generate a separate statement
@@ -294,11 +324,15 @@ convertType TypeVoid = IRTypeVoid
 convertType (TypeStruct name fields) =
   IRTypeStruct name [(fname, convertType ftype) | (fname, ftype) <- fields]
 
-convertTops :: [TopLevel] -> Maybe LoopContext -> Either IRConversionError IRBlock
+convertTops :: [TopLevel] -> Maybe LoopContext -> Either IRConversionError (IRBlock, IRMetadata)
 convertTops tops ctx = do
     stmts <- concat <$> mapM (\t -> convertTop t ctx) tops
+    -- Get last metadata to preserve literal type info
+    let lastMeta = if null stmts
+        then mkMetadata IRTypeVoid (S.singleton PureEffect)
+        else snd (last stmts)
     let returnStmt = (IRReturn Nothing, mkMetadata IRTypeVoid (S.singleton PureEffect))
-    return $ IRBlock "main.entry" (stmts ++ [returnStmt])
+    return (IRBlock "main.entry" (stmts ++ [returnStmt]), lastMeta)
 
 convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertTop (TLExpr (If cond thenExpr (BoolLit False))) ctx = do
@@ -468,6 +502,11 @@ convertToLiteral expr = case expr of
 
 -- Helper to convert expressions to IR
 convertToIRExpr :: Expr -> Either IRConversionError IRExpr
+convertToIRExpr (Lit lit) = case lit of
+  IntLit val -> Right $ IRLit $ IRInt32Lit (read val)  -- Default to 32-bit for now
+  FloatLit val -> Right $ IRLit $ IRFloat32Lit (read val)
+  StringLit val -> Right $ IRLit $ IRStringLit val
+  -- BooleanLit val -> Right $ IRLit $ IRBoolLit val
 convertToIRExpr (NumLit numType val) = Right $ IRLit $ case numType of
     Int32 -> IRInt32Lit (read val)
     Int64 -> IRInt64Lit (read val)

@@ -145,3 +145,45 @@ spec = do
                         ]
                     , blockResult = Just (Var "sum")
                     }))]
+
+  describe "Type consistency in numeric literals" $ do
+    it "maintains consistent type information between literal and declared type" $ do
+      let input = "let x: i32 = 42"  -- Variable with explicit type annotation
+      case parseProgram input of
+        Right [TLExpr (Let "x" expr)] -> do
+          -- The NumLit type should match the declared type
+          case expr of
+            NumLit numType val -> do
+              numType `shouldBe` Int32
+              TypeNum numType `shouldBe` TypeNum Int32
+            _ -> expectationFailure "Expected numeric literal"
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+        Right other -> expectationFailure $
+          "Unexpected parse result: " ++ show other
+
+    it "infers consistent types for numeric literals" $ do
+      let input = "42'i32"  -- Literal with type suffix
+      case parseExprFromText input of
+        Right (NumLit numType val) -> do
+          numType `shouldBe` Int32
+          val `shouldBe` "42"
+        Left err -> expectationFailure $ "Parse failed: " ++ show err
+        Right other -> expectationFailure $
+          "Unexpected parse result: " ++ show other
+
+    it "handles literals with contextual type information" $ do
+      let input = "let x: i32 = 42\nlet y: i64 = x"
+      case parseProgram input of
+        Right [first, second] -> do
+          case first of
+            TLExpr (Let "x" (NumLit Int32 "42")) -> return ()  -- Accept old form
+            TLExpr (Let "x" (Lit (IntLit "42"))) -> return ()  -- Accept new form
+            other -> expectationFailure $ "Unexpected first expr: " ++ show other
+          second `shouldBe` TLExpr (Let "y" (Var "x"))
+        other -> expectationFailure $ "Unexpected parse result: " ++ show other
+
+    it "enforces type consistency with float literals" $ do
+      let input = "let x: f32 = 3.14"
+      case parseProgram input of
+        Right [TLExpr (Let "x" (Lit (FloatLit "3.14")))] -> return ()
+        other -> expectationFailure $ "Unexpected parse result: " ++ show other

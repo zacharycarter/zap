@@ -105,3 +105,13 @@ spec = do
       it "validates print arity" $ do
         let ast = Program [TLExpr $ Call "print" []]
         analyze ast `shouldBe` Left (ArgumentCountMismatch "print" 1 0)
+
+    describe "Literal type checking" $ do
+      it "validates literal types against declarations" $ do
+        let ast = Program
+              [ TLDecl $ DFunc "test"
+                  [Param "x" (TypeNum Int32)]
+                  (TypeNum Int32)
+                  (Lit (IntLit "42"))
+              ]
+        analyze ast `shouldBe` Right ast

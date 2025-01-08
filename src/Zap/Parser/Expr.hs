@@ -108,20 +108,23 @@ parseExpr parsers = do
 
 -- Top level expression parser that handles operator precedence
 parseExpression :: Parser Expr
-parseExpression = do
+parseExpression = parseExpressionWithType Nothing
+
+parseExpressionWithType :: Maybe Type -> Parser Expr
+parseExpressionWithType expectedType = do
   traceM "Parsing complete expression"
   st <- get
   case stateTokens st of
         (tok:_)
-          | locToken tok == TWord "if" -> parseIf
-          | locToken tok == TWord "while" -> parseWhileExpr  -- Add this case
-        _ -> parseAssign >>= remainingExpression
+          | locToken tok == TWord "if" -> parseIf expectedType
+          | locToken tok == TWord "while" -> parseWhileExpr expectedType
+        _ -> parseAssign expectedType >>= remainingExpression expectedType
 
-parseIf :: Parser Expr
-parseIf = do
+parseIf :: Maybe Type -> Parser Expr
+parseIf expectedType = do
     traceM "Parsing if statement"
     _ <- matchToken isIf "if"
-    condition <- parseExpression
+    condition <- parseExpressionWithType expectedType
     _ <- matchToken isColon ":"
 
     -- Parse then branch with proper indentation
@@ -130,7 +133,7 @@ parseIf = do
     let newIndent = curIndent + 2
     modify $ \s -> s { stateIndent = newIndent }
 
-    thenStmts <- parseBlockExprs BasicBlock newIndent
+    thenStmts <- parseBlockExprs expectedType BasicBlock newIndent
 
     -- Convert statements to block
     let thenBlock = Block $ BlockScope
@@ -150,8 +153,8 @@ isIf :: Token -> Bool
 isIf (TWord "if") = True
 isIf _ = False
 
-remainingExpression :: Expr -> Parser Expr
-remainingExpression left = do
+remainingExpression :: Maybe Type -> Expr -> Parser Expr
+remainingExpression expectedType left = do
     st <- get
     traceM $ "Processing remaining expression with left: " ++ show left
     case stateTokens st of
@@ -161,20 +164,20 @@ remainingExpression left = do
                 TOperator "*" -> do
                     traceM "Found multiplication operator"
                     _ <- matchToken isOperator "*"
-                    right <- parseAssign
-                    remainingExpression (BinOp Mul left right)
+                    right <- parseAssign expectedType
+                    remainingExpression expectedType (BinOp Mul left right)
                 TOperator "/" -> do
                     traceM "Found division operator"
                     _ <- matchToken isOperator "/"
-                    right <- parseAssign
-                    remainingExpression (BinOp Div left right)
+                    right <- parseAssign expectedType
+                    remainingExpression expectedType (BinOp Div left right)
                 _ -> return left
         [] -> return left
 
-parseAssign :: Parser Expr
-parseAssign = do
+parseAssign :: Maybe Type -> Parser Expr
+parseAssign expectedType = do
     traceM "Parsing assignment"
-    left <- parseComparison
+    left <- parseComparison expectedType
     traceM $ "Parsed comparison: " ++ show left
     st <- get
     traceM $ "Expression state before operator check: " ++ show (take 3 $ stateTokens st)
@@ -183,7 +186,7 @@ parseAssign = do
             TOperator "+=" -> do
                 traceM $ "Found += operator at col " ++ show (locCol tok)
                 _ <- matchToken (\t -> t == TOperator "+=") "+="
-                right <- parseComparison
+                right <- parseComparison expectedType
                 case left of
                     Var name -> do
                         traceM $ "Creating += assignment for " ++ name
@@ -194,7 +197,7 @@ parseAssign = do
             TEquals -> do
                 traceM $ "Found = operator at col " ++ show (locCol tok)
                 _ <- matchToken (\t -> t == TEquals) "="
-                right <- parseAssign
+                right <- parseAssign expectedType
                 case left of
                     Var name -> do
                         traceM $ "Creating = assignment for " ++ name
@@ -207,43 +210,43 @@ parseAssign = do
                 return left
         [] -> return left
 
-parseComparison :: Parser Expr
-parseComparison = do
+parseComparison :: Maybe Type -> Parser Expr
+parseComparison expectedType = do
     traceM "Parsing comparison expression"
-    left <- parseAdditive
+    left <- parseAdditive expectedType
     traceM $ "Parsed additive: " ++ show left
-    remainingComparison left
+    remainingComparison expectedType left
   where
-    remainingComparison left = do
+    remainingComparison expectedType left = do
       st <- get
       case stateTokens st of
         (tok:_) -> case locToken tok of
           TOperator "<" -> do
             traceM "Found less than operator"
             _ <- matchToken isOperator "<"
-            right <- parseAdditive
-            remainingComparison (BinOp Lt left right)
+            right <- parseAdditive expectedType
+            remainingComparison expectedType (BinOp Lt left right)
           TOperator ">" -> do
             traceM "Found greater than operator"
             _ <- matchToken isOperator ">"
-            right <- parseAdditive
-            remainingComparison (BinOp Gt left right)
+            right <- parseAdditive expectedType
+            remainingComparison expectedType (BinOp Gt left right)
           TEqualsEquals -> do
             traceM "Found equality operator"
             _ <- matchToken (== TEqualsEquals) "=="
-            right <- parseAdditive
-            remainingComparison (BinOp EqEq left right)
+            right <- parseAdditive expectedType
+            remainingComparison expectedType (BinOp EqEq left right)
           _ -> return left
         [] -> return left
 
 -- Parse addition and subtraction with proper precedence
-parseAdditive :: Parser Expr
-parseAdditive = do
+parseAdditive :: Maybe Type -> Parser Expr
+parseAdditive expectedType = do
     traceM "Parsing additive expression"
-    left <- parseMultiplicative
-    remainingAdditive left
+    left <- parseMultiplicative expectedType
+    remainingAdditive expectedType left
   where
-    remainingAdditive left = do
+    remainingAdditive expectedType left = do
       st <- get
       traceM $ "Parsing remaining additive with left: " ++ show left
       case stateTokens st of
@@ -251,52 +254,52 @@ parseAdditive = do
           TOperator "+" -> do
             traceM "Found addition operator"
             _ <- matchToken isOperator "+"
-            right <- parseMultiplicative
-            remainingAdditive (BinOp Add left right)
+            right <- parseMultiplicative expectedType
+            remainingAdditive expectedType (BinOp Add left right)
           TOperator "+=" -> do
             traceM "Found += operator"
             _ <- matchToken (\t -> t == TOperator "+=") "+="
-            right <- parseMultiplicative
+            right <- parseMultiplicative expectedType
             case left of
               Var name -> return $ AssignOp name Add right
               _ -> throwError $ UnexpectedToken tok "variable for assignment"
           TOperator "-" -> do
             traceM "Found subtraction operator"
             _ <- matchToken isOperator "-"
-            right <- parseMultiplicative
-            remainingAdditive (BinOp Sub left right)
+            right <- parseMultiplicative expectedType
+            remainingAdditive expectedType (BinOp Sub left right)
           _ -> return left
         [] -> return left
 
 -- Parse multiplication and division
-parseMultiplicative :: Parser Expr
-parseMultiplicative = do
+parseMultiplicative :: Maybe Type -> Parser Expr
+parseMultiplicative expectedType = do
     traceM "Parsing multiplicative expression"
-    left <- parseUnary
-    remainingMultiplicative left
+    left <- parseUnary expectedType
+    remainingMultiplicative expectedType left
   where
-    remainingMultiplicative left = do
+    remainingMultiplicative expectedType left = do
       st <- get
       case stateTokens st of
         (tok:_) -> case locToken tok of
           TOperator "*" -> do
             _ <- matchToken isOperator "*"
-            right <- parseUnary
-            remainingMultiplicative (BinOp Mul left right)
+            right <- parseUnary expectedType
+            remainingMultiplicative expectedType (BinOp Mul left right)
           TOperator "/" -> do
             _ <- matchToken isOperator "/"
-            right <- parseUnary
-            remainingMultiplicative (BinOp Div left right)
+            right <- parseUnary expectedType
+            remainingMultiplicative expectedType (BinOp Div left right)
           _ -> return left
         [] -> return left
 
 -- Parse unary operations and basic terms
-parseUnary :: Parser Expr
-parseUnary = parseTerm
+parseUnary :: Maybe Type -> Parser Expr
+parseUnary expectedType = parseTerm expectedType
 
 -- Parse basic terms (numbers, variables, vector literals)
-parseTerm :: Parser Expr
-parseTerm = do
+parseTerm :: Maybe Type -> Parser Expr
+parseTerm expectedType = do
     traceM "Parsing term"
     st <- get
     case stateTokens st of
@@ -318,8 +321,12 @@ parseTerm = do
                             traceM $ "Parsed number with type: " ++ show typ
                             parseFieldOrCallChain (NumLit typ n)
                         _ -> do
-                            traceM "No type suffix found, using default type"
-                            let typ = if '.' `elem` n then Float64 else Int64
+                            traceM "No type suffix found."
+                            -- Use expected type if available, otherwise default
+                            let typ = case expectedType of
+                                  Just (TypeNum t) -> t
+                                  _ -> if '.' `elem` n then Float64 else Int64
+                            traceM $ "Using type: " ++ show typ
                             parseFieldOrCallChain (NumLit typ n)
                 TLeftParen -> do
                     traceM "Found opening parenthesis"
@@ -529,9 +536,36 @@ parseSingleBindingLine = do
     traceM "Parsing single binding line (identifier = expression)"
     checkIndent GreaterEq
     nameTok <- matchToken isValidName "identifier"
+
+    -- Optional type annotation
+    annotatedType <- do
+        st <- get
+        case stateTokens st of
+            (tok:_) | locToken tok == TColon -> do
+                traceM "Found type annotation"
+                _ <- matchToken (== TColon) ":"
+                typeTok <- matchToken isValidName "type name"
+                declaredType <- parseTypeToken typeTok
+                return $ Just declaredType
+            _ -> return Nothing
+
     _ <- matchToken (== TEquals) "equals sign"
     traceM "Parsing value for binding line"
-    value <- parseExpression
+    value <- parseExpressionWithType annotatedType
+
+    -- If we have a type annotation, ensure value matches it
+    case annotatedType of
+        Just (TypeNum expectedType) ->
+            case value of
+                NumLit actualType val ->
+                    if actualType == expectedType
+                        then return ()
+                        else throwError $ UnexpectedToken
+                            (Located (TNumber val) 0 0)  -- TODO: Better error position
+                            ("numeric literal of type " ++ show expectedType)
+                _ -> return ()  -- Allow other expressions for now
+        _ -> return ()
+
     case locToken nameTok of
         TWord varName -> do
             traceM $ "Single binding line completed for: " ++ varName
@@ -635,8 +669,8 @@ isBlockStatement (TWord "var") = True
 isBlockStatement (TWord "let") = True
 isBlockStatement _ = False
 
-parseBlockExprs :: BlockType -> Int -> Parser ([Expr], Maybe Expr)
-parseBlockExprs bt bi = do
+parseBlockExprs :: Maybe Type -> BlockType -> Int -> Parser ([Expr], Maybe Expr)
+parseBlockExprs expectedType bt bi = do
     st <- get
     traceM $ "\n=== parseBlockExprs ==="
     traceM $ "Block type: " ++ show bt
@@ -672,15 +706,15 @@ parseBlockExprs bt bi = do
                             traceM "Found print statement in block - handling specially"
                             printExpr <- parsePrintStatement
                             traceM $ "Parsed print statement: " ++ show printExpr
-                            (moreExprs, resultExpr) <- parseBlockExprs bt bi
+                            (moreExprs, resultExpr) <- parseBlockExprs expectedType bt bi
                             return (printExpr : moreExprs, resultExpr)
 
                         TWord "while" -> do
                             traceM "Found while statement in block"
                             currentIndent <- gets stateIndent  -- Save current indent
-                            whileExpr <- parseWhileExpr
+                            whileExpr <- parseWhileExpr expectedType
                             modify $ \s -> s { stateIndent = currentIndent }  -- Restore indent
-                            (moreExprs, resultExpr) <- parseBlockExprs bt bi
+                            (moreExprs, resultExpr) <- parseBlockExprs expectedType bt bi
                             return (whileExpr : moreExprs, resultExpr)
 
                         TWord "result" -> do
@@ -693,13 +727,13 @@ parseBlockExprs bt bi = do
                         TWord "break" -> do
                             traceM "Parsing break statement"
                             breakExpr <- parseBreakImpl
-                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock bi
+                            (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                             return (breakExpr : moreExprs, resultExpr)
 
                         TWord "var" -> do
                             traceM "Parsing variable declaration"
                             varExpr <- parseVarDecl
-                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock bi
+                            (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                             return (varExpr : moreExprs, resultExpr)
 
                         TWord "block" -> do
@@ -712,18 +746,18 @@ parseBlockExprs bt bi = do
                             st' <- get
                             case drop 1 $ stateTokens st' of
                                 (t:_) | locToken t == TEquals -> do
-                                    assignExpr <- parseAssign
-                                    (moreExprs, resultExpr) <- parseBlockExprs BasicBlock bi
+                                    assignExpr <- parseAssign expectedType
+                                    (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                                     return (assignExpr : moreExprs, resultExpr)
                                 _ -> do
-                                    expr <- parseExpression
-                                    (moreExprs, resultExpr) <- parseBlockExprs BasicBlock bi
+                                    expr <- parseExpressionWithType expectedType
+                                    (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                                     return (expr : moreExprs, resultExpr)
 
                         _ -> do
                             traceM "Parsing block expression"
-                            expr <- parseExpression
-                            (moreExprs, resultExpr) <- parseBlockExprs BasicBlock bi
+                            expr <- parseExpressionWithType expectedType
+                            (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                             return (expr : moreExprs, resultExpr)
 
 parseBreakImpl :: Parser Expr
@@ -805,8 +839,8 @@ parsePrintStatement = do
         return $ Call "print" [arg]
       [] -> throwError $ EndOfInput "print"
 
-parseWhileExpr :: Parser Expr
-parseWhileExpr = do
+parseWhileExpr :: Maybe Type -> Parser Expr
+parseWhileExpr expectedType = do
     traceM "Parsing while expression"
     _ <- matchToken (\t -> t == TWord "while") "while keyword"
     condition <- parseExpression
@@ -825,7 +859,7 @@ parseWhileExpr = do
     -- Parse block contents at new indent level
     let savedIndent = stateIndent bodyState
     modify $ \s -> s { stateIndent = blockIndent }
-    (bodyExprs, mResult) <- parseBlockExprs BasicBlock blockIndent
+    (bodyExprs, mResult) <- parseBlockExprs expectedType BasicBlock blockIndent
     modify $ \s -> s { stateIndent = savedIndent }  -- Restore parent indent
 
     let blockScope = BlockScope "while_body" bodyExprs mResult
@@ -928,7 +962,9 @@ parseParams = do
 parseTypeToken :: Located -> Parser Type
 parseTypeToken tok = case locToken tok of
     TWord "i32" -> return $ TypeNum Int32
+    TWord "i64" -> return $ TypeNum Int64
     TWord "f32" -> return $ TypeNum Float32
+    TWord "f64" -> return $ TypeNum Float64
     _ -> throwError $ UnexpectedToken tok "valid type"
 
 parseVarDecl :: Parser Expr

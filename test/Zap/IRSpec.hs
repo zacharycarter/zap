@@ -24,7 +24,7 @@ spec = do
                 fnParams mainFn `shouldBe` []
                 fnRetType mainFn `shouldBe` IRTypeVoid
                 metaType meta `shouldBe` IRTypeVoid
-                metaEffects meta `shouldBe` S.singleton PureEffect
+                metaEffects meta `shouldBe` S.singleton IOEffect
               _ -> expectationFailure "Expected single main function"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
@@ -61,7 +61,7 @@ spec = do
         case convertToIR' ast of
           Right (IRProgram [(mainFn, fnMeta)]) -> do
             -- Test function metadata
-            metaEffects fnMeta `shouldBe` S.singleton PureEffect
+            metaEffects fnMeta `shouldBe` S.singleton IOEffect
 
             -- Test statement metadata directly from the function body
             let IRBlock _ stmts = fnBody mainFn
@@ -345,9 +345,43 @@ spec = do
               _ -> expectationFailure "Expected single main function"
           Left err -> expectationFailure $ "IR conversion failed: " ++ show err
 
+      describe "Literal conversion" $ do
+        it "preserves literal type information in IR" $ do
+          let ast = Program [TLExpr (Let "x" (Lit (IntLit "42")))]
+          case convertToIR' ast of
+            Right (IRProgram funcs) -> do
+              case funcs of
+                [(mainFn, _)] -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case head stmts of
+                    (IRVarDecl "x" _ (IRLit lit), meta) -> do
+                      metaLiteralType meta `shouldBe` Just (LitInt Int32)
+                    _ -> expectationFailure "Expected variable declaration"
+            Left err -> expectationFailure $ "IR conversion failed: " ++ show err
+
+        it "preserves float literal type information" $ do
+          let ast = Program [TLExpr (Let "x" (Lit (FloatLit "3.14")))]
+          case convertToIR' ast of
+            Right (IRProgram [(mainFn, _)]) -> do
+              case fnBody mainFn of
+                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                  metaLiteralType meta `shouldBe` Just (LitFloat Float32)
+                _ -> expectationFailure "Expected variable declaration"
+            Left err -> expectationFailure $ show err
+
+        it "preserves string literal type information" $ do
+          let ast = Program [TLExpr (Let "x" (Lit (StringLit "test")))]
+          case convertToIR' ast of
+            Right (IRProgram [(mainFn, _)]) -> do
+              case fnBody mainFn of
+                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                  metaLiteralType meta `shouldBe` Just LitString
+                _ -> expectationFailure "Expected variable declaration"
+
       where
         testMeta = IRMetadata
           { metaType = IRTypeVar (TypeVar 0)  -- Use type variable instead of concrete type
           , metaEffects = S.singleton PureEffect
           , metaSourcePos = Nothing
+          , metaLiteralType = Nothing
           }

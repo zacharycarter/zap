@@ -6,6 +6,7 @@ module Zap.AST
   , Param(..)
   , Type(..)
   , Op(..)
+  , Literal(..)
   , Expr(..)
   , BlockScope(..)
   , NumType(..)
@@ -74,6 +75,13 @@ data BlockScope = BlockScope
   , blockResult :: Maybe Expr
   } deriving (Show, Eq)
 
+data Literal
+  = IntLit String
+  | FloatLit String
+  | StringLit String
+  | BooleanLit Bool
+  deriving (Show, Eq)
+
 data Expr
   = NumLit NumType String      -- Store number as string to preserve precision
   | VecLit VecType [Expr]      -- Vector literal with components
@@ -96,4 +104,5 @@ data Expr
   | VarDecl String Expr  -- Variable declaration with initial value
   | Assign String Expr -- Assignment operator
   | AssignOp String Op Expr  -- Assignment with operator (e.g. +=)
+  | Lit Literal
   deriving (Show, Eq)

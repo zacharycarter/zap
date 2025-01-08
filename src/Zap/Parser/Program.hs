@@ -65,7 +65,7 @@ parseTopLevel = do
             case locToken tok of
                 TWord "while" -> do
                     traceM "Found while expression at top-level"
-                    expr <- parseWhileExpr
+                    expr <- parseWhileExpr Nothing
                     return $ TLExpr expr
                 TWord "var" -> do
                     traceM "Found variable declaration at top-level"
@@ -121,7 +121,7 @@ parseTopLevel = do
                     st' <- get
                     case drop 1 $ stateTokens st' of
                         (t:_) | locToken t == TEquals || locToken t == TOperator "+=" -> do
-                            expr <- parseAssign
+                            expr <- parseAssign Nothing
                             return $ TLExpr expr
                         _ -> do
                             expr <- parseMaybeCall name
@@ -135,28 +135,28 @@ parseTopLevel = do
 
 parseLetBlock :: Parser Expr
 parseLetBlock = do
-    traceM "Parsing let block"
+    traceM "Parsing let binding"
     _ <- matchToken (\t -> t == TWord "let") "let keyword"
 
-    -- Get first binding and determine block indent level
-    firstBinding <- do
-        (name, expr) <- parseSingleBindingLine
-        return $ Let name expr
+    -- Parse first binding
+    (varName, value) <- parseSingleBindingLine
+    traceM $ "First binding parsed: Let " ++ show varName ++ " " ++ show value
 
-    traceM $ "First binding parsed: " ++ show firstBinding
-
-    -- Parse additional bindings at same indentation level
-    let bi = 2  -- standard indentation for let blocks
-    moreBindings <- parseMoreBindings bi
+    -- Check for more bindings
+    moreBindings <- parseMoreBindings 2
     traceM $ "Additional bindings parsed: " ++ show moreBindings
 
-    let allBindings = firstBinding : map (\(n,v) -> Let n v) moreBindings
-    let blockExpr = Block $ BlockScope
-          { blockLabel = "top_let"
-          , blockExprs = allBindings
-          , blockResult = Nothing }
-    traceM $ "Constructed let block expr: " ++ show blockExpr
-    return blockExpr
+    case moreBindings of
+        [] -> do
+            traceM "Single let binding - returning direct Let expression"
+            return $ Let varName value
+        _ -> do
+            traceM "Multiple bindings - wrapping in block"
+            let allBindings = Let varName value : map (\(n,v) -> Let n v) moreBindings
+            return $ Block $ BlockScope
+              { blockLabel = "top_let"
+              , blockExprs = allBindings
+              , blockResult = Nothing }
   where
     parseMoreBindings :: Int -> Parser [(String, Expr)]
     parseMoreBindings indent = do
