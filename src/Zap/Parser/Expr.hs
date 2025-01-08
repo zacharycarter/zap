@@ -303,6 +303,24 @@ parseTerm = do
         (tok:_) -> do
             traceM $ "Parsing term starting with token: " ++ show tok
             case locToken tok of
+                TNumber n -> do
+                    traceM $ "Found number token: " ++ n
+                    _ <- matchToken isNumber "number"
+                    -- Look ahead for type suffix
+                    st' <- get
+                    case stateTokens st' of
+                        (suffixTok:_) | isTypeSuffix (locToken suffixTok) -> do
+                            traceM $ "Found type suffix after number"
+                            _ <- matchToken isTypeSuffix "type suffix"
+                            let typ = case locToken suffixTok of
+                                    TTypeSuffix s -> parseNumType s
+                                    _ -> error "Impossible: non-suffix token passed isTypeSuffix"
+                            traceM $ "Parsed number with type: " ++ show typ
+                            parseFieldOrCallChain (NumLit typ n)
+                        _ -> do
+                            traceM "No type suffix found, using default type"
+                            let typ = if '.' `elem` n then Float64 else Int64
+                            parseFieldOrCallChain (NumLit typ n)
                 TLeftParen -> do
                     traceM "Found opening parenthesis"
                     _ <- matchToken (== TLeftParen) "("
@@ -457,8 +475,23 @@ parseBasicExprImpl = do
                 _ <- matchToken isStringLit "string literal"
                 return $ StrLit s
             TNumber n -> do
+                traceM $ "Found number token: " ++ n
                 _ <- matchToken isNumber "number"
-                return $ NumLit Float32 n
+                -- Look ahead for type suffix
+                st' <- get
+                case stateTokens st' of
+                    (suffixTok:_) | isTypeSuffix (locToken suffixTok) -> do
+                        traceM $ "Found type suffix: " ++ show suffixTok
+                        _ <- matchToken isTypeSuffix "type suffix"
+                        let typ = case locToken suffixTok of
+                                TTypeSuffix s -> parseNumType s
+                                _ -> error "Impossible: non-suffix token passed isTypeSuffix"
+                        return $ NumLit typ n
+                    _ -> do
+                        traceM "No type suffix found, defaulting to Int64/Float64"
+                        -- Default to 64-bit types
+                        let typ = if '.' `elem` n then Float64 else Int64
+                        return $ NumLit typ n
             TVec vecTypeStr -> do
                 traceM $ "Parsing vector constructor: " ++ vecTypeStr
                 _ <- matchToken isVecConstructor "vector constructor"
@@ -468,6 +501,19 @@ parseBasicExprImpl = do
                 _ <- matchToken isValidName "identifier"
                 parseMaybeCall name
             _ -> throwError $ UnexpectedToken tok "term"
+
+-- Helper to check for type suffix tokens
+isTypeSuffix :: Token -> Bool
+isTypeSuffix (TTypeSuffix _) = True
+isTypeSuffix _ = False
+
+-- Helper to convert type suffix to NumType
+parseNumType :: String -> NumType
+parseNumType "i32" = Int32
+parseNumType "i64" = Int64
+parseNumType "f32" = Float32
+parseNumType "f64" = Float64
+parseNumType t = error $ "Invalid numeric type suffix: " ++ t
 
 parseLetBinding :: ExprParser -> Parser Expr
 parseLetBinding _ = do

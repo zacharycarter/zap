@@ -2,7 +2,9 @@
 module Zap.IRSpec (spec) where
 
 import Test.Hspec
+import qualified Data.Map as M
 import qualified Data.Set as S
+import Debug.Trace
 
 import Zap.AST
 import Zap.IR
@@ -72,10 +74,10 @@ spec = do
       it "generates constraints for function definitions" $ do
         let func = IRFuncDecl
               { fnName = "test"
-              , fnParams = [("x", IRTypeInt)]
-              , fnRetType = IRTypeInt
+              , fnParams = [("x", IRTypeInt32)]
+              , fnRetType = IRTypeInt32
               , fnBody = IRBlock "entry"
-                  [(IRReturn (Just (IRCall "+" [IRLit (IRIntLit 1), IRLit (IRIntLit 2)])), testMeta)]
+                  [(IRReturn (Just (IRCall "+" [IRLit (IRInt32Lit 1), IRLit (IRInt32Lit 2)])), testMeta)]
               }
         let prog = IRProgram [(func, testMeta)]
 
@@ -86,13 +88,13 @@ spec = do
             -- 2. Return type constraint
             -- 3. Two function call argument constraints (one per int literal)
             length constraints `shouldBe` 4
-            constraints `shouldContain` [TEq IRTypeInt IRTypeInt]  -- Parameter constraint
+            constraints `shouldContain` [TEq IRTypeInt32 IRTypeInt32]  -- Parameter constraint
             -- List all expected constraints
             let expectedConstraints = [
-                  TEq IRTypeInt IRTypeInt,  -- Parameter
-                  TEq IRTypeInt IRTypeInt,  -- Return
-                  TEq IRTypeInt IRTypeInt,  -- First arg
-                  TEq IRTypeInt IRTypeInt   -- Second arg
+                  TEq IRTypeInt32 IRTypeInt32,  -- Parameter
+                  TEq IRTypeInt32 IRTypeInt32,  -- Return
+                  TEq IRTypeInt32 IRTypeInt32,  -- First arg
+                  TEq IRTypeInt32 IRTypeInt32   -- Second arg
                   ]
             constraints `shouldMatchList` expectedConstraints
           Left err -> expectationFailure $ show err
@@ -101,16 +103,16 @@ spec = do
         let func = IRFuncDecl
               { fnName = "test"
               , fnParams = []
-              , fnRetType = IRTypeInt
+              , fnRetType = IRTypeInt32
               , fnBody = IRBlock "entry"
-                  [(IRReturn (Just (IRCall "id" [IRLit (IRIntLit 42)])), testMeta)]
+                  [(IRReturn (Just (IRCall "id" [IRLit (IRInt32Lit 42)])), testMeta)]
               }
         let prog = IRProgram [(func, testMeta)]
 
         case generateConstraints prog of
           Right constraints -> do
             -- Should ensure return type matches function signature
-            constraints `shouldContain` [TEq IRTypeInt IRTypeInt]
+            constraints `shouldContain` [TEq IRTypeInt32 IRTypeInt32]
           Left err -> expectationFailure $ show err
 
     describe "Print statement conversion" $ do
@@ -129,7 +131,7 @@ spec = do
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
-                      (IRProcCall "print" [IRLit (IRIntLit 3)], _) -> return ()
+                      (IRProcCall "print" [IRLit (IRInt32Lit 3)], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
     it "converts print to procedure call" $ do
       let ast = Program [TLExpr (Call "print" [StrLit "test"])]
@@ -156,8 +158,196 @@ spec = do
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
-                      (IRProcCall "print" [IRLit (IRIntLit 3)], _) -> return ()
+                      (IRProcCall "print" [IRLit (IRInt32Lit 3)], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
-      where
-        testMeta = IRMetadata IRTypeInt (S.singleton PureEffect) Nothing
 
+
+    describe "Type Checking" $ do
+      it "detects type errors in function calls" $ do
+        let func = IRFuncDecl
+              { fnName = "add"
+              , fnParams = [("x", IRTypeInt32), ("y", IRTypeInt32)]
+              , fnRetType = IRTypeInt32
+              , fnBody = IRBlock "entry"
+                  [(IRReturn (Just (IRCall "add"
+                    [IRLit (IRStringLit "not_a_number"),
+                     IRLit (IRInt32Lit 42)])), testMeta)]
+              }
+        let prog = IRProgram [(func, testMeta)]
+        let constraints = generateConstraints prog
+        case constraints of
+          Right cs -> do
+            solveConstraints cs `shouldBe`
+              Left (UnificationError IRTypeString IRTypeInt32)
+          Left err -> expectationFailure $ "Constraint generation failed: " ++ show err
+
+      it "detects type errors in binary operations" $ do
+          let expr = IRCall "Add"
+                [ IRLit (IRStringLit "hello")
+                , IRLit (IRInt32Lit 42) ]
+          let prog = IRProgram [(IRFuncDecl
+                                 { fnName = "main"
+                                 , fnParams = []
+                                 , fnRetType = IRTypeVoid
+                                 , fnBody = IRBlock "entry" [(IRStmtExpr expr, testMeta)]
+                                 }, testMeta)]
+
+          let constraints = generateConstraints prog
+          case constraints of
+            Right cs -> do
+              traceM $ "Generated constraints: " ++ show cs
+              solveConstraints cs `shouldBe`
+                Left (UnificationError IRTypeString IRTypeInt32)
+            Left err -> expectationFailure $
+              "Constraint generation failed: " ++ show err
+
+
+      it "handles 32-bit floating point arithmetic" $ do
+        let expr = IRCall "Add"
+              [ IRLit (IRFloat32Lit 3.14)
+              , IRLit (IRFloat32Lit 2.86) ]
+        let prog = IRProgram [(IRFuncDecl
+                               { fnName = "main"
+                               , fnParams = []
+                               , fnRetType = IRTypeFloat32
+                               , fnBody = IRBlock "entry" [(IRStmtExpr expr, testMeta)]
+                               }, testMeta)]
+
+        let constraints = generateConstraints prog
+        case constraints of
+          Right cs -> do
+            traceM $ "Generated constraints: " ++ show cs
+            case solveConstraints cs of
+              Right subst ->
+                M.map (const IRTypeFloat32) subst `shouldBe` subst
+              Left err -> expectationFailure $
+                "Constraint solving failed: " ++ show err
+          Left err -> expectationFailure $
+            "Constraint generation failed: " ++ show err
+
+      it "handles mixed numeric type operations correctly" $ do
+        let expr = IRCall "Add"
+              [ IRLit (IRFloat32Lit 1.0)
+              , IRCall "Mul"
+                  [ IRLit (IRInt32Lit 2)
+                  , IRLit (IRFloat32Lit 3.0)
+                  ]
+              ]
+        let prog = IRProgram [(IRFuncDecl
+                               { fnName = "main"
+                               , fnParams = []
+                               , fnRetType = IRTypeFloat32
+                               , fnBody = IRBlock "entry" [(IRStmtExpr expr, testMeta)]
+                               }, testMeta)]
+
+        traceM "\n=== Type Inference Test ==="
+        case generateConstraints prog of
+            Right constraints -> do
+                traceM $ "Generated constraints: " ++ show constraints
+                case solveConstraints constraints of
+                    Right subst -> do
+                        -- Check the final type after substitution
+                        let resultType = applySubst subst (metaType testMeta)
+                        traceM $ "Result type: " ++ show resultType
+                        resultType `shouldBe` IRTypeFloat32
+                    Left err -> expectationFailure $ "Constraint solving failed: " ++ show err
+            Left err -> expectationFailure $ "Constraint generation failed: " ++ show err
+
+    describe "Type coercion rules" $ do
+      it "follows strict numeric type hierarchy" $ do
+          let irInt32 = IRLit (IRInt32Lit 1)
+          let irInt64 = IRLit (IRInt64Lit 1)
+          let irFloat32 = IRLit (IRFloat32Lit 1.0)
+          let irFloat64 = IRLit (IRFloat64Lit 1.0)
+
+          let prog = IRProgram [(IRFuncDecl
+                                 { fnName = "test"
+                                 , fnParams = []
+                                 , fnRetType = IRTypeFloat64
+                                 , fnBody = IRBlock "entry"
+                                     [(IRStmtExpr $ IRCall "Add" [irInt32, irFloat64], testMeta)]
+                                 }, testMeta)]
+
+          case generateConstraints prog of
+              Right constraints -> do
+                  traceM $ "Generated constraints: " ++ show constraints
+                  case solveConstraints constraints of
+                      Right subst -> do
+                          let resultType = applySubst subst (metaType testMeta)
+                          resultType `shouldBe` IRTypeFloat64  -- Higher precision wins
+
+      it "preserves type precision in same-type operations" $ do
+        -- Test Int32 precision preservation
+        let int32Expr = IRCall "Add"
+              [ IRLit (IRInt32Lit 1)
+              , IRLit (IRInt32Lit 2)
+              ]
+        let int32Prog = IRProgram [(IRFuncDecl
+                                    { fnName = "test"
+                                    , fnParams = []
+                                    , fnRetType = IRTypeInt32
+                                    , fnBody = IRBlock "entry" [(IRStmtExpr int32Expr, testMeta)]
+                                    }, testMeta)]
+
+        -- Test Float32 precision preservation
+        let float32Expr = IRCall "Add"
+              [ IRLit (IRFloat32Lit 1.0)
+              , IRLit (IRFloat32Lit 2.0)
+              ]
+        let float32Prog = IRProgram [(IRFuncDecl
+                                      { fnName = "test"
+                                      , fnParams = []
+                                      , fnRetType = IRTypeFloat32
+                                      , fnBody = IRBlock "entry" [(IRStmtExpr float32Expr, testMeta)]
+                                      }, testMeta)]
+
+        -- Verify Int32 + Int32 -> Int32
+        case generateConstraints int32Prog of
+            Right constraints -> do
+                case solveConstraints constraints of
+                    Right subst -> do
+                        let resultType = applySubst subst (metaType testMeta)
+                        resultType `shouldBe` IRTypeInt32
+                    Left err -> expectationFailure $ "Int32 constraint solving failed: " ++ show err
+            Left err -> expectationFailure $ "Int32 constraint generation failed: " ++ show err
+
+        -- Verify Float32 + Float32 -> Float32
+        case generateConstraints float32Prog of
+            Right constraints -> do
+                case solveConstraints constraints of
+                    Right subst -> do
+                        let resultType = applySubst subst (metaType testMeta)
+                        resultType `shouldBe` IRTypeFloat32
+                    Left err -> expectationFailure $ "Float32 constraint solving failed: " ++ show err
+            Left err -> expectationFailure $ "Float32 constraint generation failed: " ++ show err
+
+    describe "Struct type handling" $ do
+      it "converts struct definitions to IR" $ do
+        let ast = Program
+              [ TLType "Point" (TypeStruct "Point" [("x", TypeNum Float32), ("y", TypeNum Float32)])
+              , TLExpr (Let "p" (StructLit "Point" [("x", NumLit Float32 "1.0"), ("y", NumLit Float32 "2.0")]))
+              , TLExpr (Call "print" [FieldAccess (Var "p") "x"])
+              ]
+
+        case convertToIR' ast of
+          Right (IRProgram funcs) -> do
+            length funcs `shouldBe` 1  -- Should be main function
+            case funcs of
+              [(mainFn, _)] -> do
+                let IRBlock _ stmts = fnBody mainFn
+                case stmts of
+                  [(IRVarDecl "p" typ _, _),
+                   (IRProcCall "print" [IRCall "field_access" [IRVar "p", IRLit (IRStringLit "x")]], meta),
+                   (IRReturn Nothing, _)] -> do  -- Add expectation for implicit return
+                    typ `shouldBe` IRTypeStruct "Point" [("x", IRTypeFloat32), ("y", IRTypeFloat32)]
+                    metaType meta `shouldBe` IRTypeFloat32  -- Field access should have float type
+                  _ -> expectationFailure $ "Unexpected statements: " ++ show stmts
+              _ -> expectationFailure "Expected single main function"
+          Left err -> expectationFailure $ "IR conversion failed: " ++ show err
+
+      where
+        testMeta = IRMetadata
+          { metaType = IRTypeVar (TypeVar 0)  -- Use type variable instead of concrete type
+          , metaEffects = S.singleton PureEffect
+          , metaSourcePos = Nothing
+          }

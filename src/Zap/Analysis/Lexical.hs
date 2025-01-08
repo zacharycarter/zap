@@ -22,6 +22,7 @@ data Token
   = TWord String        -- Identifiers and keywords
   | TString String      -- String literals
   | TNumber String      -- Numeric literals
+  | TTypeSuffix String  -- Type suffix like 'f32, 'i32, etc...
   | TOperator String    -- Operators
   | TSymbol String      -- Other symbols
   | TColon             -- Block symbol
@@ -208,12 +209,29 @@ lexNumber :: Int -> Int -> String -> String -> Either LexError [Located]
 lexNumber line col acc [] = do
     rest <- scanTokens line (col + length acc) []
     Right $ Located (TNumber (reverse acc)) col line : rest
-lexNumber line col acc (c:cs)
-    | isDigit c = lexNumber line col (c:acc) cs
-    | c == '.' = lexNumber line col (c:acc) cs
-    | otherwise = do
+lexNumber line col acc (c:cs) = case c of
+    '\'' -> do  -- Found type suffix marker
+        let (typeSuffix, rest) = span isValidTypeSuffix cs
+        if not (null typeSuffix) && isValidTypeSpec typeSuffix
+            then do
+                let numTok = Located (TNumber (reverse acc)) col line
+                let suffixTok = Located (TTypeSuffix typeSuffix) (col + length acc + 1) line
+                rest' <- scanTokens line (col + length acc + length typeSuffix + 1) rest
+                Right $ numTok : suffixTok : rest'
+            else Left $ InvalidCharacter '\'' line col
+    _ | isDigit c || c == '.' -> lexNumber line col (c:acc) cs
+    _ -> do
+        let numTok = Located (TNumber (reverse acc)) col line
         rest <- scanTokens line (col + length acc) (c:cs)
-        Right $ Located (TNumber (reverse acc)) col line : rest
+        Right $ numTok : rest
+
+-- Helper to check valid type suffix characters
+isValidTypeSuffix :: Char -> Bool
+isValidTypeSuffix c = isAlphaNum c || c == '_'
+
+-- Helper to validate complete type specifications
+isValidTypeSpec :: String -> Bool
+isValidTypeSpec s = s `elem` ["i32", "i64", "f32", "f64"]
 
 -- Lexer for words
 lexWord :: Int -> Int -> String -> String -> Either LexError [Located]

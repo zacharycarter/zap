@@ -34,8 +34,8 @@ spec = do
       parseProgram "print(1 + 2 * 3)" `shouldBe`
         Right [TLExpr (Call "print" [
             BinOp Add
-                (NumLit Int32 "1")
-                (BinOp Mul (NumLit Int32 "2") (NumLit Int32 "3"))])]
+                (NumLit Int64 "1")
+                (BinOp Mul (NumLit Int64 "2") (NumLit Int64 "3"))])]
 
     it "enforces print statement indentation" $ do
       let input = "block test:\nprint \"Hello\""  -- Not indented
@@ -92,7 +92,7 @@ spec = do
     it "parses simple while loop" $ do
       let input = "while x < 3:\n  print x"
       case parseProgram input of
-        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Int32 "3")) (Block scope))] ->
+        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Int64"3")) (Block scope))] ->
           blockExprs scope `shouldBe` [Call "print" [Var "x"]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -104,27 +104,27 @@ spec = do
       parseProgram input `shouldSatisfy` isLeft
 
   describe "Numeric literal parsing" $ do
-    it "parses integer literals as Int32" $ do
-      parseExprFromText "42" `shouldBe` Right (NumLit Int32 "42")
+    it "parses integer literals as Int64" $ do
+      parseExprFromText "42" `shouldBe` Right (NumLit Int64 "42")
 
-    it "parses decimal literals as Float32" $ do
-      parseExprFromText "42.0" `shouldBe` Right (NumLit Float32 "42.0")
+    it "parses decimal literals as Float64" $ do
+      parseExprFromText "42.0" `shouldBe` Right (NumLit Float64 "42.0")
 
   describe "Variable declarations and assignments" $ do
     it "parses variable declaration with initialization" $ do
         parseExprFromText "var x = 42" `shouldBe`
-            Right (VarDecl "x" (NumLit Int32 "42"))
+            Right (VarDecl "x" (NumLit Int64"42"))
 
     it "parses variable declaration within block" $ do
         parseProgram "block test:\n  var x = 42" `shouldBe`
             Right [TLExpr (Block $ BlockScope
                 "test"
-                [VarDecl "x" (NumLit Int32 "42")]
+                [VarDecl "x" (NumLit Int64 "42")]
                 Nothing)]
 
     it "parses variable assignment" $ do
         parseExprFromText "x = 42" `shouldBe`
-            Right (Assign "x" (NumLit Int32 "42"))
+            Right (Assign "x" (NumLit Int64 "42"))
 
     it "parses variable declaration and assignment in function" $ do
         let input = T.unlines

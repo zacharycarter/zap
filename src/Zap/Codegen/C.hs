@@ -43,7 +43,6 @@ generateFunction (func, _) = do
 
     -- Determine return type for function signature
     let typeStr = case fnRetType func of
-          IRTypeInt -> "int"
           IRTypeInt32 -> "int32_t"
           IRTypeVoid -> "void"
           _ -> "int"  -- Default to int for now
@@ -72,7 +71,6 @@ generateFunction (func, _) = do
     -- Helper to convert IR types to C types
     paramTypeToC :: IRType -> T.Text
     paramTypeToC IRTypeInt32 = "int32_t"
-    paramTypeToC IRTypeInt = "int"
     paramTypeToC IRTypeVoid = "void"
     paramTypeToC _ = "int"  -- Default to int for now
 
@@ -121,7 +119,10 @@ generateStmt (stmt, _) = case stmt of
 
 -- Helper for generating literal values
 generateLiteral :: IRLiteral -> T.Text
-generateLiteral (IRIntLit n) = T.pack (show n)
+generateLiteral (IRInt32Lit n) = T.pack $ show n ++ "i32"  -- Add explicit type
+generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"    -- C long suffix
+generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")  -- Add f suffix for float literals
+generateLiteral (IRFloat64Lit n) = T.pack (show n)         -- No suffix needed for doubles
 generateLiteral (IRVarRef name) = T.pack name
 generateLiteral (IRStringLit s) = T.concat ["\"", T.pack s, "\""]
 
@@ -157,8 +158,14 @@ generateExpr expr = Left $ UnsupportedOperation $ T.pack $ "Unsupported expressi
 generatePrintExpr :: IRExpr -> Either CGenError (T.Text, T.Text)
 generatePrintExpr (IRLit (IRStringLit str)) =
     Right (T.concat ["\"", T.pack str, "\""], "%s")
-generatePrintExpr (IRLit (IRIntLit n)) =
+generatePrintExpr (IRLit (IRInt32Lit n)) =
     Right (T.pack (show n), "%d")
+generatePrintExpr (IRLit (IRInt64Lit n)) =
+    Right (T.pack (show n), "%lld")
+generatePrintExpr (IRLit (IRFloat32Lit n)) =
+    Right (T.pack (show n), "%f")
+generatePrintExpr (IRLit (IRFloat64Lit n)) =
+    Right (T.pack (show n), "%lf")
 generatePrintExpr (IRLit (IRVarRef name)) =
     Right (T.pack name, "%d")  -- Assuming variables are ints for now
 generatePrintExpr (IRCall fname args) = do

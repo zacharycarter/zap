@@ -253,4 +253,30 @@ migratedTests =
       , expectedOutput = "5\n"
       , expectedExitCode = ExitSuccess
       }
+    , TestCase
+      { testName = "float32_arithmetic"
+      , sourceCode = T.unlines
+          [ "print 3.14'f32 + 2.86'f32"  -- Explicit Float32 addition
+          ]
+      , expectedOutput = "6.000000\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "explicit_type_literals"
+      , sourceCode = T.unlines
+          [ "print 12'i64 + 15'i64"      -- Integer type suffix
+          , "print 3.14'f32 + 2.86'f32"  -- Float type suffix
+          ]
+      , expectedOutput = "27\n6.000000\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "int_width_arithmetic"
+      , sourceCode = T.unlines
+          [ "print 1000'i32 + 2000'i32"  -- 32-bit addition
+          , "print 9223372036854775807'i64 - 1'i64"  -- 64-bit subtraction using max i64
+          ]
+      , expectedOutput = "3000\n9223372036854775806\n"
+      , expectedExitCode = ExitSuccess
+      }
   ]
