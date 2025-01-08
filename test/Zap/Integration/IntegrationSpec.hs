@@ -15,7 +15,7 @@ spec = do
     -- Run each basic test as a separate test case
     forM_ basicTests $ \test ->
       it ("compiles and runs " ++ testName test) $ do
-        result <- runTest test
+        result <- runTest' test
         result `shouldBe` TestSuccess
 
     forM_ migratedTests $ \test ->
@@ -31,5 +31,5 @@ spec = do
               , expectedOutput = ""
               , expectedExitCode = ExitFailure 1
               }
-        result <- runTest badTest
+        result <- runTest' badTest
         result `shouldBe` TestSuccess

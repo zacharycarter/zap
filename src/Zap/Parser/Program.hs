@@ -116,9 +116,16 @@ parseTopLevel = do
                     traceM $ "Parsed function declaration: " ++ show decl
                     return $ TLDecl decl
                 TWord name | isValidName (locToken tok) -> do
-                    _ <- matchToken isValidName "identifier"
-                    expr <- parseMaybeCall name
-                    return $ TLExpr expr
+                    traceM $ "Found identifier at top-level"
+                    -- Look ahead for assignment operators
+                    st' <- get
+                    case drop 1 $ stateTokens st' of
+                        (t:_) | locToken t == TEquals || locToken t == TOperator "+=" -> do
+                            expr <- parseAssign
+                            return $ TLExpr expr
+                        _ -> do
+                            expr <- parseMaybeCall name
+                            return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"

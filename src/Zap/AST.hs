@@ -42,6 +42,7 @@ data Op
   | Mul
   | Div
   | Eq
+  | EqEq
   | Lt
   | Gt
   | And
@@ -81,7 +82,7 @@ data Expr
   | Var String
   | Let String Expr
   | Block BlockScope
-  | Break String
+  | Break (Maybe String)
   | Result Expr
   | BinOp Op Expr Expr
   | If Expr Expr Expr

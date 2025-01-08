@@ -25,9 +25,6 @@ source-repository head
 library
   exposed-modules:
       Lib
-      Zap.Analysis.Allocation
-      Zap.Analysis.AllocationOpt
-      Zap.Analysis.CFG
       Zap.Analysis.Lexical
       Zap.Analysis.Semantic
       Zap.AST
@@ -35,10 +32,6 @@ library
       Zap.Compiler
       Zap.Compiler.OptConfig
       Zap.IR
-      Zap.IR.Allocator
-      Zap.IR.Conversion
-      Zap.IR.Core
-      Zap.IR.Types
       Zap.Parser.Core
       Zap.Parser.Expr
       Zap.Parser.Program
@@ -100,9 +93,6 @@ test-suite zap-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
-      Zap.Analysis.AllocationOptSpec
-      Zap.Analysis.AllocationSpec
-      Zap.Analysis.CFGSpec
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
       Zap.Integration.Basic

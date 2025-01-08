@@ -4,7 +4,7 @@ module Zap.IRSpec (spec) where
 import Test.Hspec
 import qualified Data.Set as S
 
-import Zap.AST (Program(..), TopLevel(..), Expr(..))
+import Zap.AST
 import Zap.IR
 
 spec :: Spec
@@ -38,21 +38,6 @@ spec = do
               _ -> expectationFailure "Expected implicit return"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
-    describe "Print Statement Conversion" $ do
-      it "converts print with string literal" $ do
-        let ast = Program [TLExpr (Call "print" [StrLit "Hello, World!"])]
-        case convertToIR' ast of
-          Right (IRProgram [(mainFn, _)]) -> do
-            let IRBlock label stmts = fnBody mainFn
-            label `shouldBe` "main.entry"
-            length stmts `shouldBe` 2  -- print + implicit return
-            case head stmts of
-              (IRStmtExpr (IRCall "print" [IRStringLit "Hello, World!"]), meta) -> do
-                metaType meta `shouldBe` IRTypeVoid
-                metaEffects meta `shouldBe` S.singleton IOEffect
-              _ -> expectationFailure "Expected print statement"
-          Left err -> expectationFailure $ "Conversion failed: " ++ show err
-
     describe "Error Handling" $ do
       it "reports error for unsupported expressions" $ do
         let ast = Program [TLExpr (Call "unknown" [])]
@@ -82,3 +67,97 @@ spec = do
               (_, stmtMeta) -> metaEffects stmtMeta `shouldBe` S.singleton IOEffect
 
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
+
+    describe "Type Inference" $ do
+      it "generates constraints for function definitions" $ do
+        let func = IRFuncDecl
+              { fnName = "test"
+              , fnParams = [("x", IRTypeInt)]
+              , fnRetType = IRTypeInt
+              , fnBody = IRBlock "entry"
+                  [(IRReturn (Just (IRCall "+" [IRLit (IRIntLit 1), IRLit (IRIntLit 2)])), testMeta)]
+              }
+        let prog = IRProgram [(func, testMeta)]
+
+        case generateConstraints prog of
+          Right constraints -> do
+            -- Should include:
+            -- 1. Parameter type constraint
+            -- 2. Return type constraint
+            -- 3. Two function call argument constraints (one per int literal)
+            length constraints `shouldBe` 4
+            constraints `shouldContain` [TEq IRTypeInt IRTypeInt]  -- Parameter constraint
+            -- List all expected constraints
+            let expectedConstraints = [
+                  TEq IRTypeInt IRTypeInt,  -- Parameter
+                  TEq IRTypeInt IRTypeInt,  -- Return
+                  TEq IRTypeInt IRTypeInt,  -- First arg
+                  TEq IRTypeInt IRTypeInt   -- Second arg
+                  ]
+            constraints `shouldMatchList` expectedConstraints
+          Left err -> expectationFailure $ show err
+
+      it "handles return type constraints" $ do
+        let func = IRFuncDecl
+              { fnName = "test"
+              , fnParams = []
+              , fnRetType = IRTypeInt
+              , fnBody = IRBlock "entry"
+                  [(IRReturn (Just (IRCall "id" [IRLit (IRIntLit 42)])), testMeta)]
+              }
+        let prog = IRProgram [(func, testMeta)]
+
+        case generateConstraints prog of
+          Right constraints -> do
+            -- Should ensure return type matches function signature
+            constraints `shouldContain` [TEq IRTypeInt IRTypeInt]
+          Left err -> expectationFailure $ show err
+
+    describe "Print statement conversion" $ do
+      it "converts string literal print to procedure call" $ do
+          let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+          case convertToIR' ast of
+              Right (IRProgram [(mainFn, _)]) -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case head stmts of
+                      (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
+                      other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+
+      it "converts print with binary operation to procedure call" $ do
+          let ast = Program [TLExpr (Call "print" [BinOp Add (NumLit Int32 "1") (NumLit Int32 "2")])]
+          case convertToIR' ast of
+              Right (IRProgram [(mainFn, _)]) -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case head stmts of
+                      (IRProcCall "print" [IRLit (IRIntLit 3)], _) -> return ()
+                      other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+    it "converts print to procedure call" $ do
+      let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+      case convertToIR' ast of
+        Right (IRProgram [(mainFn, _)]) -> do
+          let IRBlock _ stmts = fnBody mainFn
+          case head stmts of
+            (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
+            _ -> expectationFailure "Expected procedure call"
+
+    describe "Print statement conversion" $ do
+      it "converts string literal print to procedure call" $ do
+          let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+          case convertToIR' ast of
+              Right (IRProgram [(mainFn, _)]) -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case head stmts of
+                      (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
+                      other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+
+      it "converts print with binary operation to procedure call" $ do
+          let ast = Program [TLExpr (Call "print" [BinOp Add (NumLit Int32 "1") (NumLit Int32 "2")])]
+          case convertToIR' ast of
+              Right (IRProgram [(mainFn, _)]) -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case head stmts of
+                      (IRProcCall "print" [IRLit (IRIntLit 3)], _) -> return ()
+                      other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+      where
+        testMeta = IRMetadata IRTypeInt (S.singleton PureEffect) Nothing
+

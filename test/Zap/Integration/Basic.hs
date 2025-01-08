@@ -108,4 +108,149 @@ migratedTests =
       , expectedOutput = "14\n"  -- Should evaluate as 2 + (3 * 4)
       , expectedExitCode = ExitSuccess
       }
+  , TestCase
+      { testName = "print_subtract"
+      , sourceCode = "print 5 - 3"
+      , expectedOutput = "2\n"
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "print_divide"
+      , sourceCode = "print 6 / 2"
+      , expectedOutput = "3\n"
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "print_mixed_arithmetic"
+      , sourceCode = "print 10 - 2 * 3"
+      , expectedOutput = "4\n"  -- Should respect operator precedence
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "print_parentheses_basic"
+      , sourceCode = "print (1 + 2) * 3"
+      , expectedOutput = "9\n"  -- Without parens would be 7
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "print_parentheses_nested"
+      , sourceCode = "print (2 * (3 + 4))"
+      , expectedOutput = "14\n"
+      , expectedExitCode = ExitSuccess
+      }
+  , TestCase
+      { testName = "print_call_with_parens"
+      , sourceCode = "print(\"Hello, World!\")"
+      , expectedOutput = "Hello, World!\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "print_comparison_less"
+      , sourceCode = "print 2 < 3"
+      , expectedOutput = "1\n"  -- true represented as 1
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+        { testName = "print_comparison_greater"
+        , sourceCode = "print 5 > 3"
+        , expectedOutput = "1\n"
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+        { testName = "print_comparison_equal"
+        , sourceCode = "print 4 == 4"
+        , expectedOutput = "1\n"
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+        { testName = "print_comparison_precedence"
+        , sourceCode = "print 2 + 3 < 10 - 4"
+        , expectedOutput = "1\n"  -- (2 + 3) < (10 - 4) -> 5 < 6 -> true
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+        { testName = "variable_declaration_and_mutation"
+        , sourceCode = T.unlines
+            [ "var x = 5"           -- Variable declaration
+            , "print x"             -- Initial value
+            , "x = x + 3"          -- Direct assignment
+            , "print x"             -- After addition
+            , "x += 2"             -- Compound assignment
+            , "print x"             -- Final value
+            ]
+        , expectedOutput = T.unlines
+            [ "5"                   -- Initial value
+            , "8"                   -- After x = x + 3
+            , "10"                  -- After x += 2
+            ]
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+        { testName = "simple_assignment"
+        , sourceCode = T.unlines
+            [ "var x = 5"
+            , "print x"
+            ]
+        , expectedOutput = "5\n"
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+        { testName = "var_declaration_scope"
+        , sourceCode = T.unlines
+            [ "var x = 5"  -- Variable declaration
+            , "print x"    -- Should now be in scope
+            ]
+        , expectedOutput = "5\n"
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+      { testName = "basic_while"
+      , sourceCode = T.unlines
+          [ "var i = 0"
+          , "while i < 3:"
+          , "  print i"
+          , "  i = i + 1"
+          ]
+      , expectedOutput = "0\n1\n2\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "while_with_break"
+      , sourceCode = T.unlines
+          [ "var i = 0"
+          , "while i < 5:"
+          , "  print i"
+          , "  i = i + 1"
+          , "  if i == 3:"
+          , "    break"
+          ]
+      , expectedOutput = "0\n1\n2\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "nested_while_with_boolean"
+      , sourceCode = T.unlines
+          [ "var i = 0"
+          , "var j = 0"
+          , "while i < 3:"
+          , "  j = 0"
+          , "  while j < i:"
+          , "    print j"
+          , "    j = j + 1"
+          , "  i = i + 1"
+          ]
+      , expectedOutput = "0\n0\n1\n"  -- Should print 0 for i=2, then 0,1 for i=3
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+      { testName = "simple_function"
+      , sourceCode = T.unlines
+          [ "fn add(x, y: i32): i32 ="
+          , "  x + y"
+          , ""
+          , "print add(2, 3)"
+          ]
+      , expectedOutput = "5\n"
+      , expectedExitCode = ExitSuccess
+      }
   ]

@@ -27,6 +27,7 @@ data Token
   | TColon             -- Block symbol
   | TVec String        -- Vector constructors
   | TEquals            -- Assignment operator
+  | TEqualsEquals      -- Equality operator
   | TDot               -- Struct field access
   | TComment String    -- Single-line comment
   | TType              -- Type keyword
@@ -162,6 +163,7 @@ lexOperator line col acc cs state = do
         [] -> do
             let tok = case reverse acc of
                     "=" -> Located TEquals col line
+                    "==" -> Located (TOperator "==") col line
                     "+=" -> Located (TOperator "+=") col line
                     op -> Located (TOperator op) col line
             Right [tok, Located TEOF (col + length acc) line]
@@ -179,6 +181,7 @@ lexOperator line col acc cs state = do
             | otherwise -> do
                 let tok = case reverse acc of
                         "=" -> Located TEquals col line
+                        "==" -> Located TEqualsEquals col line
                         "+=" -> Located (TOperator "+=") col line
                         op -> Located (TOperator op) col line
                 rest' <- scanTokensWithState state line (col + length acc) (c:rest)

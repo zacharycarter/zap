@@ -1,8 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Zap.Integration.Runner
-  ( runTest
-  , runTest'
+  ( runTest'
   , runTests
   , compileCCode
   , runCompiledProgram
@@ -28,7 +27,7 @@ runTests tests = do
   results <- forM tests $ \test -> do
     printf "Test: %s..." (testName test)
     hFlush stdout
-    result <- runTest test
+    result <- runTest' test
     case result of
       TestSuccess -> do
         putStrLn " PASS"
@@ -54,42 +53,6 @@ runTests tests = do
   let total = length tests
   printf "\nPassed %d of %d tests\n" passed total
   return $ passed == total
-
--- | Run single integration test and report results
-runTest :: TestCase -> IO TestResult
-runTest test = do  -- Keep the test parameter
-  -- First compile Zap code to C
-  let cr = compile defaultCompileOptions (sourceCode test)
-  case (cr, expectedExitCode test) of  -- Add test parameter here
-    -- For expected failures, we're done
-    (Left _, ExitFailure _) -> return TestSuccess
-    (Right _, ExitFailure _) -> return $ TestFailure "Compilation succeeded when failure was expected"
-    (Left err, ExitSuccess) -> return $ TestFailure $ "Compilation failed unexpectedly: " ++ show err
-
-    -- For expected successes, continue with C compilation
-    (Right result, ExitSuccess) -> case generatedCode result of
-      Nothing -> return $ TestFailure "No code generated when success was expected"
-      Just cCode -> do
-        -- Compile C code
-        cr' <- compileCCode cCode
-        case cr' of
-          Left err -> return $ CompilationFailure err
-          Right execPath -> do
-            -- Run the compiled program
-            (exitCode, output) <- runCompiledProgram execPath
-            -- Clean up
-            removeFile execPath `catch` \(_ :: IOError) -> return ()
-
-            -- Check results (add test parameter references)
-            if exitCode /= expectedExitCode test
-              then return $ RuntimeFailure exitCode (T.unpack output)  -- Convert Text to String
-              else if output == expectedOutput test
-                then return TestSuccess
-                else return $ TestFailure $
-                  "Output mismatch:\nExpected: " ++
-                  T.unpack (expectedOutput test) ++  -- Add test parameter
-                  "\nActual: " ++ T.unpack output
-
 
 -- | Run single integration test with new hybrid IR and report results
 runTest' :: TestCase -> IO TestResult

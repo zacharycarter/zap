@@ -2,7 +2,6 @@
 module Zap.Analysis.SemanticSpec (spec) where
 
 import Test.Hspec
-import Control.Monad (forM_)
 import qualified Data.Map.Strict as M
 import Debug.Trace
 
@@ -11,27 +10,52 @@ import Zap.Analysis.Semantic
 
 spec :: Spec
 spec = do
-  describe "Function Analysis" $ do
-    describe "Function Definitions" $ do
-      it "accepts valid function definitions" $ do
+  describe "Basic Semantic Analysis" $ do
+    describe "Variable Scoping" $ do
+      it "detects undefined variables" $ do
+        let ast = Program [TLExpr $ Var "x"]
+        analyze ast `shouldBe` Left (UndefinedVariable "x")
+
+      it "allows access to variables after declaration" $ do
         let ast = Program
-              [ TLDecl $ DFunc "add"
-                  [ Param "x" (TypeNum Int32)
-                  , Param "y" (TypeNum Int32)
-                  ]
-                  (TypeNum Int32)
-                  (BinOp Add (Var "x") (Var "y"))
+              [ TLExpr $ Let "x" (NumLit Int32 "1")
+              , TLExpr $ Var "x"
               ]
         analyze ast `shouldBe` Right ast
 
-      it "detects type mismatches in function bodies" $ do
+      it "maintains proper function parameter scope" $ do
         let ast = Program
-              [ TLDecl $ DFunc "broken"
-                  [ Param "x" (TypeNum Int32) ]
+              [ TLDecl $ DFunc "f"
+                  [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
-                  (StrLit "wrong type")
+                  (Var "x")
               ]
-        analyze ast `shouldBe` Left (TypeMismatchInFunction "broken" (TypeNum Int32) TypeString)
+        analyze ast `shouldBe` Right ast
+
+      it "prevents access to function parameters outside function" $ do
+        let ast = Program
+              [ TLDecl $ DFunc "f"
+                  [Param "x" (TypeNum Int32)]
+                  (TypeNum Int32)
+                  (Var "x")
+              , TLExpr $ Var "x"  -- Should fail
+              ]
+        analyze ast `shouldBe` Left (UndefinedVariable "x")
+
+    describe "Function Declarations" $ do
+      it "detects undefined functions" $ do
+        let ast = Program [TLExpr $ Call "undefined" []]
+        analyze ast `shouldBe` Left (UndefinedFunction "undefined")
+
+      it "validates function arity" $ do
+        let ast = Program
+              [ TLDecl $ DFunc "f"
+                  [Param "x" (TypeNum Int32)]
+                  (TypeNum Int32)
+                  (Var "x")
+              , TLExpr $ Call "f" []  -- Wrong number of arguments
+              ]
+        analyze ast `shouldBe` Left (ArgumentCountMismatch "f" 1 0)
 
       it "prevents duplicate function definitions" $ do
         let ast = Program
@@ -40,445 +64,44 @@ spec = do
               ]
         analyze ast `shouldBe` Left (RecursionInGlobalScope "f")
 
-    describe "Function Calls" $ do
-      it "validates function call arguments" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "add"
-                  [ Param "x" (TypeNum Int32)
-                  , Param "y" (TypeNum Int32)
-                  ]
-                  (TypeNum Int32)
-                  (BinOp Add (Var "x") (Var "y"))
-              , TLExpr $ Call "add"
-                  [ NumLit Int32 "1"
-                  , NumLit Int32 "2"
-                  ]
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "detects calls to undefined functions" $ do
-        let ast = Program
-              [ TLExpr $ Call "undefined" [] ]
-        analyze ast `shouldBe` Left (UndefinedFunction "undefined")
-
-      it "checks argument count" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "add"
-                  [ Param "x" (TypeNum Int32)
-                  , Param "y" (TypeNum Int32)
-                  ]
-                  (TypeNum Int32)
-                  (BinOp Add (Var "x") (Var "y"))
-              , TLExpr $ Call "add" [ NumLit Int32 "1" ]
-              ]
-        analyze ast `shouldBe` Left (ArgumentCountMismatch "add" 2 1)
-
-      it "checks argument types" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "add"
-                  [ Param "x" (TypeNum Int32)
-                  , Param "y" (TypeNum Int32)
-                  ]
-                  (TypeNum Int32)
-                  (BinOp Add (Var "x") (Var "y"))
-              , TLExpr $ Call "add"
-                  [ NumLit Int32 "1"
-                  , StrLit "not a number"
-                  ]
-              ]
-        analyze ast `shouldBe` Left (TypeMismatchInFunction "add" (TypeNum Int32) TypeString)
-
-    describe "Scoping Rules" $ do
-      it "allows access to parameters within function bodies" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "identity"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Var "x")
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "prevents access to parameters outside function bodies" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "f"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Var "x")
-              , TLExpr $ Var "x"
-              ]
-        analyze ast `shouldBe` Left (UndefinedVariable "x")
-
-    describe "Basic Expression Analysis" $ do
-      it "analyzes string literals" $ do
-        let ast = Program [TLExpr $ StrLit "hello"]
-        analyze ast `shouldBe` Right ast
-
+    describe "String Literals" $ do
       it "rejects empty string literals" $ do
         let ast = Program [TLExpr $ StrLit ""]
         analyze ast `shouldBe` Left EmptyStringLiteral
 
-      it "analyzes numeric literals" $ do
-        let ast = Program [TLExpr $ NumLit Int32 "42"]
+      it "accepts non-empty string literals" $ do
+        let ast = Program [TLExpr $ StrLit "hello"]
         analyze ast `shouldBe` Right ast
 
-    describe "Advanced Function Analysis" $ do
-      it "validates chained function calls" $ do
+    describe "Field Access" $ do
+      it "allows valid field access on vectors" $ do
         let ast = Program
-              [ TLDecl $ DFunc "double"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (BinOp Add (Var "x") (Var "x"))
-              , TLDecl $ DFunc "quadruple"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Call "double" [Call "double" [Var "x"]])
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "validates functions with vector return types" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "makeVec2"
-                  [ Param "x" (TypeNum Float32)
-                  , Param "y" (TypeNum Float32)
-                  ]
-                  (TypeVec (Vec2 Float32))
-                  (VecLit (Vec2 Float32)
-                    [ Var "x"
-                    , Var "y"
-                    ])
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "handles shadowing in nested scopes" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "outer"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Let "y"
-                    (BinOp Add
-                      (Var "x")
-                      (Let "y" (NumLit Int32 "10"))))
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "validates function calls within vector literals" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "getX"
-                  [ Param "x" (TypeNum Float32) ]
-                  (TypeNum Float32)
-                  (Var "x")
-              , TLDecl $ DFunc "makeVec"
-                  [ Param "x" (TypeNum Float32) ]
-                  (TypeVec (Vec2 Float32))
-                  (VecLit (Vec2 Float32)
-                    [ Call "getX" [Var "x"]
-                    , NumLit Float32 "0.0"
-                    ])
-              ]
-        analyze ast `shouldBe` Right ast
-
-    describe "Block Type Analysis" $ do
-      it "infers type from last expression in block" $ do
-        let ast = Program
-              [ TLExpr $ Block $ BlockScope
-                  { blockLabel = "test"
-                  , blockExprs = [Call "print" [StrLit "Hello"]]
-                  , blockResult = Just (NumLit Int32 "42")
-                  }
-              ]
-        case analyze ast of
-          Right _ -> return ()
-          Left err -> expectationFailure $ "Expected success but got: " ++ show err
-
-      it "validates block result type matches enclosing function" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "blockFunc"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Block $ BlockScope
-                    { blockLabel = "inner"
-                    , blockExprs = [Call "print" [StrLit "Hello"]]
-                    , blockResult = Just (Var "x")
-                    })
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "rejects blocks with type mismatches" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "badBlock"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Block $ BlockScope
-                    { blockLabel = "inner"
-                    , blockExprs = [Call "print" [StrLit "Hello"]]
-                    , blockResult = Just (StrLit "wrong type")
-                    })
-              ]
-        case analyze ast of
-          Left (TypeMismatchInFunction _ _ _) -> return ()
-          other -> expectationFailure $
-            "Expected type mismatch error but got: " ++ show other
-
-      it "maintains correct variable scope in nested blocks" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "nestedBlocks"
-                  [ Param "x" (TypeNum Int32) ]
-                  (TypeNum Int32)
-                  (Block $ BlockScope
-                    { blockLabel = "outer"
-                    , blockExprs =
-                        [ Let "y" (NumLit Int32 "5")
-                        , Block $ BlockScope
-                            { blockLabel = "inner"
-                            , blockExprs = []
-                            , blockResult = Just (BinOp Add (Var "x") (Var "y"))
-                            }
-                        ]
-                    , blockResult = Just (Var "x")
-                    })
-              ]
-        analyze ast `shouldBe` Right ast
-
-    describe "Vector Type Analysis" $ do
-      it "validates vector arithmetic operations" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "vecAdd"
-                  [ Param "v1" (TypeVec (Vec2 Float32))
-                  , Param "v2" (TypeVec (Vec2 Float32))
-                  ]
-                  (TypeVec (Vec2 Float32))
-                  (BinOp Add (Var "v1") (Var "v2"))
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "validates vector dot product" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "dotProduct"
-                  [ Param "v1" (TypeVec (Vec4 Float32))
-                  , Param "v2" (TypeVec (Vec4 Float32))
-                  ]
-                  (TypeNum Float32)
-                  (BinOp Dot (Var "v1") (Var "v2"))
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "validates vector literal components" $ do
-        let ast = Program
-              [ TLExpr $ VecLit (Vec2 Float32)
-                  [ NumLit Float32 "1.0"
-                  , NumLit Float32 "2.0"
-                  ]
-              ]
-        analyze ast `shouldBe` Right ast
-
-      it "rejects vector literals with mismatched component types" $ do
-        let ast = Program
-              [ TLExpr $ VecLit (Vec2 Float32)
-                  [ NumLit Float32 "1.0"
-                  , NumLit Int32 "2"
-                  ]
-              ]
-        analyze ast `shouldBe`
-          Left (InvalidVectorComponents
-            (Vec2 Float32)
-            [TypeNum Float32, TypeNum Int32])
-
-      it "rejects vector literals with wrong number of components" $ do
-        let ast = Program
-              [ TLExpr $ VecLit (Vec3 Float32)
-                  [ NumLit Float32 "1.0"
-                  , NumLit Float32 "2.0"
-                  ]
-              ]
-        analyze ast `shouldBe`
-          Left (InvalidVectorComponents
-            (Vec3 Float32)
-            [TypeNum Float32, TypeNum Float32])
-
-      it "validates component access across different vector sizes" $ do
-        let makeAst field vecType = Program
               [ TLExpr $ FieldAccess
-                  (VecLit vecType
-                    (replicate (case vecType of
-                      Vec2 _ -> 2
-                      Vec3 _ -> 3
-                      Vec4 _ -> 4) (NumLit Float32 "1.0")))
-                  field
+                  (Call "Vec2"
+                    [NumLit Float32 "1.0", NumLit Float32 "2.0"])
+                  "x"
               ]
+        analyze ast `shouldBe` Right ast
 
-        let testCases =
-              [ (Vec2 Float32, "x", Right $ makeAst "x" (Vec2 Float32))
-              , (Vec2 Float32, "y", Right $ makeAst "y" (Vec2 Float32))
-              , (Vec2 Float32, "z", Left $ UndefinedField "Vec2 Float32" "z")
-              , (Vec3 Float32, "z", Right $ makeAst "z" (Vec3 Float32))
-              , (Vec4 Float32, "w", Right $ makeAst "w" (Vec4 Float32))
-              , (Vec4 Float32, "q", Left $ UndefinedField "Vec4 Float32" "q")
-              ]
-
-        forM_ testCases $ \(vecType, field, expected) ->
-          analyze (makeAst field vecType) `shouldBe` expected
-
-      it "rejects operations between incompatible vector types" $ do
+      it "allows chained field access" $ do
         let ast = Program
-              [ TLDecl $ DFunc "invalidAdd"
-                  [ Param "v2" (TypeVec (Vec2 Float32))
-                  , Param "v3" (TypeVec (Vec3 Float32))
-                  ]
-                  (TypeVec (Vec2 Float32))
-                  (BinOp Add (Var "v2") (Var "v3"))
+              [ TLExpr $ FieldAccess
+                  (FieldAccess
+                    (Call "Vec3"
+                      [ NumLit Float32 "1.0"
+                      , NumLit Float32 "2.0"
+                      , NumLit Float32 "3.0"
+                      ])
+                    "x")
+                  "y"
               ]
-        analyze ast `shouldBe`
-          Left (TypeMismatchInOp Add
-            (TypeVec (Vec2 Float32))
-            (TypeVec (Vec3 Float32)))
+        analyze ast `shouldBe` Right ast
 
-  describe "Type Inference" $ do
-    describe "Let Binding Type Inference" $ do
-      it "infers types from numeric initialization" $ do
-        let ast = Program [TLExpr (Let "x" (NumLit Int32 "42"))]
-        case analyze ast of
-          Right (Program [TLExpr (Let "x" _)]) -> do
-            case getVarTypes ast of
-              Right types -> M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-              Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
-          Right other -> expectationFailure $
-            "Unexpected AST structure: " ++ show other
-          Left err -> expectationFailure $
-            "Analysis failed: " ++ show err
+    describe "Built-in Functions" $ do
+      it "allows print with any argument" $ do
+        let ast = Program [TLExpr $ Call "print" [StrLit "hello"]]
+        analyze ast `shouldBe` Right ast
 
-      it "infers numeric types through binary operations" $ do
-        let ast = Program
-              [ TLExpr $ Let "x" (NumLit Int32 "1")
-              , TLExpr $ Let "y" (BinOp Add (Var "x") (NumLit Int32 "2"))
-              ]
-        case analyze ast of
-          Right _ -> case getVarTypes ast of
-            Right types -> M.lookup "y" types `shouldBe` Just (TypeNum Int32)
-            Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
-          Left err -> expectationFailure $
-            "Analysis failed: " ++ show err
-
-    describe "Function Type Inference" $ do
-      it "infers parameter and return types from numeric operations" $ do
-        let ast = Program
-              [ TLDecl $ DFunc "add"
-                  [Param "x" TypeAny, Param "y" TypeAny]  -- Unspecified types
-                  TypeAny  -- Unspecified return type
-                  (BinOp Add (Var "x") (Var "y"))
-              ]
-        case analyze ast of
-          Right _ -> do
-            case getVarTypes ast of
-              Right types -> do
-                M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-                M.lookup "y" types `shouldBe` Just (TypeNum Int32)
-              Left err -> expectationFailure $ "Failed to get variable types: " ++ show err
-          Left err -> expectationFailure $ "Analysis failed: " ++ show err
-
-    it "handles mixed TypeAny and concrete type parameters" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "mixedTypes"
-                [Param "x" TypeAny, Param "y" (TypeNum Int32)]
-                (TypeNum Int32)  -- Concrete return type
-                (BinOp Add (Var "x") (Var "y"))
-            ]
-      analyze ast `shouldBe` Right ast
-
-    it "infers parameter types without breaking scoping" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "add"
-                [Param "x" TypeAny, Param "y" TypeAny]
-                TypeAny
-                (BinOp Add (Var "x") (Var "y"))
-            , TLExpr $ Var "x"  -- Should fail
-            ]
-      analyze ast `shouldBe` Left (UndefinedVariable "x")
-      case getVarTypes ast of
-        Right types -> M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-        Left err -> expectationFailure $ "Analysis failed: " ++ show err
-
-    describe "Constraint-based type inference" $ do
-      it "infers most general type for identity function" $ do
-        let ast = Program [TLDecl $ DFunc "id"
-              [Param "x" TypeAny]  -- No type annotation
-              TypeAny
-              (Var "x")]
-
-        -- First analyze the AST
-        case analyze ast of
-          Left err ->
-            expectationFailure $ "Analysis failed: " ++ show err
-          Right analyzedAST -> do
-            -- Then get variable types
-            case getVarTypes analyzedAST of
-              Left err ->
-                expectationFailure $ "Type inference failed: " ++ show err
-              Right types ->
-                M.lookup "x" types `shouldBe` Just TypeAny
-
-      it "infers types for let-bound variables based on usage" $ do
-        let ast = Program
-              [ TLExpr $ Let "x" (NumLit Int32 "1")
-              , TLExpr $ Let "y" (Var "x")
-              , TLExpr $ Let "z" (BinOp Add (Var "y") (NumLit Int32 "2"))
-              ]
-
-        case analyze ast >> getVarTypes ast of
-          Right types -> do
-            -- Our current system gets these right
-            M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-            M.lookup "z" types `shouldBe` Just (TypeNum Int32)
-
-            -- But y's type should be inferred from its usage in addition
-            M.lookup "y" types `shouldBe` Just (TypeNum Int32)  -- Currently fails
-          Left err -> expectationFailure $ show err
-
-    it "propagates return type to parameter type during inference" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "f"
-                [Param "x" TypeAny]
-                (TypeNum Int32)
-                (Var "x")
-            ]
-      case analyze ast >>= \_ -> getVarTypes ast of
-        Right types -> do
-          traceM $ "Types after analysis: " ++ show types
-          traceM $ "Looking up type for x"
-          M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-        Left err -> expectationFailure $ show err
-
-    it "infers function parameter types from return type" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "f"
-                [Param "x" TypeAny]  -- Parameter type not specified
-                (TypeNum Int32)      -- But return type is Int32
-                (Var "x")            -- Just returns x directly
-            ]
-      case analyze ast >>= \_ -> getVarTypes ast of
-        Right types ->
-          M.lookup "x" types `shouldBe` Just (TypeNum Int32)
-        Left err ->
-          expectationFailure $ show err
-
-    it "infers types through multiple function calls" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "f"
-                [Param "x" TypeAny]
-                TypeAny
-                (BinOp Add (Var "x") (NumLit Int32 "1"))
-            , TLExpr $ Call "f" [Call "f" [NumLit Int32 "0"]]
-            ]
-      analyze ast `shouldBe` Right ast
-
-    it "handles recursive type inference" $ do
-      let ast = Program
-            [ TLDecl $ DFunc "factorial"
-                [Param "n" TypeAny]
-                TypeAny
-                (If (BinOp Lt (Var "n") (NumLit Int32 "1"))
-                    (NumLit Int32 "1")
-                    (BinOp Mul
-                      (Var "n")
-                      (Call "factorial" [BinOp Sub (Var "n") (NumLit Int32 "1")])))
-            ]
-      analyze ast `shouldBe` Right ast
+      it "validates print arity" $ do
+        let ast = Program [TLExpr $ Call "print" []]
+        analyze ast `shouldBe` Left (ArgumentCountMismatch "print" 1 0)

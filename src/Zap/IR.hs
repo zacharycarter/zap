@@ -1,5 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
-
 module Zap.IR
   ( IRProgram(..)
   , IRLiteral(..)
@@ -12,15 +10,21 @@ module Zap.IR
   , Effect(..)
   , IRConversionError(..)
   , convertToIR'
+  , TypeVar(..)
+  , TypeConstraint(..)
+  , TypeSubst
+  , generateConstraints
+  , solveConstraints
   ) where
 
 import qualified Data.Text as T
+import qualified Data.Map as M
 import qualified Data.Set as S
 import Control.Monad (when)
 import Control.Monad.Except
 import Debug.Trace
 
-import Zap.AST
+import Zap.AST as A
 
 -- | Metadata for tracking effects and source info
 data IRMetadata = IRMetadata
@@ -50,29 +54,44 @@ data IRFuncDecl = IRFuncDecl
   } deriving (Show, Eq)
 
 data IRBlock = IRBlock
-  { blockLabel :: String
-  , blockStmts :: [(IRStmt, IRMetadata)]
+  { irBlockLabel :: String
+  , irBlockStmts :: [(IRStmt, IRMetadata)]
   } deriving (Show, Eq)
 
 -- Statements with metadata
 data IRStmt
-  = IRStmtExpr IRExpr
-  | IRReturn (Maybe IRExpr)
+  = IRStmtExpr IRExpr     -- Expression statement
+  | IRReturn (Maybe IRExpr) -- Return statement
+  | IRVarDecl             -- Variable declarations
+      { varDeclName :: String
+      , varDeclType :: IRType
+      , varDeclInit :: IRExpr
+      }
+  | IRAssign String IRExpr  -- Assignment
+  | IRAssignOp String Op IRExpr  -- Compound assignment
+  | IRLabel String          -- Label definition
+  | IRGoto String          -- Unconditional jump
+  | IRJumpIfZero IRExpr String  -- Conditional jump if expr is zero
+  | IRProcCall String [IRExpr]
   deriving (Show, Eq)
 
 -- Expressions with metadata attached
 data IRExpr
-  = IRCall String [IRLiteral]
+  = IRCall String [IRExpr]  -- Function call or operator
+  | IRVar String           -- Variable reference
+  | IRLit IRLiteral        -- Literal value
   deriving (Show, Eq)
 
 data IRLiteral
   = IRStringLit String
   | IRIntLit Int
+  | IRVarRef String
   deriving (Show, Eq)
 
 data IRType
   = IRTypeVoid
   | IRTypeInt
+  | IRTypeInt32
   | IRTypeString
   deriving (Show, Eq)
 
@@ -85,52 +104,257 @@ data IRConversionError
   | IRMissingMain            -- No main function found
   deriving (Show, Eq)
 
+-- | Type variables for unification
+newtype TypeVar = TypeVar Int
+  deriving (Eq, Ord, Show)
+
+-- | Type constraints from inference
+data TypeConstraint
+  = TEq IRType IRType        -- t1 = t2
+  | TVar TypeVar IRType      -- α = t
+  | TFunc TypeVar [IRType] IRType  -- α = (t1,...,tn) -> t
+  deriving (Eq, Show)
+
+-- | Type substitution mapping
+type TypeSubst = M.Map TypeVar IRType
+
+-- | Type inference errors
+data TypeError
+  = UnificationError IRType IRType
+  | InfiniteType TypeVar IRType
+  | UnboundVariable T.Text
+  deriving (Show, Eq)
+
 -- Helper for creating metadata
 mkMetadata :: IRType -> S.Set Effect -> IRMetadata
 mkMetadata typ effs = IRMetadata
   { metaType = typ
   , metaEffects = effs
-  , metaSourcePos = Nothing -- We can add source positions later
+  , metaSourcePos = Nothing
   }
+
+-- Loop context to track break targets
+data LoopContext = LoopContext
+  { loopNumber :: Int
+  , loopEndLabel :: String
+  } deriving (Show, Eq)
 
 convertToIR' :: Program -> Either IRConversionError IRProgram
 convertToIR' (Program tops) = do
-    mainBlock <- convertTops tops
+    traceM "\n=== Converting Program to IR ==="
+    traceM $ "Top level expressions: " ++ show tops
+
+    -- First collect all function declarations
+    let (funcs, exprs) = partitionTops tops
+    traceM $ "Found functions: " ++ show funcs
+    traceM $ "Found expressions: " ++ show exprs
+
+    -- Convert functions first
+    convertedFuncs <- mapM convertFuncDecl funcs
+
+    -- Then convert main block
+    mainBlock <- convertTops exprs Nothing
     let mainFunc = (IRFuncDecl
           { fnName = "main"
           , fnParams = []
           , fnRetType = IRTypeVoid
           , fnBody = mainBlock
           }, mkMetadata IRTypeVoid (S.singleton PureEffect))
-    return $ IRProgram [mainFunc]
 
-convertTops :: [TopLevel] -> Either IRConversionError IRBlock
-convertTops tops = do
-    stmts <- concat <$> mapM convertTop tops
+    return $ IRProgram (convertedFuncs ++ [mainFunc])
+  where
+    partitionTops :: [TopLevel] -> ([Decl], [TopLevel])
+    partitionTops = foldr splitTop ([], [])
+      where
+        splitTop (TLDecl d@(DFunc _ _ _ _)) (fs, es) = (d:fs, es)
+        splitTop e (fs, es) = (fs, e:es)
+
+-- | Convert function declarations to IR
+convertFuncDecl :: Decl -> Either IRConversionError (IRFuncDecl, IRMetadata)
+convertFuncDecl (DFunc name params retType body) = do
+    traceM $ "\n=== Converting function: " ++ name
+    traceM $ "Parameters: " ++ show params
+    traceM $ "Return type: " ++ show retType
+
+    -- Convert parameters to IR types
+    let irParams = [(pname, convertType ptyp) | Param pname ptyp <- params]
+
+    -- Handle function body
+    case body of
+        Block scope -> do
+            -- Get the expressions from the scope
+            let bodyExprs = blockExprs scope
+
+            -- Convert each expression to IR statements
+            convertedStmts <- concat <$> mapM convertExprToStmts bodyExprs
+
+            -- Handle the return value
+            returnStmt <- case bodyExprs of
+                [] -> return [(IRReturn Nothing, mkMetadata (convertType retType) (S.singleton PureEffect))]
+                exprs -> do
+                    -- Convert last expression for return
+                    lastExpr <- convertToIRExpr (last exprs)
+                    return [(IRReturn (Just lastExpr), mkMetadata (convertType retType) (S.singleton PureEffect))]
+
+            let bodyBlock = IRBlock "function.entry" (convertedStmts ++ returnStmt)
+
+            return (IRFuncDecl
+                { fnName = name
+                , fnParams = irParams
+                , fnRetType = convertType retType
+                , fnBody = bodyBlock
+                }, mkMetadata (convertType retType) (S.singleton PureEffect))
+
+        _ -> Left $ IRUnsupportedExpr $ "Function body must be a block: " ++ show body
+
+-- Helper to convert expressions to IR statements
+convertExprToStmts :: Expr -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertExprToStmts expr = case expr of
+    BinOp op e1 e2 -> do
+        -- For binary operations that will be returned, don't generate a separate statement
+        case op of
+            Add -> return []  -- We'll handle this in the return statement
+            Sub -> return []
+            Mul -> return []
+            Div -> return []
+            _ -> do  -- For other ops like comparisons, keep generating statements
+                left <- convertToIRExpr e1
+                right <- convertToIRExpr e2
+                let stmt = IRStmtExpr $ IRCall (opToString op) [left, right]
+                return [(stmt, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+    Call "print" [arg] -> do
+        traceM $ "=== Converting print statement ==="
+        traceM $ "Input arg: " ++ show arg
+        converted <- convertToIRExpr arg
+        traceM $ "Converted arg: " ++ show converted
+        let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
+        let stmt = (IRProcCall "print" [converted], meta)
+        traceM $ "Generated statement: " ++ show stmt
+        return [stmt]
+    _ -> do
+        converted <- convertToIRExpr expr
+        return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+
+-- Helper to convert AST types to IR types
+convertType :: Type -> IRType
+convertType (TypeNum Int32) = IRTypeInt32
+convertType TypeVoid = IRTypeVoid
+convertType t = IRTypeInt  -- Default for now
+
+convertTops :: [TopLevel] -> Maybe LoopContext -> Either IRConversionError IRBlock
+convertTops tops ctx = do
+    stmts <- concat <$> mapM (\t -> convertTop t ctx) tops
     let returnStmt = (IRReturn Nothing, mkMetadata IRTypeVoid (S.singleton PureEffect))
     return $ IRBlock "main.entry" (stmts ++ [returnStmt])
 
-convertTop :: TopLevel -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertTop (TLExpr e) = (:[]) <$> convertExpr e
-convertTop _ = Right []
+convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertTop (TLExpr (If cond thenExpr (BoolLit False))) ctx = do
+    -- Generate labels for if block
+    let endLabel = "if_end"
 
-convertExpr :: Expr -> Either IRConversionError (IRStmt, IRMetadata)       
+    -- Convert condition
+    condExpr <- convertToIRExpr cond
+
+    -- We need to jump if false (negate condition)
+    let negatedCond = case condExpr of
+          IRCall "EqEq" [a, b] ->
+              -- x == y becomes !(x == y)
+              IRCall "Eq" [a, b]  -- Eq is our not-equal operator
+          _ -> IRCall "Eq" [condExpr, IRLit (IRIntLit 1)]  -- Other conditions: jump if == 0
+
+    -- Convert then block
+    thenStmts <- convertBlock thenExpr ctx
+
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+
+    -- Build if block:
+    -- if (!cond) goto end
+    -- <then statements>
+    -- end:
+    return $
+        [ (IRJumpIfZero negatedCond endLabel, meta)
+        ] ++
+        thenStmts ++
+        [ (IRLabel endLabel, meta)
+        ]
+convertTop (TLExpr (VarDecl name (NumLit _ val))) _ = do
+    let irType = IRTypeInt32
+    let initExpr = IRLit (IRIntLit (read val))
+    let meta = mkMetadata irType (S.singleton WriteEffect)
+    return [(IRVarDecl name irType initExpr, meta)]
+
+convertTop (TLExpr (While cond body)) prevCtx = do
+    -- Generate next loop number based on previous context
+    let nextNum = case prevCtx of
+          Just ctx -> loopNumber ctx + 1
+          Nothing -> 0
+
+    -- Generate unique labels using loop number
+    let startLabel = "while_" ++ show nextNum ++ "_start"
+    let endLabel = "while_" ++ show nextNum ++ "_end"
+    let ctx = LoopContext nextNum endLabel
+
+    -- Convert condition and body with new context
+    condExpr <- convertToIRExpr cond
+    bodyStmts <- convertBlock body (Just ctx)
+
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    return $
+        [ (IRLabel startLabel, meta)
+        , (IRJumpIfZero condExpr endLabel, meta)
+        ] ++
+        bodyStmts ++
+        [ (IRGoto startLabel, meta)
+        , (IRLabel endLabel, meta)
+        ]
+
+convertTop (TLExpr (Break _)) Nothing =
+    Left $ IRError "Break statement outside loop"
+convertTop (TLExpr (Break _)) (Just ctx) = do
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    return [(IRGoto (loopEndLabel ctx), meta)]
+
+convertTop (TLExpr (Assign name expr)) _ = do
+    convertedExpr <- convertToIRExpr expr
+    let meta = mkMetadata IRTypeVoid (S.singleton WriteEffect)
+    return [(IRAssign name convertedExpr, meta)]
+
+convertTop (TLExpr (AssignOp name op expr)) _ = do
+    convertedExpr <- convertToIRExpr expr
+    let meta = mkMetadata IRTypeVoid (S.singleton WriteEffect)
+    return [(IRAssignOp name op convertedExpr, meta)]
+
+convertTop (TLExpr e) ctx = (:[]) <$> convertExpr e
+
+convertBlock :: Expr -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertBlock (Block scope) ctx = do
+    -- Convert each expression in block with context
+    stmtsLists <- mapM (\e -> convertTop (TLExpr e) ctx) (blockExprs scope)
+    return $ concat stmtsLists
+convertBlock expr _ = do
+    -- Single expression blocks
+    converted <- convertExpr expr
+    return [converted]
+
+convertExpr :: Expr -> Either IRConversionError (IRStmt, IRMetadata)
 convertExpr (Call "print" [arg]) = do
-    -- For numeric expressions, convert the expression itself
+    traceM $ "Converting print expression with arg: " ++ show arg
     case arg of
         BinOp op e1 e2 | op `elem` [Add, Mul] -> do
-            left <- convertLiteral e1
-            right <- convertLiteral e2
+            left <- convertToLiteral e1
+            right <- convertToLiteral e2
             result <- evalBinOp op left right
-            let stmt = IRStmtExpr $ IRCall "print" [result]
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
-            return (stmt, meta)
+            return (IRProcCall "print" [IRLit result], meta)  -- Changed to IRProcCall
+        Call fname args -> do
+            convertedArgs <- mapM convertToIRExpr args
+            let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
+            return (IRProcCall "print" [IRCall fname convertedArgs], meta)  -- Changed to IRProcCall
         _ -> do
             -- Original string literal case
-            lit <- convertLiteral arg
-            let stmt = IRStmtExpr $ IRCall "print" [lit]
+            lit <- convertToLiteral arg
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
-            return (stmt, meta)
+            return (IRProcCall "print" [IRLit lit], meta)  -- Changed to IRProcCall
 
 convertExpr (Call "print" _) =
     Left $ IRInvalidFunction "print requires exactly one argument"
@@ -140,383 +364,100 @@ convertExpr e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 -- Helper to evaluate binary operations at compile time
 evalBinOp :: Op -> IRLiteral -> IRLiteral -> Either IRConversionError IRLiteral
 evalBinOp Add (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (x + y)
+evalBinOp Sub (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (x - y)
 evalBinOp Mul (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (x * y)
+evalBinOp Div (IRIntLit x) (IRIntLit y)
+  | y == 0 = Left $ IRUnsupportedLiteral "Division by zero"
+  | otherwise = Right $ IRIntLit (x `div` y)
+evalBinOp Lt (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (if x < y then 1 else 0)
+evalBinOp Gt (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (if x > y then 1 else 0)
+evalBinOp EqEq (IRIntLit x) (IRIntLit y) = Right $ IRIntLit (if x == y then 1 else 0)
 evalBinOp op _ _ = Left $ IRUnsupportedLiteral $ "Unsupported operator: " ++ show op
 
-convertLiteral :: Expr -> Either IRConversionError IRLiteral
-convertLiteral (StrLit s) = Right $ IRStringLit s
-convertLiteral (NumLit _ n) = Right $ IRIntLit (read n)
-convertLiteral (BinOp op e1 e2) = do
-    left <- convertLiteral e1
-    right <- convertLiteral e2
+-- Helper to convert expressions to literals
+convertToLiteral :: Expr -> Either IRConversionError IRLiteral
+convertToLiteral (StrLit s) = Right $ IRStringLit s
+convertToLiteral (NumLit _ n) = Right $ IRIntLit (read n)
+convertToLiteral (BinOp op e1 e2) = do
+    left <- convertToLiteral e1
+    right <- convertToLiteral e2
     evalBinOp op left right
-convertLiteral e = Left $ IRUnsupportedLiteral $ "Unsupported literal: " ++ show e
+convertToLiteral (Var name) = Right $ IRVarRef name
+convertToLiteral e = Left $ IRUnsupportedLiteral $ "Unsupported literal: " ++ show e
 
--- {-# LANGUAGE OverloadedStrings #- }
--- {-# LANGUAGE LambdaCase #-}
--- module Zap.IR
---   ( IR(..)
---   , IRBasicBlock(..)
---   , IRError(..)
---   , IRExpr(..)
---   , IRSeq(..)
---   , IRStmt(..)
---   , validateBasicBlock
---   , validateSeq
---   ) where
+-- Helper to convert expressions to IR
+convertToIRExpr :: Expr -> Either IRConversionError IRExpr
+convertToIRExpr (NumLit _ val) = Right $ IRLit (IRIntLit (read val))
+convertToIRExpr (Var name) = Right $ IRVar name
+convertToIRExpr (Call fname args) = do
+    -- Convert each argument to IR
+    convertedArgs <- mapM convertToIRExpr args
+    Right $ IRCall fname convertedArgs
+convertToIRExpr (Block scope) = do
+    -- Handle last expression in block as result
+    case blockExprs scope of
+        [] -> Left $ IRError "Empty block"
+        exprs -> convertToIRExpr (last exprs)
+convertToIRExpr (BinOp op e1 e2) = do
+    left <- convertToIRExpr e1
+    right <- convertToIRExpr e2
+    Right $ IRCall (opToString op) [left, right]
+convertToIRExpr e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 
--- import Data.Array ((!))
--- import Data.Maybe (mapMaybe)
--- import Control.Applicative ((<|>))
--- import Control.Monad (foldM, foldM_, forM_, unless, when)
--- import Control.Monad.Except
--- import qualified Data.Graph as G
--- import qualified Data.Map.Strict as M
--- import qualified Data.Set as S
--- import qualified Data.Text as T
--- import Debug.Trace
+-- Helper for operator conversion
+opToString :: Op -> String
+opToString Add = "Add"
+opToString Sub = "Sub"
+opToString Mul = "Mul"
+opToString Div = "Div"
+opToString Lt = "Lt"
+opToString Gt = "Gt"
+opToString EqEq = "EqEq"
+opToString op = error $ "Unsupported operator: " ++ show op
 
--- import Zap.AST
+-- | Generate constraints from IR program
+generateConstraints :: IRProgram -> Either TypeError [TypeConstraint]
+generateConstraints (IRProgram funcs) = do
+  concat <$> mapM genFuncConstraints funcs
+  where
+    genFuncConstraints :: (IRFuncDecl, IRMetadata) -> Either TypeError [TypeConstraint]
+    genFuncConstraints (func, _) = do
+      -- Generate constraints from function body
+      bodyConstraints <- genBlockConstraints (fnBody func)
 
--- data IRNumType
---   = IRInt32
---   | IRInt64
---   | IRFloat32
---   | IRFloat64
---   deriving (Eq, Show, Ord)
+      -- Add constraint for return type
+      let retConstraint = TEq (fnRetType func) (IRTypeInt) -- For now, assuming int return
 
--- data IRVecType
---   = IRVec2 IRNumType
---   | IRVec3 IRNumType
---   | IRVec4 IRNumType
---   deriving (Eq, Show, Ord)
+      -- Add constraints for parameters
+      let paramConstraints = map (\(_, t) -> TEq t IRTypeInt) (fnParams func)
 
--- data IRType
---   = IRTypeNum IRNumType
---   | IRTypeVec IRVecType
---   | IRTypeString
---   | IRTypeBool
---   | IRTypeStruct T.Text [(T.Text, IRType)]
---   | IRTypeArray IRType
---   | IRTypeVoid
---   | IRTypeAny
---   deriving (Eq, Show)
+      return $ retConstraint : paramConstraints ++ bodyConstraints
 
--- data IROp
---   = IRAdd
---   | IRSub
---   | IRMul
---   | IRDiv
---   | IRDot
---   | IRCross
---   | IRLt
---   | IRGt
---   | IREq
---   | IRAddAssign
---   deriving (Show, Eq, Ord)
+genBlockConstraints :: IRBlock -> Either TypeError [TypeConstraint]
+genBlockConstraints (IRBlock _ stmts) =
+  concat <$> mapM genStmtConstraints stmts
 
--- -- | Effects that expressions can have
--- data Effect
---   = ReadEffect      -- Reads from variables
---   | WriteEffect     -- Writes to variables
---   | IOEffect        -- Performs IO
---   | PureEffect      -- Has no effects
---   deriving (Eq, Ord, Show)
+genStmtConstraints :: (IRStmt, IRMetadata) -> Either TypeError [TypeConstraint]
+genStmtConstraints (stmt, _) = case stmt of
+  IRStmtExpr expr -> genExprConstraints expr
+  IRReturn mexpr -> case mexpr of
+    Just expr -> genExprConstraints expr
+    Nothing -> return []
 
--- -- | Expression metadata
--- data IRExprMetadata = IRExprMetadata
---   { exprType :: IRType             -- Type of the expression
---   , metaEffects :: S.Set Effect    -- Effects this expression may have
---   , metaSourcePos :: Maybe (Int, Int)  -- Source line and column if available
---   } deriving (Eq, Show)
+genExprConstraints :: IRExpr -> Either TypeError [TypeConstraint]
+genExprConstraints (IRCall name args) = do
+    let argConstraints = map exprType args
+    return $ map (\t -> TEq t IRTypeInt) argConstraints
+  where
+    exprType :: IRExpr -> IRType
+    exprType (IRLit lit) = literalType lit
+    exprType (IRVar _) = IRTypeInt
+    exprType (IRCall _ _) = IRTypeInt
 
--- data IRExprNode
---   = IRConst IRType T.Text        -- Constants (numbers, strings)
---   | IRVar T.Text                 -- Variable references
---   | IRBinOp IROp IRExpr IRExpr  -- Binary operations
---   | IRCall T.Text [IRExpr]      -- Function calls
---   | IRFieldAccess IRExpr T.Text -- Struct field access
---   | IRIndex IRExpr IRExpr       -- Array indexing
---   deriving (Show, Eq)
+literalType :: IRLiteral -> IRType
+literalType (IRIntLit _) = IRTypeInt
+literalType (IRStringLit _) = IRTypeString
 
--- data IRExpr = IRExpr
---   { metadata :: IRExprMetadata
---   , expr :: IRExprNode
---   } deriving (Show, Eq)
-
--- type Label = T.Text
-
--- data IR = IR
---   { blocks :: [IRBasicBlock] -- Basic blocks including "main"
---   } deriving (Show, Eq)
-
--- data IRStmt
---   = IRLabel Label
---   | IRJump Label
---   | IRCondJump IRExpr Label Label
---   | IRExprStmt IRExpr
---   | IRAssign T.Text IRExpr
---   | IRVarDecl T.Text IRType (Maybe IRExpr)
---   | IRBlockParams [(T.Text, IRType)]
---   | IRBreakStmt Label
---   deriving (Show, Eq)
-
--- data IRBasicBlock = IRBasicBlock
---   { blockName :: T.Text
---   , blockStmts :: [IRStmt]
---   } deriving (Show, Eq)
-
--- data IRSeq = IRSeq
---   { seqBlocks :: [IRBasicBlock]
---   } deriving (Show, Eq)
-
--- data IRError
---   -- Function validation errors
---   = TypeMismatch IRType IRType
---   | MissingReturn
---   | InvalidReturn
---   -- Block validation errors
---   | EmptyBasicBlock T.Text
---   | InvalidTerminator T.Text IRStmt
---   -- Seq validation errors
---   | DisconnectedFlow T.Text
---   | UnreachableBlock T.Text
---   | DuplicateLabel T.Text
---   -- Declaration validation errors
---   | UndeclaredVariable T.Text
---   -- Loop validation errors
---   | UnmodifiedLoopVar T.Text
---   deriving (Show, Eq)
-
--- -- Scope tracking for validation
--- data Scope = Scope
---   { scopeVars :: M.Map T.Text IRType
---   , parentScope :: Maybe Scope
---   , modifiedVars :: S.Set T.Text
---   } deriving (Show, Eq)
-
--- data ValidationMode = Strict | Permissive
---   deriving (Show, Eq)
-
--- validateBasicBlockStmt :: Scope -> IRStmt -> Either IRError Scope
--- validateBasicBlockStmt scope = \case
---   IRAssign var expr -> do
---     let exprType' = exprType $ metadata expr
---     case lookupVar var scope of
---       Just varType ->
---         if exprType' /= varType
---           then Left $ TypeMismatch varType exprType'
---           else return scope
---       -- Implicitly add undeclared variables in basic block validation
---       Nothing -> return $ scope { scopeVars = M.insert var exprType' (scopeVars scope) }
-
---   stmt -> validateStmtWithScope scope stmt
-
--- validateBasicBlock :: IRBasicBlock -> Either IRError ()
--- validateBasicBlock (IRBasicBlock name stmts) = do
---   when (null stmts) $ Left $ EmptyBasicBlock name
-
---   -- Validate each statement with scope tracking
---   let initialScope = Scope M.empty Nothing S.empty
---   _ <- foldM validateBasicBlockStmt initialScope stmts
-
---   -- Validate terminator
---   case lastMaybe stmts of
---     Nothing -> Left $ EmptyBasicBlock name
---     Just stmt -> case stmt of
---       IRJump _ -> Right ()
---       IRCondJump {} -> Right ()
---       IRBreakStmt _ -> Right ()
---       other -> Left $ InvalidTerminator name other
-
--- -- Helper for safe last element
--- lastMaybe :: [a] -> Maybe a
--- lastMaybe [] = Nothing
--- lastMaybe xs = Just $ last xs
-
--- -- | Validate a sequence of basic blocks
--- validateSeq :: IRSeq -> Either IRError ()
--- validateSeq (IRSeq blocks) = do
---   -- First validate individual blocks
---   mapM_ (either (error . show) return . validateBasicBlock) blocks
-
---   -- Build sets of defined labels and jump targets
---   let blockLabels = S.fromList $ map blockName blocks
---       jumpTargets = S.fromList $ concatMap getJumpTargets blocks
-
---   -- Check for jumps to non-existent blocks
---   case S.toList $ S.difference jumpTargets blockLabels of
---     (missing:_) -> Left $ DisconnectedFlow missing
---     [] -> do
---       -- Check for unreachable blocks
---       case findUnreachableBlocks blocks of
---         (unreachable:_) -> Left $ UnreachableBlock (blockName unreachable)
---         [] -> Right ()
-
--- -- | Get all jump targets from a block
--- getJumpTargets :: IRBasicBlock -> [T.Text]
--- getJumpTargets block = mapMaybe getTarget (blockStmts block)
---   where
---     getTarget :: IRStmt -> Maybe T.Text
---     getTarget (IRJump target) = Just target
---     getTarget (IRCondJump _ thn els) = Just thn <> Just els
---     getTarget (IRBreakStmt target) = Just target
---     getTarget _ = Nothing
-
--- -- | Build a directed graph representing control flow
--- buildFlowGraph :: [IRBasicBlock] -> (G.Graph, G.Vertex -> ((), T.Text, [T.Text]), T.Text -> Maybe G.Vertex)
--- buildFlowGraph blocks = G.graphFromEdges edges
---   where
---     edges = [((), name, getJumpTargets block) | block@(IRBasicBlock name _) <- blocks]
-
--- -- | Find blocks that can't be reached from entry
--- findUnreachableBlocks :: [IRBasicBlock] -> [IRBasicBlock]
--- findUnreachableBlocks blocks =
---   case blocks of
---     [] -> []
---     (entry:_) -> -- Assume first block is entry
---       let (graph, nodeFromVertex, vertexFromKey) = buildFlowGraph blocks
---           entryVertex = case vertexFromKey (blockName entry) of
---                          Just v -> v
---                          Nothing -> error "Entry block not found in graph"
---           reachable = S.fromList $ G.reachable graph entryVertex
---           allVertices = S.fromList [0..length blocks - 1]
---           unreachableVertices = S.difference allVertices reachable
---       in [block | v <- S.toList unreachableVertices,
---                  let (_, name, _) = nodeFromVertex v,
---                  block <- blocks,
---                  blockName block == name]
-
--- validateSeqWithScope :: Scope -> IRSeq -> Either IRError ()
--- validateSeqWithScope scope (IRSeq blocks) = do
---   -- Validate blocks while tracking scope
---   foldM_ validateBlockWithScope scope blocks
---   where
---     validateBlockWithScope :: Scope -> IRBasicBlock -> Either IRError Scope
---     validateBlockWithScope scope block = do
---       let stmts = blockStmts block
---       foldM validateStmtWithScope scope stmts
-
-
-
--- validateStmtWithScope :: Scope -> IRStmt -> Either IRError Scope
--- validateStmtWithScope scope = do
---   traceM $ "\n=== Validating Statement With Scope ==="
---   \case
---     IRVarDecl name typ mInit -> do
---       traceM $ "\n=== Validating Variable Declaration ==="
---       traceM $ "Declaring: " ++ show name ++ " : " ++ show typ
---       traceM $ "Current scope: " ++ show scope
---       -- Check initialization type matches declaration
---       forM_ mInit $ \init -> do
---         let initType = exprType $ metadata init
---         when (initType /= typ) $
---           Left $ TypeMismatch typ initType
-
---       -- Add variable to scope
---       return $ scope { scopeVars = M.insert name typ (scopeVars scope) }
-
---     IRAssign var expr -> do
---       traceM $ "\n=== Validating Assignment Statement ==="
---       let exprType' = exprType $ metadata expr
---       -- If variable is declared, check type matches
---       case lookupVar var scope of
---         Just varType ->
---           if exprType' /= varType
---             then Left $ TypeMismatch varType exprType'
---             else return $ scope { modifiedVars = S.insert var (modifiedVars scope) }
---         -- Reject undeclared variables in function validation
---         Nothing -> Left $ UndeclaredVariable var
-
---     IRBreakStmt _ -> do
---       traceM "Validating break statement"
---       return scope  -- Break statements don't affect scope
-
---     _ -> do
---       traceM $ "\n=== Validating Unrecognized Statement ==="
---       traceM $ "Current scope: " ++ show scope
---       return scope
-
--- -- Helper to collect variable references from expressions
--- collectVarRefs :: IRExpr -> S.Set T.Text
--- collectVarRefs (IRExpr _ node) = case node of
---   IRVar name -> S.singleton name
---   IRBinOp _ e1 e2 -> collectVarRefs e1 `S.union` collectVarRefs e2
---   _ -> S.empty
-
--- -- Helper for expression scope validation
--- validateExprScope :: Scope -> IRExpr -> Either IRError IRExpr
--- validateExprScope scope expr@(IRExpr meta node) = case node of
---     IRVar name -> do
---         traceM $ "Checking variable " ++ show name ++ " in scope"
---         case M.lookup name (scopeVars scope) of
---             Just varType -> do
---                 -- Return expr with correct type from scope
---                 return $ IRExpr meta { exprType = varType } node
---             Nothing -> throwError $ UndeclaredVariable name
-
---     IRBinOp op e1 e2 -> do
---         e1' <- validateExprScope scope e1
---         e2' <- validateExprScope scope e2
---         -- Return expr with validated subexpressions
---         return $ IRExpr meta (IRBinOp op e1' e2')
-
---     _ -> return expr
-
--- -- Helper to look up variable in scope chain
--- lookupVar :: T.Text -> Scope -> Maybe IRType
--- lookupVar name scope =
---   M.lookup name (scopeVars scope) <|>
---   (parentScope scope >>= lookupVar name)
-
--- -- New conversion function
--- convertToIR' :: Program -> Either IRError IR
--- convertToIR' (Program tops) = do
---     -- Convert top-level expressions to statements in main block
---     mainStmts <- concat <$> mapM convertTopLevelToStmt tops
-
---     -- Create main block
---     let mainBlock = IRBasicBlock
---           { blockName = "main"
---           , blockStmts = mainStmts
---           }
-
---     -- Return IR with just main block for now
---     return $ IR [mainBlock]
-
--- convertTopLevelToStmt :: TopLevel -> Either IRError [IRStmt]
--- convertTopLevelToStmt (TLExpr e) = convertExprToStmts e
--- convertTopLevelToStmt _ = Right [] -- Ignore other top-level constructs for now
-
--- convertExprToStmts :: Expr -> Either IRError [IRStmt]
--- convertExprToStmts expr = case expr of
---     -- Convert any expression to a statement by wrapping it
---     expr -> do
---         irExpr <- convertToIRExpr expr
---         return [IRExprStmt irExpr]
-
--- convertToIRExpr :: Expr -> Either IRError IRExpr
--- convertToIRExpr expr = case expr of
---     StrLit s -> Right $ IRExpr
---         { metadata = IRExprMetadata
---             { exprType = IRTypeString
---             , metaEffects = S.singleton PureEffect
---             , metaSourcePos = Nothing
---             }
---         , expr = IRString (T.pack s)
---         }
---     Call name args -> do
---         -- Convert each argument
---         irArgs <- mapM convertToIRExpr args
---         let effects = if name == "print"
---                      then S.singleton IOEffect
---                      else S.singleton PureEffect
---         Right $ IRExpr
---             { metadata = IRExprMetadata
---                 { exprType = IRTypeVoid  -- print returns void
---                 , metaEffects = effects
---                 , metaSourcePos = Nothing
---                 }
---             , expr = IRCall (T.pack name) irArgs
---             }
---     _ -> Left $ ConversionError "Unsupported expression type"
+-- | Solve type constraints
+solveConstraints :: [TypeConstraint] -> Either TypeError TypeSubst
+solveConstraints = undefined -- TODO: Implement Robinson's algorithm

@@ -78,17 +78,27 @@ checkBlockIndent bt bi = do
     case stateTokens st of
         (tok:_) -> do
             let tokCol = locCol tok
-            traceM $ "Checking " ++ show bt ++
-                    " indent: token col " ++ show tokCol ++
-                    " against base " ++ show bi
-            case bt of
-                TopLevel -> return ()
-                BasicBlock -> when (tokCol < bi) $
-                    throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
-                FunctionBlock -> do
-                    -- Special case - allow dedenting to top level after function
-                    when (tokCol > 1 && tokCol < bi) $
-                        throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
+            traceM $ "=== checkBlockIndent ==="
+            traceM $ "Block type: " ++ show bt
+            traceM $ "Base indent: " ++ show bi
+            traceM $ "Token column: " ++ show tokCol
+            traceM $ "Token: " ++ show (locToken tok)
+            case locToken tok of
+                TEOF -> return ()
+                _ -> case bt of
+                    TopLevel -> return ()
+                    BasicBlock -> do
+                        traceM $ "Checking BasicBlock indent: " ++ show tokCol ++ " vs " ++ show bi
+                        if tokCol < bi
+                            then do
+                                -- Found dedent - this is valid block termination
+                                traceM $ "Found block termination dedent"
+                                modify $ \s -> s { stateIndent = tokCol }  -- Set new base indent
+                                return ()
+                            else return ()
+                    FunctionBlock -> do
+                        when (tokCol > 1 && tokCol < bi) $
+                            throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
         [] -> return ()
 
 -- | Get the next token if it matches
