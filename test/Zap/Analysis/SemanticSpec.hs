@@ -66,11 +66,11 @@ spec = do
 
     describe "String Literals" $ do
       it "rejects empty string literals" $ do
-        let ast = Program [TLExpr $ StrLit ""]
+        let ast = Program [TLExpr $ Lit (StringLit "")]
         analyze ast `shouldBe` Left EmptyStringLiteral
 
       it "accepts non-empty string literals" $ do
-        let ast = Program [TLExpr $ StrLit "hello"]
+        let ast = Program [TLExpr $ Lit (StringLit "hello")]
         analyze ast `shouldBe` Right ast
 
     describe "Field Access" $ do
@@ -99,7 +99,7 @@ spec = do
 
     describe "Built-in Functions" $ do
       it "allows print with any argument" $ do
-        let ast = Program [TLExpr $ Call "print" [StrLit "hello"]]
+        let ast = Program [TLExpr $ Call "print" [Lit (StringLit "hello")]]
         analyze ast `shouldBe` Right ast
 
       it "validates print arity" $ do

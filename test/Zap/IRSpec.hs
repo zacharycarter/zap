@@ -14,7 +14,7 @@ spec = do
   describe "IR Conversion" $ do
     describe "Basic Program Structure" $ do
       it "creates a main function for top-level expressions" $ do
-        let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+        let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
         case convertToIR' ast of
           Right (IRProgram funcs) -> do
             length funcs `shouldBe` 1
@@ -29,7 +29,7 @@ spec = do
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       it "adds implicit return to main block" $ do
-        let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+        let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
         case convertToIR' ast of
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
@@ -57,7 +57,7 @@ spec = do
 
     describe "IR Metadata" $ do
       it "tracks IOEffect for print statements" $ do
-        let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+        let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
         case convertToIR' ast of
           Right (IRProgram [(mainFn, fnMeta)]) -> do
             -- Test function metadata
@@ -117,7 +117,7 @@ spec = do
 
     describe "Print statement conversion" $ do
       it "converts string literal print to procedure call" $ do
-          let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+          let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
           case convertToIR' ast of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
@@ -134,7 +134,7 @@ spec = do
                       (IRProcCall "print" [IRLit (IRInt32Lit 3)], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
     it "converts print to procedure call" $ do
-      let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+      let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
       case convertToIR' ast of
         Right (IRProgram [(mainFn, _)]) -> do
           let IRBlock _ stmts = fnBody mainFn
@@ -144,7 +144,7 @@ spec = do
 
     describe "Print statement conversion" $ do
       it "converts string literal print to procedure call" $ do
-          let ast = Program [TLExpr (Call "print" [StrLit "test"])]
+          let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
           case convertToIR' ast of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn

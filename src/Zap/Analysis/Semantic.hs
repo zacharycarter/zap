@@ -84,7 +84,7 @@ checkExpr = \case
         checkExpr val  -- Check the initialization value
         (vars, funs, structs, blocks) <- get
         put (M.insert name TypeAny vars, funs, structs, blocks)
-
+   
     Call name args -> do
         -- Verify function exists and arity matches
         (_, funs, _, _) <- get
@@ -101,7 +101,7 @@ checkExpr = \case
         unless (M.member name vars) $
             throwError $ UndefinedVariable name
 
-    StrLit s -> when (null s) $ throwError EmptyStringLiteral
+    Lit (StringLit s) -> when (null s) $ throwError EmptyStringLiteral
 
     BinOp _ e1 e2 -> do
         checkExpr e1

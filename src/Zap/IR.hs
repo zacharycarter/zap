@@ -576,7 +576,6 @@ convertToLiteral expr = case expr of
                 Nothing -> Right $ IRFloat32Lit (read val)
         StringLit s -> Right $ IRStringLit s
         BooleanLit _ -> Left $ IRUnsupportedLiteral "Boolean literals not yet supported"
-    StrLit s -> Right $ IRStringLit s
     Var name -> Right $ IRVarRef name
     BinOp op e1 e2 -> do
         left <- convertToLiteral e1
@@ -594,7 +593,6 @@ convertToIRExpr (VarDecl name value) = do
     traceM $ "Converting variable declaration in expression: " ++ name
     convertedExpr <- convertToIRExpr value
     Right $ IRCall "var_decl" [IRLit (IRStringLit name), convertedExpr]
-convertToIRExpr (StrLit s) = Right $ IRLit $ IRStringLit s
 convertToIRExpr (Lit lit) = case lit of
   IntLit val mtype -> case mtype of
     Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)

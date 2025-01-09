@@ -403,7 +403,7 @@ parseBaseTerm = do
             TString s -> do
                 traceM $ "Found string literal: " ++ s
                 _ <- matchToken isStringLit "string literal"
-                return $ StrLit s
+                return $ Lit $ StringLit s
 
             TNumber n -> do
                 traceM $ "Found numeric literal: " ++ n
@@ -501,7 +501,7 @@ parseBasicExprImpl = do
         (tok:_) -> case locToken tok of
             TString s -> do
                 _ <- matchToken isStringLit "string literal"
-                return $ StrLit s
+                return $ Lit $ StringLit s
             TNumber n -> do
                 traceM $ "Found number token: " ++ n
                 _ <- matchToken isNumber "number"

@@ -15,7 +15,7 @@ spec = do
     it "parses traditional print syntax" $ do
       let input = "print \"Hello, World!\""
       case parseProgram input of
-        Right [TLExpr (Call "print" [StrLit str])] ->
+        Right [TLExpr (Call "print" [Lit (StringLit str)])] ->
           str `shouldBe` "Hello, World!"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -24,7 +24,7 @@ spec = do
     it "parses function-style print syntax" $ do
       let input = "print(\"Hello, World!\")"
       case parseProgram input of
-        Right [TLExpr (Call "print" [StrLit str])] ->
+        Right [TLExpr (Call "print" [Lit (StringLit str)])] ->
           str `shouldBe` "Hello, World!"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -47,7 +47,7 @@ spec = do
       case parseProgram input of
         Right [TLExpr (Block scope)] -> do
           blockLabel scope `shouldBe` "test"
-          blockExprs scope `shouldBe` [StrLit "Hello"]
+          blockExprs scope `shouldBe` [Lit (StringLit "Hello")]
           blockResult scope `shouldBe` Nothing
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -65,7 +65,7 @@ spec = do
           case blockExprs outerScope of
             (Block innerScope:_) -> do
               blockLabel innerScope `shouldBe` "inner"
-              blockExprs innerScope `shouldBe` [StrLit "Hello"]
+              blockExprs innerScope `shouldBe` [Lit (StringLit "Hello")]
             _ -> expectationFailure "Expected inner block"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -81,9 +81,9 @@ spec = do
             , "  print \"Second\""
             ]
       case parseProgram input of
-        Right [TLExpr (Call "print" [StrLit first]), TLExpr (Block scope)] -> do
+        Right [TLExpr (Call "print" [Lit (StringLit first)]), TLExpr (Block scope)] -> do
           first `shouldBe` "First"
-          blockExprs scope `shouldBe` [Call "print" [StrLit "Second"]]
+          blockExprs scope `shouldBe` [Call "print" [Lit (StringLit "Second")]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other

@@ -83,9 +83,7 @@ data Literal
   deriving (Show, Eq)
 
 data Expr
-  = VecLit VecType [Expr]      -- Vector literal with components
-  | StrLit String
-  | BoolLit Bool
+  = BoolLit Bool
   | Var String
   | Let String Expr
   | Block BlockScope
