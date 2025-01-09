@@ -98,7 +98,6 @@ data Expr
   | FieldAccess Expr String            -- Access struct field
   | ArrayLit Type [Expr]               -- Array literal
   | Index Expr Expr                    -- Array indexing
-  | VarLit String Expr
   | While Expr Expr  -- Condition and body expressions
   | VarDecl String Expr  -- Variable declaration with initial value
   | Assign String Expr -- Assignment operator
