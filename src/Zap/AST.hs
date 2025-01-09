@@ -49,7 +49,6 @@ data Op
   | And
   | Or
   | Dot
-  | AddAssign
   deriving (Show, Eq)
 
 data Param = Param String Type
