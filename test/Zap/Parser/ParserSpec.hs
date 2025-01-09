@@ -151,11 +151,8 @@ spec = do
       let input = "let x: i32 = 42"  -- Variable with explicit type annotation
       case parseProgram input of
         Right [TLExpr (Let "x" expr)] -> do
-          -- The NumLit type should match the declared type
+          -- The IntLit type should match the declared type
           case expr of
-            NumLit numType val -> do
-              numType `shouldBe` Int32
-              TypeNum numType `shouldBe` TypeNum Int32
             Lit (IntLit val numType) -> do
               numType `shouldBe` (Just Int32)
               val `shouldBe` "42"
@@ -167,9 +164,6 @@ spec = do
     it "infers consistent types for numeric literals" $ do
       let input = "42'i32"  -- Literal with type suffix
       case parseExprFromText input of
-        Right (NumLit numType val) -> do
-          numType `shouldBe` Int32
-          val `shouldBe` "42"
         Right (Lit (IntLit val numType)) -> do
           numType `shouldBe` (Just Int32)
           val `shouldBe` "42"
@@ -182,7 +176,6 @@ spec = do
       case parseProgram input of
         Right [first, second] -> do
           case first of
-            TLExpr (Let "x" (NumLit Int32 "42")) -> return ()  -- Accept old form
             TLExpr (Let "x" (Lit (IntLit "42" (Just Int32)))) -> return ()  -- Accept new form
             other -> expectationFailure $ "Unexpected first expr: " ++ show other
           second `shouldBe` TLExpr (Let "y" (Var "x"))

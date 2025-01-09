@@ -18,7 +18,7 @@ spec = do
 
       it "allows access to variables after declaration" $ do
         let ast = Program
-              [ TLExpr $ Let "x" (NumLit Int32 "1")
+              [ TLExpr $ Let "x" (Lit (IntLit "1" (Just Int32)))
               , TLExpr $ Var "x"
               ]
         analyze ast `shouldBe` Right ast
@@ -78,7 +78,7 @@ spec = do
         let ast = Program
               [ TLExpr $ FieldAccess
                   (Call "Vec2"
-                    [NumLit Float32 "1.0", NumLit Float32 "2.0"])
+                    [Lit (FloatLit "1.0" (Just Float32)), Lit (FloatLit "2.0" (Just Float32))])
                   "x"
               ]
         analyze ast `shouldBe` Right ast
@@ -88,9 +88,9 @@ spec = do
               [ TLExpr $ FieldAccess
                   (FieldAccess
                     (Call "Vec3"
-                      [ NumLit Float32 "1.0"
-                      , NumLit Float32 "2.0"
-                      , NumLit Float32 "3.0"
+                      [ Lit (FloatLit "1.0" (Just Float32))
+                      , Lit (FloatLit "2.0" (Just Float32))
+                      , Lit (FloatLit "3.0" (Just Float32))
                       ])
                     "x")
                   "y"

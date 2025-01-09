@@ -409,8 +409,8 @@ parseBaseTerm = do
                 traceM $ "Found numeric literal: " ++ n
                 _ <- matchToken isNumber "number"
                 if '.' `elem` n
-                    then return $ NumLit Float32 n
-                    else return $ NumLit Int32 n
+                    then return $ Lit (FloatLit n (Just Float32))
+                    else return $ Lit (IntLit n (Just Int32))
 
             TWord name | isValidName (locToken tok) -> do
                 traceM $ "Found identifier: " ++ name
@@ -514,12 +514,18 @@ parseBasicExprImpl = do
                         let typ = case locToken suffixTok of
                                 TTypeSuffix s -> parseNumType s
                                 _ -> error "Impossible: non-suffix token passed isTypeSuffix"
-                        return $ NumLit typ n
+                        case typ of
+                          Int32 -> return $ Lit (IntLit n (Just Int32))
+                          Int64 -> return $ Lit (IntLit n (Just Int64))
+                          Float32 -> return $ Lit (FloatLit n (Just Float32))
+                          Float64 -> return $ Lit (FloatLit n (Just Float64))
                     _ -> do
                         traceM "No type suffix found, defaulting to Int64/Float64"
                         -- Default to 64-bit types
                         let typ = if '.' `elem` n then Float64 else Int64
-                        return $ NumLit typ n
+                        case typ of
+                          Int64 -> return $ Lit (IntLit n (Just Int64))
+                          Float64 -> return $ Lit (FloatLit n (Just Float64))
             TVec vecTypeStr -> do
                 traceM $ "Parsing vector constructor: " ++ vecTypeStr
                 _ <- matchToken isVecConstructor "vector constructor"
@@ -576,16 +582,28 @@ parseSingleBindingLine = do
 
     -- If we have a type annotation, ensure value matches it
     case annotatedType of
-        Just (TypeNum expectedType) ->
-            case value of
-                NumLit actualType val ->
-                    if actualType == expectedType
-                        then return ()
-                        else throwError $ UnexpectedToken
-                            (Located (TNumber val) 0 0)  -- TODO: Better error position
-                            ("numeric literal of type " ++ show expectedType)
-                _ -> return ()  -- Allow other expressions for now
-        _ -> return ()
+      Just (TypeNum expectedType) ->
+        case value of
+            Lit (IntLit val mtype) -> -- Add support for new style int literals
+                case mtype of
+                    Just actualType ->
+                        if actualType == expectedType
+                            then return ()
+                            else throwError $ UnexpectedToken
+                                (Located (TNumber val) 0 0)
+                                ("integer literal of type " ++ show expectedType)
+                    Nothing -> return ()  -- Inferred type will be handled by convertToIR
+            Lit (FloatLit val mtype) -> -- Add support for new style float literals
+                case mtype of
+                    Just actualType ->
+                        if actualType == expectedType
+                            then return ()
+                            else throwError $ UnexpectedToken
+                                (Located (TNumber val) 0 0)
+                                ("float literal of type " ++ show expectedType)
+                    Nothing -> return ()  -- Inferred type will be handled by convertToIR
+            _ -> return ()  -- Allow other expressions for now
+      _ -> return ()
 
     case locToken nameTok of
         TWord varName -> do

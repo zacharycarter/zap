@@ -126,7 +126,7 @@ spec = do
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
 
       it "converts print with binary operation to procedure call" $ do
-          let ast = Program [TLExpr (Call "print" [BinOp Add (NumLit Int32 "1") (NumLit Int32 "2")])]
+          let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
           case convertToIR' ast of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
@@ -153,7 +153,7 @@ spec = do
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
 
       it "converts print with binary operation to procedure call" $ do
-          let ast = Program [TLExpr (Call "print" [BinOp Add (NumLit Int32 "1") (NumLit Int32 "2")])]
+          let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
           case convertToIR' ast of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
@@ -325,7 +325,7 @@ spec = do
       it "converts struct definitions to IR" $ do
         let ast = Program
               [ TLType "Point" (TypeStruct "Point" [("x", TypeNum Float32), ("y", TypeNum Float32)])
-              , TLExpr (Let "p" (StructLit "Point" [("x", NumLit Float32 "1.0"), ("y", NumLit Float32 "2.0")]))
+              , TLExpr (Let "p" (StructLit "Point" [("x", Lit (FloatLit "1.0" (Just Float32))), ("y", Lit (FloatLit "2.0" (Just Float32)))]))
               , TLExpr (Call "print" [FieldAccess (Var "p") "x"])
               ]
 
@@ -377,17 +377,6 @@ spec = do
                 IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
                   metaLiteralType meta `shouldBe` Just LitString
                 _ -> expectationFailure "Expected variable declaration"
-
-        it "handles both NumLit and Lit variants" $ do
-            let ast = Program
-                  [ TLExpr (Call "print" [NumLit Int32 "42"])  -- Old style
-                  , TLExpr (Call "print" [Lit (IntLit "42" (Just Int32))])  -- New style
-                  ]
-            case convertToIR' ast of
-                Right (IRProgram [(mainFn, _)]) -> do
-                    let IRBlock _ stmts = fnBody mainFn
-                    length stmts `shouldBe` 3  -- Two prints plus return
-                Left err -> expectationFailure $ show err
 
         it "preserves numeric types" $ do
             let ast = Program [TLExpr (Call "print" [Lit (FloatLit "3.14" (Just Float32))])]

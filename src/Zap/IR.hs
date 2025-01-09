@@ -324,10 +324,10 @@ convertExprToStmts expr = do
 
 -- Helper to determine IR type from expression
 typeFromExpr :: Expr -> IRType
-typeFromExpr (NumLit Float32 _) = IRTypeFloat32
-typeFromExpr (NumLit Float64 _) = IRTypeFloat64
-typeFromExpr (NumLit Int32 _) = IRTypeInt32
-typeFromExpr (NumLit Int64 _) = IRTypeInt64
+typeFromExpr (Lit (FloatLit _ (Just Float32))) = IRTypeFloat32
+typeFromExpr (Lit (FloatLit _ (Just Float64))) = IRTypeFloat64
+typeFromExpr (Lit (IntLit _ (Just Int32))) = IRTypeInt32
+typeFromExpr (Lit (IntLit _ (Just Int64))) = IRTypeInt64
 typeFromExpr (StructLit name fields) =
     IRTypeStruct name [(fname, typeFromExpr fexpr) | (fname, fexpr) <- fields]
 typeFromExpr _ = IRTypeVoid  -- Default case
@@ -558,11 +558,6 @@ evalBinOp op _ _ = Left $ IRUnsupportedLiteral $ "Unsupported operator: " ++ sho
 -- Helper to convert expressions to literals
 convertToLiteral :: Expr -> Either IRConversionError IRLiteral
 convertToLiteral expr = case expr of
-    NumLit numType val -> case numType of
-        Int32 -> Right $ IRInt32Lit (read val)
-        Int64 -> Right $ IRInt64Lit (read val)
-        Float32 -> Right $ IRFloat32Lit (read val)
-        Float64 -> Right $ IRFloat64Lit (read val)
     Lit lit -> case lit of
         IntLit val mtype ->
             case mtype of
@@ -618,11 +613,6 @@ convertToIRExpr (Lit lit) = case lit of
       Nothing -> Right $ IRLit $ IRFloat32Lit (read val)  -- Default choice
   StringLit val -> Right $ IRLit $ IRStringLit val
   -- BooleanLit val -> Right $ IRLit $ IRBoolLit val
-convertToIRExpr (NumLit numType val) = Right $ IRLit $ case numType of
-    Int32 -> IRInt32Lit (read val)
-    Int64 -> IRInt64Lit (read val)
-    Float32 -> IRFloat32Lit (read val)
-    Float64 -> IRFloat64Lit (read val)
 convertToIRExpr (Var name) = Right $ IRVar name
 convertToIRExpr (Call fname args) = do
     -- Convert each argument to IR

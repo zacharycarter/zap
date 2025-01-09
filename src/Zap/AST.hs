@@ -83,8 +83,7 @@ data Literal
   deriving (Show, Eq)
 
 data Expr
-  = NumLit NumType String      -- Store number as string to preserve precision
-  | VecLit VecType [Expr]      -- Vector literal with components
+  = VecLit VecType [Expr]      -- Vector literal with components
   | StrLit String
   | BoolLit Bool
   | Var String
