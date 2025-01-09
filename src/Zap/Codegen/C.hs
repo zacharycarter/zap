@@ -84,7 +84,9 @@ generateStmt (stmt, _) = case stmt of
     IRVarDecl name irType initExpr -> do
         exprCode <- generateExpr initExpr
         return $ T.concat ["    int ", T.pack name, " = ", exprCode, ";"]
-    IRStmtExpr expr -> generateExpr expr
+    IRStmtExpr expr -> do
+        exprCode <- generateExpr expr
+        return $ T.concat ["    ", exprCode, ";"]  -- Add semicolon here
     IRReturn Nothing -> return "    return 0;"
     IRReturn (Just expr) -> do
         exprCode <- generateExpr expr
@@ -103,26 +105,37 @@ generateStmt (stmt, _) = case stmt of
         return $ T.concat ["    ", T.pack name, " ", T.pack opStr, " ", exprCode, ";"]
     IRLabel label ->
         return $ T.concat [T.pack label, ":"]
-
     IRGoto label ->
         return $ T.concat ["    goto ", T.pack label, ";"]
-
+    IRJumpIfTrue cond label -> do
+        condCode <- generateExpr cond
+        return $ T.concat ["    if (", condCode, ") goto ", T.pack label, ";"]
     IRJumpIfZero cond label -> do
         condCode <- generateExpr cond
         return $ T.concat ["    if (!(", condCode, ")) goto ", T.pack label, ";"]
-
     IRProcCall "print" [expr] -> do
         (value, fmt) <- generatePrintExpr expr
         return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
     IRProcCall name _ ->
         Left $ UnsupportedOperation $ T.pack $ "Unsupported procedure: " ++ name
 
+-- Helper to detect if a condition is already negated
+isNegatedCondition :: T.Text -> Bool
+isNegatedCondition cond =
+    "!(" `T.isPrefixOf` cond && ")" `T.isSuffixOf` cond
+
+-- Helper to remove negation from a condition
+unnegateCondition :: T.Text -> T.Text
+unnegateCondition cond =
+    let inner = T.drop 2 $ T.dropEnd 1 cond -- Remove "!(" and ")"
+    in inner
+
 -- Helper for generating literal values
 generateLiteral :: IRLiteral -> T.Text
-generateLiteral (IRInt32Lit n) = T.pack $ show n ++ "i32"  -- Add explicit type
-generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"    -- C long suffix
-generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")  -- Add f suffix for float literals
-generateLiteral (IRFloat64Lit n) = T.pack (show n)         -- No suffix needed for doubles
+generateLiteral (IRInt32Lit n) = T.pack $ show n
+generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"  -- Use C long suffix
+generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")  -- Use C float suffix
+generateLiteral (IRFloat64Lit n) = T.pack $ show n
 generateLiteral (IRVarRef name) = T.pack name
 generateLiteral (IRStringLit s) = T.concat ["\"", T.pack s, "\""]
 
@@ -133,19 +146,18 @@ generateExpr (IRCall "print" [expr]) = do
 
 generateExpr (IRCall op [e1, e2]) = do
     -- Map operator strings to C operators
+    left <- generateExpr e1
+    right <- generateExpr e2
     let cOp = case op of
+          "Lt" -> "<"
+          "Gt" -> ">"
+          "Eq" -> "="
+          "EqEq" -> "=="
           "Add" -> "+"
           "Sub" -> "-"
           "Mul" -> "*"
           "Div" -> "/"
-          "Lt"  -> "<"
-          "Gt"  -> ">"
-          "Eq"  -> "=="
           _ -> error $ "Unsupported operator: " ++ op
-
-    -- Generate code for operands
-    left <- generateExpr e1
-    right <- generateExpr e2
     return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
 
 generateExpr (IRLit lit) = return $ generateLiteral lit
@@ -166,12 +178,28 @@ generatePrintExpr (IRLit (IRFloat32Lit n)) =
     Right (T.pack (show n), "%f")
 generatePrintExpr (IRLit (IRFloat64Lit n)) =
     Right (T.pack (show n), "%lf")
+generatePrintExpr (IRVar name) =
+    Right (T.pack name, "%d")  -- Default to int format
 generatePrintExpr (IRLit (IRVarRef name)) =
     Right (T.pack name, "%d")  -- Assuming variables are ints for now
-generatePrintExpr (IRCall fname args) = do
-    -- For function calls, generate the call and use int format
-    argCode <- mapM generateExpr args
-    let call = T.concat [T.pack fname, "(", T.intercalate ", " argCode, ")"]
-    Right (call, "%d")
+generatePrintExpr (IRCall op [e1, e2]) = case op of
+    "Lt" -> do
+        left <- generateExpr e1
+        right <- generateExpr e2
+        Right (T.concat ["((", left, ") < (", right, ") ? 1 : 0)"], "%d")
+    "Gt" -> do
+        left <- generateExpr e1
+        right <- generateExpr e2
+        Right (T.concat ["((", left, ") > (", right, ") ? 1 : 0)"], "%d")
+    "EqEq" -> do
+        left <- generateExpr e1
+        right <- generateExpr e2
+        Right (T.concat ["((", left, ") == (", right, ") ? 1 : 0)"], "%d")
+    _ -> do
+        -- For other function calls, fall back to default behavior
+        argCode <- mapM generateExpr [e1, e2]
+        let call = T.concat [T.pack op, "(", T.intercalate ", " argCode, ")"]
+        Right (call, "%d")
 generatePrintExpr expr =
-    Left $ UnsupportedOperation $ T.pack $ "Unsupported print expression: " <> show expr
+    -- Handle other expressions by generating them normally
+    generateExpr expr >>= \exprCode -> Right (exprCode, "%d")

@@ -318,16 +318,30 @@ parseTerm expectedType = do
                             let typ = case locToken suffixTok of
                                     TTypeSuffix s -> parseNumType s
                                     _ -> error "Impossible: non-suffix token passed isTypeSuffix"
-                            traceM $ "Parsed number with type: " ++ show typ
-                            parseFieldOrCallChain (NumLit typ n)
+                            traceM $ "Parsed number with suffix type: " ++ show typ
+                            buildNumericLiteral typ n
+
                         _ -> do
-                            traceM "No type suffix found."
-                            -- Use expected type if available, otherwise default
+                            traceM "No type suffix found, checking expected type"
+                            -- Use expected type if available, otherwise infer
+                            let inferredType = if '.' `elem` n
+                                             then Float64
+                                             else Int64
                             let typ = case expectedType of
                                   Just (TypeNum t) -> t
-                                  _ -> if '.' `elem` n then Float64 else Int64
+                                  _ -> inferredType
                             traceM $ "Using type: " ++ show typ
-                            parseFieldOrCallChain (NumLit typ n)
+                            buildNumericLiteral typ n
+                    where
+                      buildNumericLiteral :: NumType -> String -> Parser Expr
+                      buildNumericLiteral typ val = do
+                          traceM $ "Building numeric literal with type " ++ show typ
+                          let expr = case typ of
+                                  Float32 -> Lit (FloatLit val (Just Float32))
+                                  Float64 -> Lit (FloatLit val (Just Float64))
+                                  Int32 -> Lit (IntLit val (Just Int32))
+                                  Int64 -> Lit (IntLit val (Just Int64))
+                          parseFieldOrCallChain expr
                 TLeftParen -> do
                     traceM "Found opening parenthesis"
                     _ <- matchToken (== TLeftParen) "("
@@ -343,6 +357,13 @@ parseTerm expectedType = do
                 TWord "var" -> parseVarDecl
                 _ -> parseBaseTerm >>= parseFieldAccess
         [] -> throwError $ EndOfInput "term"
+
+createNumericLiteral :: NumType -> String -> Expr
+createNumericLiteral typ val = case typ of
+    Float32 -> Lit (FloatLit val (Just Float32))
+    Float64 -> Lit (FloatLit val (Just Float64))
+    Int32 -> Lit (IntLit val (Just Int32))
+    Int64 -> Lit (IntLit val (Just Int64))
 
 parseFieldOrCallChain :: Expr -> Parser Expr
 parseFieldOrCallChain expr = do

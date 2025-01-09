@@ -85,6 +85,7 @@ data IRStmt
   | IRAssignOp String Op IRExpr  -- Compound assignment
   | IRLabel String          -- Label definition
   | IRGoto String          -- Unconditional jump
+  | IRJumpIfTrue IRExpr String
   | IRJumpIfZero IRExpr String  -- Conditional jump if expr is zero
   | IRProcCall String [IRExpr]
   deriving (Show, Eq)
@@ -263,10 +264,24 @@ convertExprToStmts expr = do
             convertedExpr <- convertToIRExpr val
             -- Extract literal type from value if present
             let meta = case val of
-                  Lit (IntLit _) ->
-                    mkLiteralMetadata IRTypeInt32 (S.singleton WriteEffect) (LitInt Int32)
-                  Lit (FloatLit _) ->
-                    mkLiteralMetadata IRTypeFloat32 (S.singleton WriteEffect) (LitFloat Float32)
+                  Lit (IntLit _ mtype) ->
+                    let irType = case mtype of
+                            Just Int32 -> IRTypeInt32
+                            Just Int64 -> IRTypeInt64
+                            Nothing -> IRTypeInt32  -- Default
+                        litType = case mtype of
+                            Just nt -> LitInt nt
+                            Nothing -> LitInt Int32
+                    in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+                  Lit (FloatLit _ mtype) ->
+                    let irType = case mtype of
+                            Just Float32 -> IRTypeFloat32
+                            Just Float64 -> IRTypeFloat64
+                            Nothing -> IRTypeFloat32
+                        litType = case mtype of
+                            Just nt -> LitFloat nt
+                            Nothing -> LitFloat Float32
+                    in mkLiteralMetadata irType (S.singleton WriteEffect) litType
                   Lit (StringLit _) ->
                     mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
                   _ ->
@@ -282,17 +297,18 @@ convertExprToStmts expr = do
             traceM $ "Created statement: " ++ show stmt
             return [(IRVarDecl name irType convertedExpr, meta)]
         BinOp op e1 e2 -> do
-            -- For binary operations that will be returned, don't generate a separate statement
-            case op of
-                Add -> return []  -- We'll handle this in the return statement
-                Sub -> return []
-                Mul -> return []
-                Div -> return []
-                _ -> do  -- For other ops like comparisons, keep generating statements
-                    left <- convertToIRExpr e1
-                    right <- convertToIRExpr e2
-                    let stmt = IRStmtExpr $ IRCall (opToString op) [left, right]
-                    return [(stmt, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+            traceM $ "Converting binary operation: " ++ show op
+            left <- convertToIRExpr e1
+            right <- convertToIRExpr e2
+            -- Create IR binary operation call
+            let opStr = case op of
+                    Add -> "Add"
+                    Sub -> "Sub"
+                    Mul -> "Mul"
+                    Div -> "Div"
+                    _ -> error $ "Unsupported operator: " ++ show op
+            return [(IRStmtExpr (IRCall opStr [left, right]),
+                    mkMetadata IRTypeInt32 (S.singleton PureEffect))]
         Call "print" [arg] -> do
             traceM $ "=== Converting print statement ==="
             traceM $ "Input arg: " ++ show arg
@@ -336,42 +352,38 @@ convertTops tops ctx = do
 
 convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertTop (TLExpr (If cond thenExpr (BoolLit False))) ctx = do
-    -- Generate labels for if block
-    let endLabel = "if_end"
+    let isBreakPattern = case thenExpr of
+          Block scope -> any isBreakStmt (blockExprs scope)
+          _ -> False
 
-    -- Convert condition
+    let targetLabel = case ctx of
+          Just loopCtx -> loopEndLabel loopCtx
+          Nothing -> "if_end"
+
     condExpr <- convertToIRExpr cond
-
-    -- We need to jump if false (negate condition)
-    let negatedCond = case condExpr of
-          IRCall "EqEq" [a, b] ->
-              -- x == y becomes !(x == y)
-              IRCall "Eq" [a, b]  -- Eq is our not-equal operator
-          _ -> IRCall "Eq" [condExpr, IRLit (IRInt32Lit 1)]  -- Other conditions: jump if == 0
-
-    -- Convert then block
-    thenStmts <- convertBlock thenExpr ctx
-
     let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
 
-    -- Build if block:
-    -- if (!cond) goto end
-    -- <then statements>
-    -- end:
-    return $
-        [ (IRJumpIfZero negatedCond endLabel, meta)
-        ] ++
-        thenStmts ++
-        [ (IRLabel endLabel, meta)
-        ]
-convertTop (TLExpr (VarDecl name (NumLit numType val))) _ = do
-    let irType = convertType (TypeNum numType)  -- Use the actual type
-    let initExpr = case numType of
-          Int32 -> IRLit (IRInt32Lit (read val))
-          Int64 -> IRLit (IRInt64Lit (read val))
-          _ -> IRLit (IRInt32Lit (read val))  -- Default to 32-bit
-    let meta = mkMetadata irType (S.singleton WriteEffect)
-    return [(IRVarDecl name irType initExpr, meta)]
+    if isBreakPattern
+        then do
+            -- For if/break pattern, jump to loop end if condition is true
+            return [ (IRJumpIfTrue condExpr targetLabel, meta)
+                   , (IRGoto $ "while_" ++ show nextLoopNum ++ "_start", meta)  -- And this one
+                   ]
+        else do
+            -- Normal if case
+            thenStmts <- convertBlock thenExpr ctx
+            return $ [ (IRJumpIfZero condExpr targetLabel, meta) ]
+                    ++ thenStmts
+                    ++ [ (IRLabel targetLabel, meta) ]
+
+  where
+    isBreakStmt (Break _) = True
+    isBreakStmt _ = False
+
+    -- Get next loop number from context
+    nextLoopNum = case ctx of
+        Just loopCtx -> loopNumber loopCtx
+        Nothing -> 0
 
 convertTop (TLExpr (While cond body)) prevCtx = do
     -- Generate next loop number based on previous context
@@ -388,15 +400,63 @@ convertTop (TLExpr (While cond body)) prevCtx = do
     condExpr <- convertToIRExpr cond
     bodyStmts <- convertBlock body (Just ctx)
 
+    -- Remove any trailing goto statements from bodyStmts that would duplicate the loop goto
+    let cleanBodyStmts = removeTrailingGoto startLabel bodyStmts
+
     let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
     return $
         [ (IRLabel startLabel, meta)
         , (IRJumpIfZero condExpr endLabel, meta)
         ] ++
-        bodyStmts ++
+        cleanBodyStmts ++
         [ (IRGoto startLabel, meta)
         , (IRLabel endLabel, meta)
         ]
+  where
+    -- Helper to remove trailing goto if it matches our loop's start label
+    removeTrailingGoto :: String -> [(IRStmt, IRMetadata)] -> [(IRStmt, IRMetadata)]
+    removeTrailingGoto label stmts = case reverse stmts of
+        (stmt@(IRGoto l, _):rest) | l == label -> reverse rest
+        _ -> stmts
+
+convertTop (TLExpr (VarDecl name value)) ctx = do
+    traceM $ "Converting top-level variable declaration: " ++ name
+    traceM $ "With value: " ++ show value
+    convertedExpr <- convertToIRExpr value
+
+    let irType = case value of
+          Lit (IntLit _ mtype) ->
+            case mtype of
+              Just Int32 -> IRTypeInt32
+              Just Int64 -> IRTypeInt64
+              Nothing -> IRTypeInt32  -- Default
+          Lit (FloatLit _ mtype) ->
+            case mtype of
+              Just Float32 -> IRTypeFloat32
+              Just Float64 -> IRTypeFloat64
+              Nothing -> IRTypeFloat32
+          Lit (StringLit _) -> IRTypeString
+          _ -> IRTypeVoid
+
+    -- Create metadata based on value type
+    let meta = case value of
+          Lit (IntLit _ mtype) ->
+            let litType = case mtype of
+                  Just nt -> LitInt nt
+                  Nothing -> LitInt Int32
+            in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+          Lit (FloatLit _ mtype) ->
+            let litType = case mtype of
+                  Just nt -> LitFloat nt
+                  Nothing -> LitFloat Float32
+            in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+          Lit (StringLit _) ->
+            mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
+          _ ->
+            mkMetadata IRTypeVoid (S.singleton WriteEffect)
+
+    traceM $ "Using IR type: " ++ show irType
+    return [(IRVarDecl name irType convertedExpr, meta)]
 
 convertTop (TLExpr (Break _)) Nothing =
     Left $ IRError "Break statement outside loop"
@@ -434,9 +494,12 @@ convertExpr :: Expr -> Either IRConversionError (IRStmt, IRMetadata)
 convertExpr (Call "print" [arg]) = do
     traceM $ "Converting print expression with arg: " ++ show arg
     case arg of
-        BinOp op e1 e2 | op `elem` [Add, Mul] -> do
+        BinOp op e1 e2 | op `elem` [Add, Sub, Mul, Div] -> do  -- Add Sub to supported ops
+            traceM $ "Converting binary operation: " ++ show op
             left <- convertToLiteral e1
+            traceM $ "Left operand converted: " ++ show left
             right <- convertToLiteral e2
+            traceM $ "Right operand converted: " ++ show right
             result <- evalBinOp op left right
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [IRLit result], meta)
@@ -449,11 +512,15 @@ convertExpr (Call "print" [arg]) = do
             convertedExpr <- convertToIRExpr (FieldAccess expr field)
             let meta = mkMetadata IRTypeFloat32 (S.singleton IOEffect)
             return (IRProcCall "print" [convertedExpr], meta)
-        _ -> do
-            -- Try as literal for other cases
-            lit <- convertToLiteral arg
+        Var name -> do
+            traceM $ "Converting variable reference in print: " ++ name
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
-            return (IRProcCall "print" [IRLit lit], meta)
+            return (IRProcCall "print" [IRVar name], meta)
+        _ -> do
+            converted <- convertToIRExpr arg
+            traceM $ "Converted print arg to: " ++ show converted
+            let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
+            return (IRProcCall "print" [converted], meta)
 
 convertExpr (Call "print" _) =
     Left $ IRInvalidFunction "print requires exactly one argument"
@@ -468,6 +535,10 @@ evalBinOp Add (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x + y)
 evalBinOp Add (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x + y)
 evalBinOp Sub (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (x - y)
 evalBinOp Sub (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (x - y)
+evalBinOp Sub (IRInt64Lit x) (IRInt32Lit y) = Right $ IRInt64Lit (x - fromIntegral y)
+evalBinOp Sub (IRInt32Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (fromIntegral x - y)
+evalBinOp Sub (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x - y)
+evalBinOp Sub (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x - y)
 evalBinOp Mul (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (x * y)
 evalBinOp Mul (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (x * y)
 evalBinOp Div (IRInt32Lit x) (IRInt32Lit y)
@@ -492,6 +563,24 @@ convertToLiteral expr = case expr of
         Int64 -> Right $ IRInt64Lit (read val)
         Float32 -> Right $ IRFloat32Lit (read val)
         Float64 -> Right $ IRFloat64Lit (read val)
+    Lit lit -> case lit of
+        IntLit val mtype ->
+            case mtype of
+                Just Int32 -> Right $ IRInt32Lit (read val)
+                Just Int64 -> Right $ IRInt64Lit (read val)
+                Nothing ->
+                    -- Fall back to size-based inference if no explicit type
+                    if read val > (2^31 - 1)
+                    then Right $ IRInt64Lit (read val)
+                    else Right $ IRInt32Lit (read val)
+
+        FloatLit val mtype ->
+            case mtype of
+                Just Float32 -> Right $ IRFloat32Lit (read val)
+                Just Float64 -> Right $ IRFloat64Lit (read val)
+                Nothing -> Right $ IRFloat32Lit (read val)
+        StringLit s -> Right $ IRStringLit s
+        BooleanLit _ -> Left $ IRUnsupportedLiteral "Boolean literals not yet supported"
     StrLit s -> Right $ IRStringLit s
     Var name -> Right $ IRVarRef name
     BinOp op e1 e2 -> do
@@ -500,11 +589,33 @@ convertToLiteral expr = case expr of
         evalBinOp op left right
     e -> Left $ IRUnsupportedLiteral $ "Unsupported literal: " ++ show e
 
+    where
+      maxInt32 :: Integer
+      maxInt32 = 2^31 - 1
+
 -- Helper to convert expressions to IR
 convertToIRExpr :: Expr -> Either IRConversionError IRExpr
+convertToIRExpr (VarDecl name value) = do
+    traceM $ "Converting variable declaration in expression: " ++ name
+    convertedExpr <- convertToIRExpr value
+    Right $ IRCall "var_decl" [IRLit (IRStringLit name), convertedExpr]
+convertToIRExpr (StrLit s) = Right $ IRLit $ IRStringLit s
 convertToIRExpr (Lit lit) = case lit of
-  IntLit val -> Right $ IRLit $ IRInt32Lit (read val)  -- Default to 32-bit for now
-  FloatLit val -> Right $ IRLit $ IRFloat32Lit (read val)
+  IntLit val mtype -> case mtype of
+    Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
+    Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
+    Nothing -> -- Use size-based inference for integers
+      if read val > (2^31 - 1)
+      then Right $ IRLit $ IRInt64Lit (read val)
+      else Right $ IRLit $ IRInt32Lit (read val)
+
+  FloatLit val mtype ->
+    -- For now, default to Float32 for backwards compatibility
+    -- We could later switch to Float64 default or size-based inference
+    case mtype of
+      Just Float32 -> Right $ IRLit $ IRFloat32Lit (read val)
+      Just Float64 -> Right $ IRLit $ IRFloat64Lit (read val)
+      Nothing -> Right $ IRLit $ IRFloat32Lit (read val)  -- Default choice
   StringLit val -> Right $ IRLit $ IRStringLit val
   -- BooleanLit val -> Right $ IRLit $ IRBoolLit val
 convertToIRExpr (NumLit numType val) = Right $ IRLit $ case numType of
@@ -523,9 +634,14 @@ convertToIRExpr (Block scope) = do
         [] -> Left $ IRError "Empty block"
         exprs -> convertToIRExpr (last exprs)
 convertToIRExpr (BinOp op e1 e2) = do
+    traceM $ "Converting binary operation: " ++ show op
     left <- convertToIRExpr e1
     right <- convertToIRExpr e2
-    Right $ IRCall (opToString op) [left, right]
+    case op of
+      Lt -> Right $ IRCall "Lt" [left, right]
+      Gt -> Right $ IRCall "Gt" [left, right]
+      EqEq -> Right $ IRCall "EqEq" [left, right]
+      _ -> Right $ IRCall (opToString op) [left, right]
 convertToIRExpr (FieldAccess expr field) = do
     convertedExpr <- convertToIRExpr expr
     Right $ IRCall "field_access" [convertedExpr, IRLit (IRStringLit field)]

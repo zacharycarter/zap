@@ -34,8 +34,8 @@ spec = do
       parseProgram "print(1 + 2 * 3)" `shouldBe`
         Right [TLExpr (Call "print" [
             BinOp Add
-                (NumLit Int64 "1")
-                (BinOp Mul (NumLit Int64 "2") (NumLit Int64 "3"))])]
+                (Lit (IntLit "1" (Just Int64)))
+                (BinOp Mul (Lit (IntLit "2" (Just Int64))) (Lit (IntLit "3" (Just Int64))))])]
 
     it "enforces print statement indentation" $ do
       let input = "block test:\nprint \"Hello\""  -- Not indented
@@ -92,7 +92,7 @@ spec = do
     it "parses simple while loop" $ do
       let input = "while x < 3:\n  print x"
       case parseProgram input of
-        Right [TLExpr (While (BinOp Lt (Var "x") (NumLit Int64"3")) (Block scope))] ->
+        Right [TLExpr (While (BinOp Lt (Var "x") (Lit (IntLit "3" (Just Int64)))) (Block scope))] ->
           blockExprs scope `shouldBe` [Call "print" [Var "x"]]
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -105,26 +105,26 @@ spec = do
 
   describe "Numeric literal parsing" $ do
     it "parses integer literals as Int64" $ do
-      parseExprFromText "42" `shouldBe` Right (NumLit Int64 "42")
+      parseExprFromText "42'i64" `shouldBe` Right (Lit (IntLit "42" (Just Int64)))
 
     it "parses decimal literals as Float64" $ do
-      parseExprFromText "42.0" `shouldBe` Right (NumLit Float64 "42.0")
+      parseExprFromText "42.0'f64" `shouldBe` Right (Lit (FloatLit "42.0" (Just Float64)))
 
   describe "Variable declarations and assignments" $ do
     it "parses variable declaration with initialization" $ do
         parseExprFromText "var x = 42" `shouldBe`
-            Right (VarDecl "x" (NumLit Int64"42"))
+            Right (VarDecl "x" (Lit (IntLit "42" (Just Int64))))
 
     it "parses variable declaration within block" $ do
         parseProgram "block test:\n  var x = 42" `shouldBe`
             Right [TLExpr (Block $ BlockScope
                 "test"
-                [VarDecl "x" (NumLit Int64 "42")]
+                [VarDecl "x" (Lit (IntLit "42" (Just Int64)))]
                 Nothing)]
 
     it "parses variable assignment" $ do
         parseExprFromText "x = 42" `shouldBe`
-            Right (Assign "x" (NumLit Int64 "42"))
+            Right (Assign "x" (Lit (IntLit "42" (Just Int64))))
 
     it "parses variable declaration and assignment in function" $ do
         let input = T.unlines
@@ -156,6 +156,9 @@ spec = do
             NumLit numType val -> do
               numType `shouldBe` Int32
               TypeNum numType `shouldBe` TypeNum Int32
+            Lit (IntLit val numType) -> do
+              numType `shouldBe` (Just Int32)
+              val `shouldBe` "42"
             _ -> expectationFailure "Expected numeric literal"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
@@ -167,6 +170,9 @@ spec = do
         Right (NumLit numType val) -> do
           numType `shouldBe` Int32
           val `shouldBe` "42"
+        Right (Lit (IntLit val numType)) -> do
+          numType `shouldBe` (Just Int32)
+          val `shouldBe` "42"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other -> expectationFailure $
           "Unexpected parse result: " ++ show other
@@ -177,7 +183,7 @@ spec = do
         Right [first, second] -> do
           case first of
             TLExpr (Let "x" (NumLit Int32 "42")) -> return ()  -- Accept old form
-            TLExpr (Let "x" (Lit (IntLit "42"))) -> return ()  -- Accept new form
+            TLExpr (Let "x" (Lit (IntLit "42" (Just Int32)))) -> return ()  -- Accept new form
             other -> expectationFailure $ "Unexpected first expr: " ++ show other
           second `shouldBe` TLExpr (Let "y" (Var "x"))
         other -> expectationFailure $ "Unexpected parse result: " ++ show other
@@ -185,5 +191,5 @@ spec = do
     it "enforces type consistency with float literals" $ do
       let input = "let x: f32 = 3.14"
       case parseProgram input of
-        Right [TLExpr (Let "x" (Lit (FloatLit "3.14")))] -> return ()
+        Right [TLExpr (Let "x" (Lit (FloatLit "3.14" (Just Float32))))] -> return ()
         other -> expectationFailure $ "Unexpected parse result: " ++ show other

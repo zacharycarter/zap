@@ -347,7 +347,7 @@ spec = do
 
       describe "Literal conversion" $ do
         it "preserves literal type information in IR" $ do
-          let ast = Program [TLExpr (Let "x" (Lit (IntLit "42")))]
+          let ast = Program [TLExpr (Let "x" (Lit (IntLit "42" (Just Int32))))]
           case convertToIR' ast of
             Right (IRProgram funcs) -> do
               case funcs of
@@ -360,7 +360,7 @@ spec = do
             Left err -> expectationFailure $ "IR conversion failed: " ++ show err
 
         it "preserves float literal type information" $ do
-          let ast = Program [TLExpr (Let "x" (Lit (FloatLit "3.14")))]
+          let ast = Program [TLExpr (Let "x" (Lit (FloatLit "3.14" (Just Float32))))]
           case convertToIR' ast of
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
@@ -377,6 +377,53 @@ spec = do
                 IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
                   metaLiteralType meta `shouldBe` Just LitString
                 _ -> expectationFailure "Expected variable declaration"
+
+        it "handles both NumLit and Lit variants" $ do
+            let ast = Program
+                  [ TLExpr (Call "print" [NumLit Int32 "42"])  -- Old style
+                  , TLExpr (Call "print" [Lit (IntLit "42" (Just Int32))])  -- New style
+                  ]
+            case convertToIR' ast of
+                Right (IRProgram [(mainFn, _)]) -> do
+                    let IRBlock _ stmts = fnBody mainFn
+                    length stmts `shouldBe` 3  -- Two prints plus return
+                Left err -> expectationFailure $ show err
+
+        it "preserves numeric types" $ do
+            let ast = Program [TLExpr (Call "print" [Lit (FloatLit "3.14" (Just Float32))])]
+            case convertToIR' ast of
+                Right (IRProgram [(mainFn, _)]) -> do
+                    let IRBlock _ ((IRProcCall "print" [IRLit lit], _):_) = fnBody mainFn
+                    lit `shouldBe` IRFloat32Lit 3.14
+                Left err -> expectationFailure $ show err
+
+      describe "Variable declarations" $ do
+        it "handles variable declaration with new literal style" $ do
+          let ast = Program
+                [ TLExpr (VarDecl "x" (Lit (IntLit "5" (Just Int32))))
+                , TLExpr (Call "print" [Var "x"])
+                ]
+          case convertToIR' ast of
+              Right (IRProgram [(mainFn, _)]) -> do
+                  let IRBlock _ stmts = fnBody mainFn
+                  case stmts of
+                      [(declStmt, declMeta), (printStmt, printMeta), _] -> do
+                          -- Check variable declaration
+                          case declStmt of
+                              IRVarDecl name irType expr -> do
+                                  name `shouldBe` "x"
+                                  irType `shouldBe` IRTypeInt32
+                                  expr `shouldBe` IRLit (IRInt32Lit 5)
+                                  metaLiteralType declMeta `shouldBe` Just (LitInt Int32)
+                              _ -> expectationFailure "Expected variable declaration"
+
+                          -- Check print statement
+                          case printStmt of
+                              IRProcCall "print" [IRVar "x"] ->
+                                  return ()
+                              _ -> expectationFailure "Expected print statement"
+                      _ -> expectationFailure $ "Expected exactly two statements, got: " ++ show stmts
+              Left err -> expectationFailure $ show err
 
       where
         testMeta = IRMetadata

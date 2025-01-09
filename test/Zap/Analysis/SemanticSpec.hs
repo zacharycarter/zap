@@ -112,6 +112,6 @@ spec = do
               [ TLDecl $ DFunc "test"
                   [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
-                  (Lit (IntLit "42"))
+                  (Lit (IntLit "42" Nothing))
               ]
         analyze ast `shouldBe` Right ast

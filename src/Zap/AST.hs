@@ -76,8 +76,8 @@ data BlockScope = BlockScope
   } deriving (Show, Eq)
 
 data Literal
-  = IntLit String
-  | FloatLit String
+  = IntLit String (Maybe NumType)
+  | FloatLit String (Maybe NumType)
   | StringLit String
   | BooleanLit Bool
   deriving (Show, Eq)

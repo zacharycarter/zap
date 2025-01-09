@@ -95,6 +95,7 @@ test-suite zap-test
   other-modules:
       Zap.Analysis.LexicalSpec
       Zap.Analysis.SemanticSpec
+      Zap.Codegen.CSpec
       Zap.Integration.Basic
       Zap.Integration.IntegrationSpec
       Zap.Integration.Runner
