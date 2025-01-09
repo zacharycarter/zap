@@ -83,8 +83,7 @@ data Literal
   deriving (Show, Eq)
 
 data Expr
-  = BoolLit Bool
-  | Var String
+  = Var String
   | Let String Expr
   | Block BlockScope
   | Break (Maybe String)

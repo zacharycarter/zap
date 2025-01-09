@@ -59,8 +59,8 @@ spec = do
 
       it "prevents duplicate function definitions" $ do
         let ast = Program
-              [ TLDecl $ DFunc "f" [] TypeBool (BoolLit True)
-              , TLDecl $ DFunc "f" [] TypeBool (BoolLit False)
+              [ TLDecl $ DFunc "f" [] TypeBool (Lit (BooleanLit True))
+              , TLDecl $ DFunc "f" [] TypeBool (Lit (BooleanLit False))
               ]
         analyze ast `shouldBe` Left (RecursionInGlobalScope "f")
 

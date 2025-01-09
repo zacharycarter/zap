@@ -146,7 +146,7 @@ parseIf expectedType = do
     modify $ \s -> s { stateIndent = curIndent }
 
     -- Since this is a simple if without else, pass Nothing for else branch
-    return $ If condition thenBlock (BoolLit False)
+    return $ If condition thenBlock (Lit (BooleanLit False))
 
 -- Helper for if keyword
 isIf :: Token -> Bool

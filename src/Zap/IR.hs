@@ -98,7 +98,8 @@ data IRExpr
   deriving (Show, Eq)
 
 data IRLiteral
-  = IRStringLit String
+  = IRBoolLit Bool
+  | IRStringLit String
   | IRInt32Lit Int
   | IRInt64Lit Int
   | IRFloat32Lit Float
@@ -351,7 +352,7 @@ convertTops tops ctx = do
     return (IRBlock "main.entry" (stmts ++ [returnStmt]), lastMeta)
 
 convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertTop (TLExpr (If cond thenExpr (BoolLit False))) ctx = do
+convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
     let isBreakPattern = case thenExpr of
           Block scope -> any isBreakStmt (blockExprs scope)
           _ -> False
@@ -610,7 +611,7 @@ convertToIRExpr (Lit lit) = case lit of
       Just Float64 -> Right $ IRLit $ IRFloat64Lit (read val)
       Nothing -> Right $ IRLit $ IRFloat32Lit (read val)  -- Default choice
   StringLit val -> Right $ IRLit $ IRStringLit val
-  -- BooleanLit val -> Right $ IRLit $ IRBoolLit val
+  BooleanLit val -> Right $ IRLit $ IRBoolLit val
 convertToIRExpr (Var name) = Right $ IRVar name
 convertToIRExpr (Call fname args) = do
     -- Convert each argument to IR
