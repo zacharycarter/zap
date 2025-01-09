@@ -136,11 +136,7 @@ parseIf expectedType = do
     thenStmts <- parseBlockExprs expectedType BasicBlock newIndent
 
     -- Convert statements to block
-    let thenBlock = Block $ BlockScope
-          { blockLabel = "if_then"
-          , blockExprs = fst thenStmts
-          , blockResult = snd thenStmts
-          }
+    let thenBlock = Block "if_then" (fst thenStmts) (snd thenStmts)
 
     -- Reset indentation
     modify $ \s -> s { stateIndent = curIndent }
@@ -194,9 +190,9 @@ parseAssign expectedType = do
                     _ -> do
                         traceM $ "Invalid left side for +=: " ++ show left
                         throwError $ UnexpectedToken tok "variable name before +="
-            TEquals -> do
+            TOperator "=" -> do
                 traceM $ "Found = operator at col " ++ show (locCol tok)
-                _ <- matchToken (\t -> t == TEquals) "="
+                _ <- matchToken (\t -> t == TOperator "=") "="
                 right <- parseAssign expectedType
                 case left of
                     Var name -> do
@@ -231,11 +227,11 @@ parseComparison expectedType = do
             _ <- matchToken isOperator ">"
             right <- parseAdditive expectedType
             remainingComparison expectedType (BinOp Gt left right)
-          TEqualsEquals -> do
+          TOperator "==" -> do
             traceM "Found equality operator"
-            _ <- matchToken (== TEqualsEquals) "=="
+            _ <- matchToken (== TOperator "==") "=="
             right <- parseAdditive expectedType
-            remainingComparison expectedType (BinOp EqEq left right)
+            remainingComparison expectedType (BinOp Eq left right)
           _ -> return left
         [] -> return left
 
@@ -576,7 +572,7 @@ parseSingleBindingLine = do
                 return $ Just declaredType
             _ -> return Nothing
 
-    _ <- matchToken (== TEquals) "equals sign"
+    _ <- matchToken (== (TOperator "=")) "equals sign"
     traceM "Parsing value for binding line"
     value <- parseExpressionWithType annotatedType
 
@@ -633,11 +629,7 @@ parseBlockImpl = do
   -- Parse block contents with context
   (exprs, resultExpr) <- parseBlockContents ctx
 
-  return $ Block $ BlockScope
-    { blockLabel = blockName
-    , blockExprs = exprs
-    , blockResult = resultExpr
-    }
+  return $ Block blockName exprs resultExpr
 
 -- Helper for block contents
 parseBlockContents :: IndentContext -> Parser ([Expr], Maybe Expr)
@@ -784,7 +776,7 @@ parseBlockExprs expectedType bt bi = do
                             -- Look ahead for assignment
                             st' <- get
                             case drop 1 $ stateTokens st' of
-                                (t:_) | locToken t == TEquals -> do
+                                (t:_) | locToken t == TOperator "=" -> do
                                     assignExpr <- parseAssign expectedType
                                     (moreExprs, resultExpr) <- parseBlockExprs expectedType BasicBlock bi
                                     return (assignExpr : moreExprs, resultExpr)
@@ -901,8 +893,7 @@ parseWhileExpr expectedType = do
     (bodyExprs, mResult) <- parseBlockExprs expectedType BasicBlock blockIndent
     modify $ \s -> s { stateIndent = savedIndent }  -- Restore parent indent
 
-    let blockScope = BlockScope "while_body" bodyExprs mResult
-    let body = Block blockScope
+    let body = Block "while_body" bodyExprs mResult
     traceM $ "Parsed while body: " ++ show body
     return $ While condition body
 
@@ -923,7 +914,7 @@ parseFuncDecl = do
     retTypeTok <- matchToken isValidName "return type"
     retType <- parseTypeToken retTypeTok
 
-    _ <- matchToken (== TEquals) "="
+    _ <- matchToken (== (TOperator "=")) "="
 
     -- Create function context with standard indent
     let indent = 2
@@ -947,7 +938,7 @@ parseFuncDecl = do
                     | locLine next > locLine tok + 1 && locCol next < indent -> do
                         traceM $ "Found line gap and dedent - ending function body"
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                        let body = Block $ BlockScope "function_body" [expr] Nothing
+                        let body = Block "function_body" [expr] Nothing
                         case locToken nameTok of
                             TWord name -> return $ DFunc name params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"
@@ -955,7 +946,7 @@ parseFuncDecl = do
                         -- Continue parsing block contents normally
                         (rest, result) <- parseBlockContents ctx
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                        let body = Block $ BlockScope "function_body" (expr:rest) result
+                        let body = Block "function_body" (expr:rest) result
                         case locToken nameTok of
                             TWord name -> return $ DFunc name params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"
@@ -1011,7 +1002,7 @@ parseVarDecl = do
     traceM "Parsing variable declaration"
     _ <- matchToken (\t -> t == TWord "var") "var"
     nameTok <- matchToken isValidName "identifier"
-    _ <- matchToken (== TEquals) "equals sign"
+    _ <- matchToken (== (TOperator "=")) "equals sign"
     value <- parseExpression
     case locToken nameTok of
         TWord name -> return $ VarDecl name value

@@ -8,7 +8,6 @@ module Zap.AST
   , Op(..)
   , Literal(..)
   , Expr(..)
-  , BlockScope(..)
   , NumType(..)
   , VecType(..)
   ) where
@@ -38,17 +37,11 @@ data Type
   deriving (Show, Eq)
 
 data Op
-  = Add
-  | Sub
-  | Mul
-  | Div
-  | Eq
-  | EqEq
-  | Lt
-  | Gt
-  | And
-  | Or
-  | Dot
+  = Add | Sub | Mul | Div | Mod           -- Arithmetic
+  | Lt | LtEq | Gt | GtEq                 -- Comparison
+  | Eq | NotEq                            -- Equality
+  | And | Or | Not                        -- Logical
+  | Dot                                   -- Field access
   deriving (Show, Eq)
 
 data Param = Param String Type
@@ -68,12 +61,6 @@ data TopLevel
 data Program = Program [TopLevel]
   deriving (Show, Eq)
 
-data BlockScope = BlockScope
-  { blockLabel :: String
-  , blockExprs :: [Expr]
-  , blockResult :: Maybe Expr
-  } deriving (Show, Eq)
-
 data Literal
   = IntLit String (Maybe NumType)
   | FloatLit String (Maybe NumType)
@@ -84,7 +71,7 @@ data Literal
 data Expr
   = Var String
   | Let String Expr
-  | Block BlockScope
+  | Block String [Expr] (Maybe Expr)
   | Break (Maybe String)
   | Result Expr
   | BinOp Op Expr Expr

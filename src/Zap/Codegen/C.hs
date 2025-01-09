@@ -151,8 +151,8 @@ generateExpr (IRCall op [e1, e2]) = do
     let cOp = case op of
           "Lt" -> "<"
           "Gt" -> ">"
-          "Eq" -> "="
-          "EqEq" -> "=="
+          "Eq" -> "=="
+          "NotEq" -> "!="
           "Add" -> "+"
           "Sub" -> "-"
           "Mul" -> "*"
@@ -191,10 +191,14 @@ generatePrintExpr (IRCall op [e1, e2]) = case op of
         left <- generateExpr e1
         right <- generateExpr e2
         Right (T.concat ["((", left, ") > (", right, ") ? 1 : 0)"], "%d")
-    "EqEq" -> do
+    "Eq" -> do
         left <- generateExpr e1
         right <- generateExpr e2
         Right (T.concat ["((", left, ") == (", right, ") ? 1 : 0)"], "%d")
+    "NotEq" -> do
+        left <- generateExpr e1
+        right <- generateExpr e2
+        Right (T.concat ["((", left, ") != (", right, ") ? 1 : 0)"], "%d")
     _ -> do
         -- For other function calls, fall back to default behavior
         argCode <- mapM generateExpr [e1, e2]

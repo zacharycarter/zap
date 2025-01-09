@@ -75,7 +75,7 @@ parseTopLevel = do
                     traceM "Found type definition"
                     _ <- matchToken (== TType) "type"
                     typeNameTok <- matchToken isValidName "type name"
-                    _ <- matchToken (== TEquals) "equals sign"
+                    _ <- matchToken (== (TOperator "=")) "equals sign"
                     case locToken typeNameTok of
                         TWord name -> do
                             traceM $ "Parsing type definition for: " ++ name
@@ -120,7 +120,7 @@ parseTopLevel = do
                     -- Look ahead for assignment operators
                     st' <- get
                     case drop 1 $ stateTokens st' of
-                        (t:_) | locToken t == TEquals || locToken t == TOperator "+=" -> do
+                        (t:_) | locToken t == TOperator "=" || locToken t == TOperator "+=" -> do
                             expr <- parseAssign Nothing
                             return $ TLExpr expr
                         _ -> do
@@ -153,10 +153,7 @@ parseLetBlock = do
         _ -> do
             traceM "Multiple bindings - wrapping in block"
             let allBindings = Let varName value : map (\(n,v) -> Let n v) moreBindings
-            return $ Block $ BlockScope
-              { blockLabel = "top_let"
-              , blockExprs = allBindings
-              , blockResult = Nothing }
+            return $ Block "top_let" allBindings Nothing
   where
     parseMoreBindings :: Int -> Parser [(String, Expr)]
     parseMoreBindings indent = do

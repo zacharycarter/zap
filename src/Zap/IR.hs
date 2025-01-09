@@ -229,10 +229,7 @@ convertFuncDecl (DFunc name params retType body) = do
 
     -- Handle function body
     case body of
-        Block scope -> do
-            -- Get the expressions from the scope
-            let bodyExprs = blockExprs scope
-
+        Block label bodyExprs blockResult -> do
             -- Convert each expression to IR statements
             convertedStmts <- concat <$> mapM convertExprToStmts bodyExprs
 
@@ -354,7 +351,7 @@ convertTops tops ctx = do
 convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
     let isBreakPattern = case thenExpr of
-          Block scope -> any isBreakStmt (blockExprs scope)
+          Block _ blockExprs _ -> any isBreakStmt blockExprs
           _ -> False
 
     let targetLabel = case ctx of
@@ -482,9 +479,9 @@ convertTop (TLExpr e) ctx = case e of
     _ -> (:[]) <$> convertExpr e
 
 convertBlock :: Expr -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertBlock (Block scope) ctx = do
+convertBlock (Block _ blockExprs _) ctx = do
     -- Convert each expression in block with context
-    stmtsLists <- mapM (\e -> convertTop (TLExpr e) ctx) (blockExprs scope)
+    stmtsLists <- mapM (\e -> convertTop (TLExpr e) ctx) blockExprs
     return $ concat stmtsLists
 convertBlock expr _ = do
     -- Single expression blocks
@@ -552,8 +549,8 @@ evalBinOp Lt (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (if x < y then 1
 evalBinOp Lt (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (if x < y then 1 else 0)
 evalBinOp Gt (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (if x > y then 1 else 0)
 evalBinOp Gt (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (if x > y then 1 else 0)
-evalBinOp EqEq (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (if x == y then 1 else 0)
-evalBinOp EqEq (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (if x == y then 1 else 0)
+evalBinOp Eq (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (if x == y then 1 else 0)
+evalBinOp Eq (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (if x == y then 1 else 0)
 evalBinOp op _ _ = Left $ IRUnsupportedLiteral $ "Unsupported operator: " ++ show op
 
 -- Helper to convert expressions to literals
@@ -617,9 +614,9 @@ convertToIRExpr (Call fname args) = do
     -- Convert each argument to IR
     convertedArgs <- mapM convertToIRExpr args
     Right $ IRCall fname convertedArgs
-convertToIRExpr (Block scope) = do
+convertToIRExpr (Block _ blockExprs _) = do
     -- Handle last expression in block as result
-    case blockExprs scope of
+    case blockExprs of
         [] -> Left $ IRError "Empty block"
         exprs -> convertToIRExpr (last exprs)
 convertToIRExpr (BinOp op e1 e2) = do
@@ -629,7 +626,7 @@ convertToIRExpr (BinOp op e1 e2) = do
     case op of
       Lt -> Right $ IRCall "Lt" [left, right]
       Gt -> Right $ IRCall "Gt" [left, right]
-      EqEq -> Right $ IRCall "EqEq" [left, right]
+      Eq -> Right $ IRCall "Eq" [left, right]
       _ -> Right $ IRCall (opToString op) [left, right]
 convertToIRExpr (FieldAccess expr field) = do
     convertedExpr <- convertToIRExpr expr
@@ -658,7 +655,8 @@ opToString Mul = "Mul"
 opToString Div = "Div"
 opToString Lt = "Lt"
 opToString Gt = "Gt"
-opToString EqEq = "EqEq"
+opToString Eq = "Eq"
+opToString NotEq = "NotEq"
 opToString op = error $ "Unsupported operator: " ++ show op
 
 -- | Generate constraints from IR program

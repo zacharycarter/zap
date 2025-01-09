@@ -27,8 +27,6 @@ data Token
   | TSymbol String      -- Other symbols
   | TColon             -- Block symbol
   | TVec String        -- Vector constructors
-  | TEquals            -- Assignment operator
-  | TEqualsEquals      -- Equality operator
   | TDot               -- Struct field access
   | TComment String    -- Single-line comment
   | TType              -- Type keyword
@@ -163,7 +161,7 @@ lexOperator line col acc cs state = do
     case cs of
         [] -> do
             let tok = case reverse acc of
-                    "=" -> Located TEquals col line
+                    "=" -> Located (TOperator "=") col line
                     "==" -> Located (TOperator "==") col line
                     "+=" -> Located (TOperator "+=") col line
                     op -> Located (TOperator op) col line
@@ -181,8 +179,8 @@ lexOperator line col acc cs state = do
                 Right (tok : Located TLeftParen (col + length acc) line : rest')
             | otherwise -> do
                 let tok = case reverse acc of
-                        "=" -> Located TEquals col line
-                        "==" -> Located TEqualsEquals col line
+                        "=" -> Located (TOperator "=") col line
+                        "==" -> Located (TOperator "==") col line
                         "+=" -> Located (TOperator "+=") col line
                         op -> Located (TOperator op) col line
                 rest' <- scanTokensWithState state line (col + length acc) (c:rest)
