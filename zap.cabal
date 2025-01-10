@@ -24,7 +24,6 @@ source-repository head
 
 library
   exposed-modules:
-      Lib
       Zap.Analysis.Lexical
       Zap.Analysis.Semantic
       Zap.AST

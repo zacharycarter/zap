@@ -489,41 +489,6 @@ parseMaybeCall fname = do
         [] -> do
             traceM "No tokens - returning var"
             return $ Var fname
--- parseMaybeCall :: String -> Parser Expr
--- parseMaybeCall fname = do
---     traceM $ "parseMaybeCall: fname = " ++ fname
---     st <- get
---     case stateTokens st of
---         (tok:_) -> case locToken tok of
---             TLeftBracket -> do
---                 traceM "Found type parameter instantiation"
---                 _ <- matchToken (== TLeftBracket) "["  -- Consume [
---                 typeParam <- matchToken isValidName "type name"  -- Consume i32
---                 _ <- matchToken (== TRightBracket) "]"  -- Consume ]
-
---                 -- Now handle constructor call
---                 st' <- get
---                 case stateTokens st' of
---                     (paren:_) | locToken paren == TLeftParen -> do
---                         _ <- matchToken (== TLeftParen) "("
---                         args <- parseCallArgs
---                         _ <- matchToken (== TRightParen) ")"
---                         return $ Call fname args
---                     _ -> return $ Var fname
---             TLeftParen -> do
---                 traceM "Found constructor/function call with parens"
---                 _ <- matchToken (== TLeftParen) "opening parenthesis"
---                 args <- parseCallArgs
---                 _ <- matchToken (== TRightParen) "closing parenthesis"
---                 return (Call fname args)
---             TComma -> do
---                 traceM "Found constructor/function call with args"
---                 args <- parseCallArgs
---                 return (Call fname args)
---             _ -> do
---                 traceM "Found identifier: falling back to Var"
---                 return (Var fname)
---         [] -> return $ Var fname
 
 parseCallArgs :: Parser [Expr]
 parseCallArgs = do
