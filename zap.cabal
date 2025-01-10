@@ -102,7 +102,6 @@ test-suite zap-test
       Zap.Integration.Types
       Zap.IRSpec
       Zap.Parser.ParserSpec
-      Zap.Util
       Paths_zap
   autogen-modules:
       Paths_zap
