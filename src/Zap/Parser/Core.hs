@@ -18,6 +18,7 @@ import Control.Monad.State
 import Control.Monad.Except
 import Debug.Trace
 
+import Zap.AST (SymbolTable(..), emptySymbolTable)
 import Zap.Analysis.Lexical
 import Zap.Parser.Types
 
@@ -26,6 +27,7 @@ data ParseState = ParseState
   { stateTokens :: [Located]    -- Remaining tokens to parse
   , stateIndent :: Int         -- Current indentation level
   , stateCol    :: Int         -- Current column position
+  , stateSymTable :: SymbolTable
   } deriving (Show)
 
 -- | Possible parsing errors
@@ -49,7 +51,7 @@ type ParserResult a = Either ParseError a
 
 -- | Run a parser on input tokens
 runParser :: Parser a -> [Located] -> ParserResult a
-runParser p tokens = evalStateT p (ParseState tokens 0 0)
+runParser p tokens = evalStateT p (ParseState tokens 0 0 emptySymbolTable)
 
 -- Basic combinators
 

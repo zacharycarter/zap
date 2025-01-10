@@ -182,3 +182,14 @@ spec = do
             Located TEOF 11 1
             ]
       tokenize input `shouldBe` Right expected
+
+    it "tokenizes type parameters" $ do
+      let input = T.pack "Box[T]"
+      let expected = [
+            Located (TWord "Box") 1 1,
+            Located TLeftBracket 4 1,
+            Located (TWord "T") 5 1,
+            Located TRightBracket 6 1,
+            Located TEOF 7 1
+            ]
+      tokenize input `shouldBe` Right expected

@@ -279,4 +279,43 @@ migratedTests =
       , expectedOutput = "3000\n9223372036854775806\n"
       , expectedExitCode = ExitSuccess
       }
+    , TestCase
+        { testName = "basic_struct"
+        , sourceCode = T.unlines
+            [ "type Point = struct"
+            , "  x: i32"
+            , "  y: i32"
+            , ""
+            , "let p = Point(10, 20)"
+            , "print p.x"
+            ]
+        , expectedOutput = "10\n"
+        , expectedExitCode = ExitSuccess
+        }
+    , TestCase
+      { testName = "generic_box"
+      , sourceCode = T.unlines
+          [ "type"
+          , "  Box[T] = struct"  -- New syntax for generic type
+          , "    value: T"
+          , ""
+          , "let x = Box[i32](42)"  -- Type parameter instantiation
+          , "print x.value"
+          ]
+      , expectedOutput = "42\n"
+      , expectedExitCode = ExitSuccess
+      }
+    , TestCase
+        { testName = "struct_field_names"
+        , sourceCode = T.unlines
+            [ "type Point = struct"
+            , "  x: i32"
+            , "  y: i32"
+            , ""
+            , "let p = Point(10, 20)"
+            , "print p.x"
+            ]
+        , expectedOutput = "10\n"
+        , expectedExitCode = ExitSuccess
+        }
   ]

@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+
 module Zap.AST
   ( Program(..)
   , TopLevel(..)
@@ -10,7 +11,16 @@ module Zap.AST
   , Expr(..)
   , NumType(..)
   , VecType(..)
+  , SymbolTable(..)
+  , StructId(..)
+  , StructDef(..)
+  , emptySymbolTable
+  , lookupStruct
+  , registerStruct
+  , registerParamStruct
   ) where
+
+import qualified Data.Map.Strict as M
 
 data NumType
   = Int32
@@ -25,15 +35,26 @@ data VecType
   | Vec4 NumType
   deriving (Show, Eq)
 
+newtype StructId = StructId Int
+  deriving (Show, Eq, Ord)
+
+data StructDef = StructDef
+  { structName :: String
+  , structParams :: [String]
+  , structFields :: [(String, Type)]
+  , structId :: StructId
+  } deriving (Show, Eq)
+
 data Type
   = TypeNum NumType
   | TypeVec VecType
   | TypeString
   | TypeBool
-  | TypeStruct String [(String, Type)]  -- Name and fields
-  | TypeArray Type                      -- Array of any type
+  | TypeStruct StructId String
+  | TypeArray Type
   | TypeVoid
   | TypeAny
+  | TypeParam String
   deriving (Show, Eq)
 
 data Op
@@ -87,3 +108,51 @@ data Expr
   | AssignOp String Op Expr  -- Assignment with operator (e.g. +=)
   | Lit Literal
   deriving (Show, Eq)
+
+data SymbolTable = SymbolTable
+  { nextStructId :: StructId
+  , structDefs :: M.Map StructId StructDef
+  , structNames :: M.Map String StructId
+  } deriving (Show, Eq)
+
+emptySymbolTable :: SymbolTable
+emptySymbolTable = SymbolTable
+  { nextStructId = StructId 0  -- Start IDs at 0
+  , structDefs = M.empty       -- No struct definitions initially
+  , structNames = M.empty      -- No struct names initially
+  }
+
+lookupStruct :: StructId -> SymbolTable -> Maybe StructDef
+lookupStruct sid st = M.lookup sid (structDefs st)
+
+registerStruct :: String -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
+registerStruct name fields st =
+    let sid = nextStructId st
+        def = StructDef
+          { structName = name
+          , structParams = []  -- No type parameters
+          , structFields = fields
+          , structId = sid
+          }
+        st' = st
+          { nextStructId = StructId (case sid of StructId n -> n + 1)
+          , structDefs = M.insert sid def (structDefs st)
+          , structNames = M.insert name sid (structNames st)
+          }
+    in (sid, st')
+
+registerParamStruct :: String -> [String] -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
+registerParamStruct name params fields st =
+    let sid = nextStructId st
+        def = StructDef
+          { structName = name
+          , structParams = params
+          , structFields = fields
+          , structId = sid
+          }
+        st' = st
+          { nextStructId = StructId (case sid of StructId n -> n + 1)
+          , structDefs = M.insert sid def (structDefs st)
+          , structNames = M.insert name sid (structNames st)
+          }
+    in (sid, st')

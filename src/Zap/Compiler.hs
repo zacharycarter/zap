@@ -10,10 +10,10 @@ module Zap.Compiler
 
 import qualified Data.Text as T
 
-import Zap.AST (Program(..), TopLevel(..))
+import Zap.AST
 import Zap.Parser.Program (parseProgram)
 import Zap.Parser.Core (ParseError(..))
-import Zap.Analysis.Semantic (analyze, SemanticError)
+import Zap.Analysis.Semantic (analyzeWithSymbols, SemanticError)
 import Zap.IR
 import Zap.Codegen.C (generateC, CGenError)
 import Zap.Analysis.Lexical (tokenize, Located, LexError)
@@ -52,6 +52,7 @@ data CompileError
 data CompileResult = CompileResult
   { tokens :: Maybe [Located]
   , parsedAST :: Maybe [TopLevel]
+  , symbolTable :: Maybe SymbolTable
   , program :: Maybe Program
   , analyzed :: Maybe Program
   , ir :: Maybe IRProgram
@@ -59,50 +60,51 @@ data CompileResult = CompileResult
   } deriving (Show, Eq)
 
 emptyResult :: CompileResult
-emptyResult = CompileResult Nothing Nothing Nothing Nothing Nothing Nothing
+emptyResult = CompileResult Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Compile Zap program using new IR
 compile' :: CompileOptions -> T.Text -> Either CompileError CompileResult
 compile' opts source = do
-  -- Lexical analysis
+  -- Lexical analysis remains same
   lexResult <- if targetStage opts >= Lexing
     then do
       toks <- mapLeft LexicalError $ tokenize source
       return $ emptyResult { tokens = Just toks }
     else return emptyResult
 
-  -- Parsing
+  -- Parsing - now handling symbol table
   parseResult <- if targetStage opts >= Parsing
     then do
-      parsed <- mapLeft ParserError $ parseProgram source
-      return $ lexResult { parsedAST = Just parsed }
+      (parsed, symTable) <- mapLeft ParserError $ parseProgram source
+      return $ lexResult { parsedAST = Just parsed
+                        , symbolTable = Just symTable }
     else return lexResult
 
-  -- Create Program from parsed AST
+  -- Create Program with symbol table
   astResult <- if targetStage opts >= Parsing
-    then case parsedAST parseResult of
-      Just topLevels -> do
+    then case (parsedAST parseResult, symbolTable parseResult) of
+      (Just topLevels, Just symTable) -> do
         let prog = Program topLevels
         return $ parseResult { program = Just prog }
-      Nothing -> return parseResult
+      _ -> return parseResult
     else return parseResult
 
   -- Semantic Analysis
   semanticResult <- if targetStage opts >= SemanticAnalysis
-    then case program astResult of
-      Just prog -> do
-        a <- mapLeft AnalysisError $ analyze prog
+    then case (program astResult, symbolTable astResult) of
+      (Just prog, Just symTable) -> do
+        a <- mapLeft AnalysisError $ analyzeWithSymbols prog symTable
         return $ astResult { analyzed = Just a }
-      Nothing -> return astResult
+      _ -> return astResult
     else return astResult
 
   -- IR Conversion
   irResult <- if targetStage opts >= IRConversion
-    then case analyzed semanticResult of
-      Just prog -> do
-        ir <- mapLeft IRConversionError $ convertToIR' prog
+    then case (analyzed semanticResult, symbolTable semanticResult) of
+      (Just prog, Just symTable) -> do
+        ir <- mapLeft IRConversionError $ convertToIR' prog symTable
         return $ semanticResult { ir = Just ir }
-      Nothing -> return semanticResult
+      _ -> return semanticResult
     else return semanticResult
 
   -- Code Generation

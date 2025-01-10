@@ -2,6 +2,7 @@
 module Zap.Parser.Program
   ( parseProgram
   , parseTopLevel
+  , parseStructFields
   ) where
 
 import Control.Monad (when)
@@ -15,15 +16,18 @@ import Zap.Parser.Core
 import Zap.Parser.Expr
 import Zap.AST
 
-parseProgram :: T.Text -> Either ParseError [TopLevel]
+parseProgram :: T.Text -> Either ParseError ([TopLevel], SymbolTable)
 parseProgram input = do
     traceM "\n=== Starting Program Parsing ==="
     traceM $ "Input text: " ++ T.unpack input
     tokens <- mapLexError $ tokenize input
     traceM $ "Tokenized input: " ++ show tokens
-    result <- runParser parseTopLevels tokens
+    (result, finalState) <- runParserWithState parseTopLevels tokens
     traceM $ "Parsed top-levels: " ++ show result
-    return result
+    return (result, stateSymTable finalState)
+
+runParserWithState :: Parser a -> [Located] -> Either ParseError (a, ParseState)
+runParserWithState p tokens = runStateT p (ParseState tokens 0 0 emptySymbolTable)
 
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
@@ -72,16 +76,20 @@ parseTopLevel = do
                     expr <- parseVarDecl
                     return $ TLExpr expr
                 TType -> do
-                    traceM "Found type definition"
+                    traceM "\n=== Parsing type declaration ==="
                     _ <- matchToken (== TType) "type"
                     typeNameTok <- matchToken isValidName "type name"
+
+                    -- Parse optional type parameters here before equals sign
+                    typeParams <- parseTypeParams
+
                     _ <- matchToken (== (TOperator "=")) "equals sign"
                     case locToken typeNameTok of
                         TWord name -> do
                             traceM $ "Parsing type definition for: " ++ name
-                            typeDefinition <- parseTypeDefinition (T.pack name)
+                            typeDefinition <- parseTypeDefinition (T.pack name) typeParams  -- Pass type params
                             let tl = TLType name typeDefinition
-                            traceM $ "Parsed type definition: " ++ show tl
+                            traceM $ "Created type declaration: " ++ show tl
                             return tl
                         _ -> throwError $ UnexpectedToken typeNameTok "type name"
                 TWord "print" -> do
@@ -117,15 +125,19 @@ parseTopLevel = do
                     return $ TLDecl decl
                 TWord name | isValidName (locToken tok) -> do
                     traceM $ "Found identifier at top-level"
-                    -- Look ahead for assignment operators
-                    st' <- get
-                    case drop 1 $ stateTokens st' of
-                        (t:_) | locToken t == TOperator "=" || locToken t == TOperator "+=" -> do
-                            expr <- parseAssign Nothing
-                            return $ TLExpr expr
-                        _ -> do
-                            expr <- parseMaybeCall name
-                            return $ TLExpr expr
+                    expr <- parseExpression  -- Use full expression parser
+                    return $ TLExpr expr
+                -- TWord name | isValidName (locToken tok) -> do
+                --     traceM $ "Found identifier at top-level"
+                --     -- Look ahead for assignment operators
+                --     st' <- get
+                --     case drop 1 $ stateTokens st' of
+                --         (t:_) | locToken t == TOperator "=" || locToken t == TOperator "+=" -> do
+                --             expr <- parseAssign Nothing
+                --             return $ TLExpr expr
+                --         _ -> do
+                --             expr <- parseMaybeCall name
+                --             return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"
@@ -186,14 +198,51 @@ parseLetBlock = do
                     traceM $ "Let block ended due to other token: " ++ show tok
                     return []
 
-parseTypeDefinition :: T.Text -> Parser Type
-parseTypeDefinition givenName = do
-    traceM $ "Parsing type definition for " ++ T.unpack givenName
+parseTypeDefinition :: T.Text -> [String] -> Parser Type
+parseTypeDefinition givenName params = do
+    traceM $ "\n=== parseTypeDefinition ==="
+    traceM $ "Parsing type: " ++ T.unpack givenName
+
+    -- Match struct keyword directly - equals was already consumed
     _ <- matchToken (== TStruct) "struct"
+
     fields <- parseStructFields
-    let t = TypeStruct (T.unpack givenName) fields
-    traceM $ "Constructed TypeStruct: " ++ show t
-    return t
+    traceM $ "Parsed fields: " ++ show fields
+
+    st <- gets stateSymTable
+    traceM $ "Initial symbol table: " ++ show st
+
+    let name = T.unpack givenName
+    let (sid, newSt) = if null params
+                       then registerStruct name fields st
+                       else registerParamStruct name params fields st
+
+    modify $ \s -> s { stateSymTable = newSt }
+    return $ TypeStruct sid name
+
+parseTypeParams :: Parser [String]
+parseTypeParams = do
+    st <- get
+    case stateTokens st of
+        (tok:_) | locToken tok == TLeftBracket -> do
+            _ <- matchToken (== TLeftBracket) "["
+            params <- parseParams
+            _ <- matchToken (== TRightBracket) "]"
+            return params
+        _ -> return []  -- No type parameters
+  where
+    parseParams = do
+        tok <- matchToken isValidName "type parameter"
+        case locToken tok of
+            TWord name -> do
+                st <- get
+                case stateTokens st of
+                    (next:_) | locToken next == TComma -> do
+                        _ <- matchToken (== TComma) ","
+                        rest <- parseParams
+                        return (name : rest)
+                    _ -> return [name]
+            _ -> throwError $ UnexpectedToken tok "type parameter name"
 
 parseStructFields :: Parser [(String, Type)]
 parseStructFields = do
@@ -230,20 +279,26 @@ parseType = do
     traceM "Parsing type"
     tok <- matchToken isValidName "type name"
     case locToken tok of
+        TWord "i32" -> do
+            traceM "Recognized Int32"
+            return $ TypeNum Int32
+        TWord "i64" -> do
+            traceM "Recognized Int64"
+            return $ TypeNum Int64
         TWord "f32" -> do
             traceM "Recognized Float32"
             return $ TypeNum Float32
         TWord "f64" -> do
             traceM "Recognized Float64"
             return $ TypeNum Float64
-        TWord "i32"   -> do
-            traceM "Recognized Int32"
-            return $ TypeNum Int32
-        TWord "i64"   -> do
-            traceM "Recognized Int64"
-            return $ TypeNum Int64
-        TWord other     -> do
-            traceM $ "Unrecognized type name: " ++ other
-            throwError $ UnexpectedToken tok "type name"
+        TWord name
+            -- If it's a single uppercase letter, treat as type parameter
+            | length name == 1 && isUpper (head name) -> do
+                traceM $ "Recognized type parameter: " ++ name
+                return $ TypeParam name
+            | otherwise -> do
+                traceM $ "Unrecognized type name: " ++ name
+                throwError $ UnexpectedToken tok "type name"
         _ -> throwError $ UnexpectedToken tok "type name"
-
+  where
+    isUpper c = c >= 'A' && c <= 'Z'

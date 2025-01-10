@@ -35,6 +35,8 @@ data Token
   | TLeftParen
   | TRightParen
   | TComma
+  | TLeftBracket
+  | TRightBracket
   deriving (Show, Eq)
 
 -- Located tokens
@@ -135,6 +137,16 @@ scanTokensWithState state line col (c:cs) = do
         '"' -> do
             traceM $ "scanTokens: Starting string literal"
             lexString line col "" cs
+
+        '[' -> do
+            traceM $ "scanTokens: Found left bracket at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokensWithState state line (col + 1) cs
+            Right (Located TLeftBracket col line : rest)
+
+        ']' -> do
+            traceM $ "scanTokens: Found right bracket at line " ++ show line ++ ", col " ++ show col
+            rest <- scanTokensWithState state line (col + 1) cs
+            Right (Located TRightBracket col line : rest)
 
         _ | isSpace c -> do
             traceM $ "scanTokens: Processing whitespace"

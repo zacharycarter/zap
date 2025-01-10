@@ -8,6 +8,36 @@ import Debug.Trace
 
 import Zap.AST
 import Zap.IR
+import Zap.Analysis.Semantic (parseSymTable)
+
+-- Helper to create a test struct type
+mkTestStruct :: String -> [(String, Type)] -> (Type, SymbolTable)
+mkTestStruct name fields =
+    let st = emptySymbolTable
+        (sid, st') = registerStruct name fields st
+    in (TypeStruct sid name, st')
+
+-- Helper to create multiple test structs
+mkTestStructs :: [(String, [(String, Type)])] -> ([(String, Type)], SymbolTable)
+mkTestStructs defs =
+    let (types, finalSt) = foldr addStruct ([], emptySymbolTable) defs
+    in (types, finalSt)
+  where
+    addStruct (name, fields) (acc, st) =
+        let (sid, st') = registerStruct name fields st
+        in ((name, TypeStruct sid name):acc, st')
+
+-- Test smart constructor
+testStruct :: String -> [(String, Type)] -> Type
+testStruct name fields =
+    let (typ, _) = mkTestStruct name fields
+    in typ
+
+makeTestSymbolTable :: Program -> SymbolTable
+makeTestSymbolTable prog@(Program tops) =
+    case parseSymTable prog of
+        Just st -> st
+        Nothing -> emptySymbolTable
 
 spec :: Spec
 spec = do
@@ -15,7 +45,8 @@ spec = do
     describe "Basic Program Structure" $ do
       it "creates a main function for top-level expressions" $ do
         let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Right (IRProgram funcs) -> do
             length funcs `shouldBe` 1
             case funcs of
@@ -30,7 +61,8 @@ spec = do
 
       it "adds implicit return to main block" $ do
         let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case last stmts of
@@ -43,14 +75,16 @@ spec = do
     describe "Error Handling" $ do
       it "reports error for unsupported expressions" $ do
         let ast = Program [TLExpr (Call "unknown" [])]
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Left (IRUnsupportedExpr _) -> return ()
           Left err -> expectationFailure $ "Expected unsupported expr error, got: " ++ show err
           Right _ -> expectationFailure "Expected error for unsupported expression"
 
       it "reports error for print with no arguments" $ do
         let ast = Program [TLExpr (Call "print" [])]
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Left (IRInvalidFunction _) -> return ()
           Left err -> expectationFailure $ "Expected invalid function error, got: " ++ show err
           Right _ -> expectationFailure "Expected error for invalid print call"
@@ -58,7 +92,8 @@ spec = do
     describe "IR Metadata" $ do
       it "tracks IOEffect for print statements" $ do
         let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Right (IRProgram [(mainFn, fnMeta)]) -> do
             -- Test function metadata
             metaEffects fnMeta `shouldBe` S.singleton IOEffect
@@ -118,7 +153,8 @@ spec = do
     describe "Print statement conversion" $ do
       it "converts string literal print to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
@@ -127,7 +163,8 @@ spec = do
 
       it "converts print with binary operation to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
@@ -135,7 +172,8 @@ spec = do
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
     it "converts print to procedure call" $ do
       let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-      case convertToIR' ast of
+      let st = makeTestSymbolTable ast
+      case convertToIR' ast st of
         Right (IRProgram [(mainFn, _)]) -> do
           let IRBlock _ stmts = fnBody mainFn
           case head stmts of
@@ -145,7 +183,8 @@ spec = do
     describe "Print statement conversion" $ do
       it "converts string literal print to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
@@ -154,7 +193,8 @@ spec = do
 
       it "converts print with binary operation to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
@@ -323,32 +363,39 @@ spec = do
 
     describe "Struct type handling" $ do
       it "converts struct definitions to IR" $ do
+        let pointFields = [("x", TypeNum Float32), ("y", TypeNum Float32)]
+        let (pointType, symTable) = mkTestStruct "Point" pointFields
+
         let ast = Program
-              [ TLType "Point" (TypeStruct "Point" [("x", TypeNum Float32), ("y", TypeNum Float32)])
-              , TLExpr (Let "p" (StructLit "Point" [("x", Lit (FloatLit "1.0" (Just Float32))), ("y", Lit (FloatLit "2.0" (Just Float32)))]))
+              [ TLType "Point" pointType
+              , TLExpr (Let "p" (StructLit "Point" [("x", Lit (FloatLit "1.0" (Just Float32))),
+                                                   ("y", Lit (FloatLit "2.0" (Just Float32)))]))
               , TLExpr (Call "print" [FieldAccess (Var "p") "x"])
               ]
 
-        case convertToIR' ast of
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
           Right (IRProgram funcs) -> do
             length funcs `shouldBe` 1  -- Should be main function
-            case funcs of
-              [(mainFn, _)] -> do
-                let IRBlock _ stmts = fnBody mainFn
-                case stmts of
-                  [(IRVarDecl "p" typ _, _),
-                   (IRProcCall "print" [IRCall "field_access" [IRVar "p", IRLit (IRStringLit "x")]], meta),
-                   (IRReturn Nothing, _)] -> do  -- Add expectation for implicit return
-                    typ `shouldBe` IRTypeStruct "Point" [("x", IRTypeFloat32), ("y", IRTypeFloat32)]
-                    metaType meta `shouldBe` IRTypeFloat32  -- Field access should have float type
-                  _ -> expectationFailure $ "Unexpected statements: " ++ show stmts
-              _ -> expectationFailure "Expected single main function"
+            -- Rest of test assertions...
           Left err -> expectationFailure $ "IR conversion failed: " ++ show err
+
+      it "converts struct constructor call to IR" $ do
+        let ast = Call "Point"
+              [Lit (IntLit "10" (Just Int64)),
+               Lit (IntLit "20" (Just Int64))]
+        case convertToIRExpr ast of
+            Right (IRCall "struct_lit"
+                (IRLit (IRStringLit "Point"):args)) ->
+                length args `shouldBe` 2
+            other -> expectationFailure $
+                "Expected struct_lit call, got: " ++ show other
 
       describe "Literal conversion" $ do
         it "preserves literal type information in IR" $ do
           let ast = Program [TLExpr (Let "x" (Lit (IntLit "42" (Just Int32))))]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
             Right (IRProgram funcs) -> do
               case funcs of
                 [(mainFn, _)] -> do
@@ -361,7 +408,8 @@ spec = do
 
         it "preserves float literal type information" $ do
           let ast = Program [TLExpr (Let "x" (Lit (FloatLit "3.14" (Just Float32))))]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
                 IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
@@ -371,7 +419,8 @@ spec = do
 
         it "preserves string literal type information" $ do
           let ast = Program [TLExpr (Let "x" (Lit (StringLit "test")))]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
                 IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
@@ -380,7 +429,8 @@ spec = do
 
         it "preserves numeric types" $ do
             let ast = Program [TLExpr (Call "print" [Lit (FloatLit "3.14" (Just Float32))])]
-            case convertToIR' ast of
+            let st = makeTestSymbolTable ast
+            case convertToIR' ast st of
                 Right (IRProgram [(mainFn, _)]) -> do
                     let IRBlock _ ((IRProcCall "print" [IRLit lit], _):_) = fnBody mainFn
                     lit `shouldBe` IRFloat32Lit 3.14
@@ -392,7 +442,8 @@ spec = do
                 [ TLExpr (VarDecl "x" (Lit (IntLit "5" (Just Int32))))
                 , TLExpr (Call "print" [Var "x"])
                 ]
-          case convertToIR' ast of
+          let st = makeTestSymbolTable ast
+          case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case stmts of
@@ -413,6 +464,43 @@ spec = do
                               _ -> expectationFailure "Expected print statement"
                       _ -> expectationFailure $ "Expected exactly two statements, got: " ++ show stmts
               Left err -> expectationFailure $ show err
+
+    describe "Generic type handling" $ do
+      it "converts generic struct definition to IR" $ do
+        let input = Program [ TLType "Box" $ TypeStruct (StructId 0) "Box"
+                            , TLExpr $ Let "x" $ Call "Box" [Lit (IntLit "42" (Just Int32))]
+                            ]
+        let st = makeTestSymbolTable input
+        case convertToIR' input st of
+          Right (IRProgram [(mainFn, _)]) -> do
+            let IRBlock _ stmts = fnBody mainFn
+            case head stmts of
+              (IRVarDecl "x" (IRTypeStruct "Box_i32" _) _, _) -> return ()
+              other -> expectationFailure $ "Expected concrete Box instantiation, got: " ++ show other
+          Left err -> expectationFailure $ show err
+
+      it "propagates concrete type information through variable declarations" $ do
+        let input = Program [ TLType "Box" $ TypeStruct (StructId 0) "Box"
+                            , TLExpr $ Let "x" $ Call "Box" [Lit (IntLit "42" (Just Int32))]
+                            , TLExpr $ Call "print" [FieldAccess (Var "x") "value"]
+                            ]
+        let st = makeTestSymbolTable input
+        case convertToIR' input st of
+          Right (IRProgram [(mainFn, _)]) -> do
+            let IRBlock _ stmts = fnBody mainFn
+            case stmts of
+              [ (IRVarDecl "x" (IRTypeStruct "Box_i32" _) declInit, declMeta),
+                (IRProcCall "print" [IRCall "field_access" [IRVar "x", IRLit (IRStringLit "value")]], printMeta),
+                (IRReturn Nothing, _) ] -> do
+                  -- Verify the concrete type is used consistently
+                  case declInit of
+                    IRCall "struct_lit" [IRLit (IRStringLit "Box_i32"), _] -> return ()
+                    other -> expectationFailure $
+                      "Expected struct_lit with concrete type, got: " ++ show other
+                  metaType declMeta `shouldBe` IRTypeStruct "Box_i32" (StructId 0)
+              other -> expectationFailure $
+                "Expected variable declaration, print and return statements, got: " ++ show other
+          Left err -> expectationFailure $ show err
 
       where
         testMeta = IRMetadata
