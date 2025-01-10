@@ -29,7 +29,6 @@ library
       Zap.AST
       Zap.Codegen.C
       Zap.Compiler
-      Zap.Compiler.OptConfig
       Zap.IR
       Zap.Parser.Core
       Zap.Parser.Expr
