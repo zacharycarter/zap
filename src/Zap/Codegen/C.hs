@@ -15,30 +15,40 @@ import Debug.Trace
 import Zap.IR
 import Zap.AST (Op(..), StructId(..), StructDef(..), SymbolTable(..), Type(..), lookupStruct)
 
+data CGState = CGState {
+  varTypes :: M.Map String IRType
+}
+
+initialCGState :: CGState
+initialCGState = CGState M.empty
+
 data CGenError
   = UnsupportedType IRType
   | UnsupportedOperation T.Text
   deriving (Show, Eq)
 
 generateC :: IRProgram -> Either CGenError T.Text
-generateC (IRProgram funcs) = do
-    traceM "\n=== Starting C Code Generation ==="
+generateC prog = evalStateT (generateCWithState prog) (CGState M.empty)
 
-    -- Generate struct definitions
+generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
+generateCWithState (IRProgram funcs) = do
+    lift $ traceM "\n=== Starting C Code Generation ==="
+
+    -- Generate struct definitions (no state needed)
     let structDefs = generateStructDefinitions funcs
 
-    -- Generate each function and combine results
-    functionDefs <- mapM generateFunction funcs
+    -- Generate each function with state
+    functionDefs <- mapM generateFunctionWithState funcs
 
     let program = T.unlines
           [ "#include <stdio.h>"
           , "#include <stdint.h>"
           , ""
-          , structDefs  -- Add struct definitions
+          , structDefs
           , T.unlines functionDefs
           ]
 
-    traceM $ "\n=== Final Generated Program ===\n" ++ T.unpack program
+    lift $ traceM $ "\n=== Final Generated Program ===\n" ++ T.unpack program
     return program
 
 -- Helper to generate struct definitions
@@ -115,21 +125,23 @@ irTypeToC IRTypeFloat64 = "double"
 irTypeToC (IRTypeStruct name _) = T.concat ["struct ", T.pack name]
 irTypeToC _ = "void"  -- Default case
 
-generateFunction :: (IRFuncDecl, IRMetadata) -> Either CGenError T.Text
-generateFunction (func, _) = do
-    body <- generateBlock (fnBody func)
+generateFunctionWithState :: (IRFuncDecl, IRMetadata) -> StateT CGState (Either CGenError) T.Text
+generateFunctionWithState (func, _) = do
+    -- Convert body with state tracking
+    body <- generateBlockWithState (fnBody func)
 
-    -- Determine return type for function signature
+    -- Determine return type (unchanged)
     let typeStr = case fnRetType func of
           IRTypeInt32 -> "int32_t"
           IRTypeVoid -> "void"
           _ -> "int"  -- Default to int for now
 
-    -- Generate function signature based on name and parameters
+    -- Generate function signature (unchanged)
     let signature = case fnName func of
-          "main" -> T.pack "int main(void)"  -- Preserve existing main() handling
+          "main" -> T.pack "int main(void)"
           _ -> T.concat [T.pack typeStr, " ", T.pack (fnName func), "(", generateParams (fnParams func), ")"]
 
+    -- Return function text (unchanged but lift the string creation)
     return $ T.unlines $ map rstrip $ map T.unpack $
       [ signature <> T.pack " {"
       , body
@@ -152,32 +164,41 @@ generateFunction (func, _) = do
     paramTypeToC IRTypeVoid = "void"
     paramTypeToC _ = "int"  -- Default to int for now
 
-generateBlock :: IRBlock -> Either CGenError T.Text
-generateBlock (IRBlock _ stmts) = do
-    generatedStmts <- mapM generateStmt stmts
-    return $ T.unlines generatedStmts
+generateBlockWithState :: IRBlock -> StateT CGState (Either CGenError) T.Text
+generateBlockWithState (IRBlock _ stmts) = do
+  -- Convert statements with state tracking
+  generatedStmts <- mapM generateStmtWithState stmts
+  return $ T.unlines generatedStmts
 
-generateStmt :: (IRStmt, IRMetadata) -> Either CGenError T.Text
-generateStmt (stmt, _) = case stmt of
+generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
+generateStmtWithState (stmt, _) = case stmt of
     IRVarDecl name irType initExpr -> do
-        exprCode <- generateExpr initExpr
-        -- Use proper type for struct declarations
+        -- Track variable type in state
+        modify $ \s -> s { varTypes = M.insert name irType (varTypes s) }
+        -- Now generate the variable declaration
+        exprCode <- generateExprWithState initExpr
         let typeStr = case irType of
               IRTypeStruct sname _ -> T.concat ["struct ", T.pack sname]
               _ -> irTypeToC irType
         return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
+
     IRStmtExpr expr -> do
-        exprCode <- generateExpr expr
-        return $ T.concat ["    ", exprCode, ";"]  -- Add semicolon here
-    IRReturn Nothing -> return "    return 0;"
+        exprCode <- generateExprWithState expr
+        return $ T.concat ["    ", exprCode, ";"]
+
+    IRReturn Nothing ->
+        return "    return 0;"
+
     IRReturn (Just expr) -> do
-        exprCode <- generateExpr expr
+        exprCode <- generateExprWithState expr
         return $ T.concat ["    return ", exprCode, ";"]
+
     IRAssign name expr -> do
-        exprCode <- generateExpr expr
+        exprCode <- generateExprWithState expr
         return $ T.concat ["    ", T.pack name, " = ", exprCode, ";"]
+
     IRAssignOp name op expr -> do
-        exprCode <- generateExpr expr
+        exprCode <- generateExprWithState expr
         let opStr = case op of
               Add -> "+="
               Sub -> "-="
@@ -185,21 +206,27 @@ generateStmt (stmt, _) = case stmt of
               Div -> "/="
               _ -> error $ "Unsupported compound assignment operator: " ++ show op
         return $ T.concat ["    ", T.pack name, " ", T.pack opStr, " ", exprCode, ";"]
+
     IRLabel label ->
         return $ T.concat [T.pack label, ":"]
+
     IRGoto label ->
         return $ T.concat ["    goto ", T.pack label, ";"]
+
     IRJumpIfTrue cond label -> do
-        condCode <- generateExpr cond
+        condCode <- generateExprWithState cond
         return $ T.concat ["    if (", condCode, ") goto ", T.pack label, ";"]
+
     IRJumpIfZero cond label -> do
-        condCode <- generateExpr cond
+        condCode <- generateExprWithState cond
         return $ T.concat ["    if (!(", condCode, ")) goto ", T.pack label, ";"]
+
     IRProcCall "print" [expr] -> do
-        (value, fmt) <- generatePrintExpr expr
+        (value, fmt) <- generatePrintExprWithState expr
         return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
+
     IRProcCall name _ ->
-        Left $ UnsupportedOperation $ T.pack $ "Unsupported procedure: " ++ name
+        lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported procedure: " ++ name
 
 -- Helper to detect if a condition is already negated
 isNegatedCondition :: T.Text -> Bool
@@ -221,24 +248,22 @@ generateLiteral (IRFloat64Lit n) = T.pack $ show n
 generateLiteral (IRVarRef name) = T.pack name
 generateLiteral (IRStringLit s) = T.concat ["\"", T.pack s, "\""]
 
-generateExpr :: IRExpr -> Either CGenError T.Text
-generateExpr expr = do
+generateExprWithState :: IRExpr -> StateT CGState (Either CGenError) T.Text
+generateExprWithState expr = do
     traceM $ "\n=== generateExpr called with: " ++ show expr
     case expr of
         IRCall "field_access" [baseExpr, IRLit (IRStringLit field)] -> do
-             traceM $ "\n=== generateExpr: field_access ==="
-             traceM $ "Base expr: " ++ show baseExpr
-             traceM $ "Field: " ++ field
-             base <- generateExpr baseExpr
-             let result = T.concat [base, ".", T.pack field]
-             traceM $ "Generated field access: " ++ T.unpack result
-             return result
+            traceM $ "\n=== generateExpr: field_access ==="
+            base <- generateExprWithState baseExpr
+            let result = T.concat [base, ".", T.pack field]
+            traceM $ "Generated field access: " ++ T.unpack result
+            return result
 
         IRCall "struct_lit" (IRLit (IRStringLit name):fields) -> do
             traceM $ "Generating struct literal"
             traceM $ "Struct name: " ++ name
             traceM $ "Fields: " ++ show fields
-            fieldVals <- mapM generateExpr fields
+            fieldVals <- mapM generateExprWithState fields
             let result = T.concat ["(struct ", T.pack name, ") {", T.intercalate ", " fieldVals, "}"]
             traceM $ "Generated struct init: " ++ T.unpack result
             return result
@@ -246,7 +271,7 @@ generateExpr expr = do
         IRCall "print" [expr] -> do
             traceM $ "\n=== generateExpr: print ==="
             traceM $ "Print argument: " ++ show expr
-            (value, fmt) <- generatePrintExpr expr
+            (value, fmt) <- generatePrintExprWithState expr
             traceM $ "Generated print: value=" ++ T.unpack value ++ ", fmt=" ++ T.unpack fmt
             return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
 
@@ -256,8 +281,8 @@ generateExpr expr = do
             traceM $ "Left expr: " ++ show e1
             traceM $ "Right expr: " ++ show e2
             -- Map operator strings to C operators
-            left <- generateExpr e1
-            right <- generateExpr e2
+            left <- generateExprWithState e1
+            right <- generateExprWithState e2
             let cOp = case op of
                   "Lt" -> "<"
                   "Gt" -> ">"
@@ -275,51 +300,80 @@ generateExpr expr = do
 
         IRVar name -> return $ T.pack name
 
-        expr -> Left $ UnsupportedOperation $ T.pack $ "Unsupported expression: " ++ show expr
+        expr -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported expression: " ++ show expr
 
 -- Helper to determine format specifier
-generatePrintExpr :: IRExpr -> Either CGenError (T.Text, T.Text)
-generatePrintExpr (IRCall "field_access" [baseExpr, IRLit (IRStringLit field)]) = do
-    base <- generateExpr baseExpr
-    return (T.concat [base, ".", T.pack field], "%d")
-generatePrintExpr (IRLit (IRStringLit str)) =
-    Right (T.concat ["\"", T.pack str, "\""], "%s")
-generatePrintExpr (IRLit (IRInt32Lit n)) =
-    Right (T.pack (show n), "%d")
-generatePrintExpr (IRLit (IRInt64Lit n)) =
-    Right (T.pack (show n), "%lld")
-generatePrintExpr (IRLit (IRFloat32Lit n)) =
-    Right (T.pack (show n), "%f")
-generatePrintExpr (IRLit (IRFloat64Lit n)) =
-    Right (T.pack (show n), "%lf")
-generatePrintExpr (IRVar name) =
-    Right (T.pack name, "%d")  -- Default to int format
-generatePrintExpr (IRLit (IRVarRef name)) =
-    Right (T.pack name, "%d")  -- Assuming variables are ints for now
-generatePrintExpr (IRCall op [e1, e2]) = case op of
-    "Lt" -> do
-        left <- generateExpr e1
-        right <- generateExpr e2
-        Right (T.concat ["((", left, ") < (", right, ") ? 1 : 0)"], "%d")
-    "Gt" -> do
-        left <- generateExpr e1
-        right <- generateExpr e2
-        Right (T.concat ["((", left, ") > (", right, ") ? 1 : 0)"], "%d")
-    "Eq" -> do
-        left <- generateExpr e1
-        right <- generateExpr e2
-        Right (T.concat ["((", left, ") == (", right, ") ? 1 : 0)"], "%d")
-    "NotEq" -> do
-        left <- generateExpr e1
-        right <- generateExpr e2
-        Right (T.concat ["((", left, ") != (", right, ") ? 1 : 0)"], "%d")
-    _ -> do
-        -- For other function calls, fall back to default behavior
-        argCode <- mapM generateExpr [e1, e2]
-        let call = T.concat [T.pack op, "(", T.intercalate ", " argCode, ")"]
-        Right (call, "%d")
-generatePrintExpr expr =
-    -- Handle other expressions by generating them normally
-    generateExpr expr >>= \exprCode -> Right (exprCode, "%d")
+generatePrintExprWithState :: IRExpr -> StateT CGState (Either CGenError) (T.Text, T.Text)
+generatePrintExprWithState expr = do
+    traceM $ "\n=== generatePrintExpr ==="
+    traceM $ "Input expression: " ++ show expr
+    case expr of
+        IRCall "field_access" [baseExpr, IRLit (IRStringLit field)] -> do
+            traceM $ "Processing field access:"
+            traceM $ "  Base expr: " ++ show baseExpr
+            traceM $ "  Field: " ++ field
+            base <- generateExprWithState baseExpr
+            traceM $ "  Generated base: " ++ T.unpack base
+
+            -- Get stored type information for the variable
+            st <- get
+            let fmt = case baseExpr of
+                  IRVar name -> case M.lookup name (varTypes st) of
+                    Just (IRTypeStruct sname _) ->
+                        if "_i64" `T.isSuffixOf` T.pack sname then "%ld"
+                        else if "_f32" `T.isSuffixOf` T.pack sname then "%f"
+                        else if "_f64" `T.isSuffixOf` T.pack sname then "%lf"
+                        else "%d"
+                    _ -> "%d"
+                  _ -> "%d"
+
+            traceM $ "  Selected format: " ++ T.unpack fmt
+            return (T.concat [base, ".", T.pack field], fmt)
+
+        IRLit (IRStringLit str) ->
+            return (T.concat ["\"", T.pack str, "\""], "%s")
+
+        IRLit (IRInt32Lit n) ->
+            return (T.pack (show n), "%d")
+
+        IRLit (IRInt64Lit n) ->
+            return (T.pack (show n ++ "L"), "%ld")
+
+        IRLit (IRFloat32Lit n) ->
+            return (T.pack (show n), "%f")
+
+        IRLit (IRFloat64Lit n) ->
+            return (T.pack (show n), "%lf")
+
+        IRVar name -> do
+            st <- get
+            let fmt = case M.lookup name (varTypes st) of
+                  Just (IRTypeStruct sname _) ->
+                    if "_i64" `T.isSuffixOf` T.pack sname then "%ld"
+                    else if "_f32" `T.isSuffixOf` T.pack sname then "%f"
+                    else if "_f64" `T.isSuffixOf` T.pack sname then "%lf"
+                    else "%d"
+                  _ -> "%d"
+            return (T.pack name, fmt)
+
+        IRLit (IRVarRef name) ->
+            return (T.pack name, "%d")
+
+        IRCall op [e1, e2] -> do
+            left <- generateExprWithState e1
+            right <- generateExprWithState e2
+            case op of
+                "Lt" -> return (T.concat ["((", left, ") < (", right, ") ? 1 : 0)"], "%d")
+                "Gt" -> return (T.concat ["((", left, ") > (", right, ") ? 1 : 0)"], "%d")
+                "Eq" -> return (T.concat ["((", left, ") == (", right, ") ? 1 : 0)"], "%d")
+                "NotEq" -> return (T.concat ["((", left, ") != (", right, ") ? 1 : 0)"], "%d")
+                _ -> do
+                    argCode <- mapM generateExprWithState [e1, e2]
+                    let call = T.concat [T.pack op, "(", T.intercalate ", " argCode, ")"]
+                    return (call, "%d")
+
+        expr -> do
+            exprCode <- generateExprWithState expr
+            return (exprCode, "%d")
 
 rstrip = T.pack . reverse . dropWhile isSpace . reverse

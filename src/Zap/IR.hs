@@ -628,11 +628,13 @@ convertToIRExpr (Call fname args)
     traceM $ "Name: " ++ fname
     convertedArgs <- mapM convertToIRExpr args
 
-    -- Generate concrete type name based on type arguments
+    -- Generate concrete type name based on argument types
     let concreteTypeName = case args of
           [Lit (IntLit _ (Just Int32))] -> fname ++ "_i32"
           [Lit (IntLit _ (Just Int64))] -> fname ++ "_i64"
-          _ -> fname  -- Fall back to non-generic case
+          [Lit (FloatLit _ (Just Float32))] -> fname ++ "_f32"
+          [Lit (FloatLit _ (Just Float64))] -> fname ++ "_f64"
+          _ -> fname
 
     traceM $ "Generated concrete type: " ++ concreteTypeName
     Right $ IRCall "struct_lit"

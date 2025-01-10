@@ -318,4 +318,18 @@ migratedTests =
         , expectedOutput = "10\n"
         , expectedExitCode = ExitSuccess
         }
+    , TestCase
+      { testName = "distinct_generic_instantiations"
+      , sourceCode = T.unlines
+          [ "type Box[T] = struct"
+          , "  value: T"
+          , ""
+          , "let x = Box[i32](42)"         -- First instantiation with i32
+          , "let y = Box[f32](3.14'f32)"   -- Second instantiation with f32
+          , "print x.value"                 -- Should print integer
+          , "print y.value"                 -- Should print float
+          ]
+      , expectedOutput = "42\n3.140000\n"
+      , expectedExitCode = ExitSuccess
+      }
   ]
