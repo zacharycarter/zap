@@ -131,6 +131,7 @@ data IRConversionError
   | IRUnsupportedLiteral String -- Unsupported literals
   | IRInvalidFunction String  -- Invalid function name/call
   | IRMissingMain            -- No main function found
+  | IRInvalidStructInitialization String -- Invalid struct initialization
   deriving (Show, Eq)
 
 data TypeInstance = TypeInstance
@@ -166,6 +167,7 @@ mkMetadata typ effs = IRMetadata
   , metaEffects = effs
   , metaSourcePos = Nothing
   , metaLiteralType = Nothing
+  , metaSymTable = Nothing
   }
 
 mkLiteralMetadata :: IRType -> S.Set Effect -> LiteralType -> IRMetadata
@@ -174,6 +176,7 @@ mkLiteralMetadata typ effs litType = IRMetadata
   , metaEffects = effs
   , metaSourcePos = Nothing
   , metaLiteralType = Just litType
+  , metaSymTable = Nothing
   }
 
 -- Loop context to track break targets
@@ -193,8 +196,8 @@ convertToIR' (Program tops) symTable = do
     traceM $ "Found functions: " ++ show funcs
     traceM $ "Found expressions: " ++ show exprs
 
-    convertedFuncs <- mapM convertFuncDecl funcs
-    (mainBlock, mainMeta) <- convertTops exprs Nothing
+    convertedFuncs <- mapM (convertFuncDecl symTable) funcs
+    (mainBlock, mainMeta) <- convertTops symTable exprs Nothing
     let mainFunc = (IRFuncDecl
           { fnName = "main"
           , fnParams = []
@@ -224,8 +227,8 @@ convertStructType (TypeStruct sid name) =
 convertStructType t = Right $ convertType t -- Fall back to existing type conversion
 
 -- | Convert function declarations to IR
-convertFuncDecl :: Decl -> Either IRConversionError (IRFuncDecl, IRMetadata)
-convertFuncDecl (DFunc name params retType body) = do
+convertFuncDecl :: SymbolTable -> Decl -> Either IRConversionError (IRFuncDecl, IRMetadata)
+convertFuncDecl symTable (DFunc name params retType body) = do
     traceM $ "\n=== Converting function: " ++ name
     traceM $ "Parameters: " ++ show params
     traceM $ "Return type: " ++ show retType
@@ -237,14 +240,14 @@ convertFuncDecl (DFunc name params retType body) = do
     case body of
         Block label bodyExprs blockResult -> do
             -- Convert each expression to IR statements
-            convertedStmts <- concat <$> mapM convertExprToStmts bodyExprs
+            convertedStmts <- concat <$> mapM (convertExprToStmts symTable) bodyExprs
 
             -- Handle the return value
             returnStmt <- case bodyExprs of
                 [] -> return [(IRReturn Nothing, mkMetadata (convertType retType) (S.singleton PureEffect))]
                 exprs -> do
                     -- Convert last expression for return
-                    lastExpr <- convertToIRExpr (last exprs)
+                    lastExpr <- convertToIRExprWithSymbols symTable (last exprs)
                     return [(IRReturn (Just lastExpr), mkMetadata (convertType retType) (S.singleton PureEffect))]
 
             let bodyBlock = IRBlock "function.entry" (convertedStmts ++ returnStmt)
@@ -259,19 +262,23 @@ convertFuncDecl (DFunc name params retType body) = do
         _ -> Left $ IRUnsupportedExpr $ "Function body must be a block: " ++ show body
 
 -- Helper to convert expressions to IR statements
-convertExprToStmts :: Expr -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertExprToStmts expr = do
+convertExprToStmts :: SymbolTable -> Expr -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertExprToStmts symTable expr = do
     traceM $ "=== Converting expression to statements: " ++ show expr
     case expr of
         Let name val -> do
           traceM $ "Converting Let binding for: " ++ name
-          convertedExpr <- convertToIRExpr val
+
+          when (isStructCall val) $ validateStructTypes val
+
+          convertedExpr <- convertToIRExprWithSymbols symTable val
 
           -- Extract type from expression
-          let irType = typeFromExpr val
+          let irType = typeFromExpr val (Just symTable)
           traceM $ "Meta type: " ++ show irType
 
           -- Create metadata based on type
+          traceM $ "Creating metadata for: " ++ show val
           let meta = case val of
                 Lit (IntLit _ mtype) ->
                   let litType = case mtype of
@@ -290,14 +297,16 @@ convertExprToStmts expr = do
                 _ ->
                   mkMetadata irType (S.singleton WriteEffect)
 
+          traceM $ "Created metadata: " ++ show meta
+
           traceM $ "Assigned type: " ++ show irType
           let stmt = IRVarDecl name irType convertedExpr
           traceM $ "Created statement: " ++ show stmt
           return [(IRVarDecl name irType convertedExpr, meta)]
         BinOp op e1 e2 -> do
             traceM $ "Converting binary operation: " ++ show op
-            left <- convertToIRExpr e1
-            right <- convertToIRExpr e2
+            left <- convertToIRExprWithSymbols symTable e1
+            right <- convertToIRExprWithSymbols symTable e2
             -- Create IR binary operation call
             let opStr = case op of
                     Add -> "Add"
@@ -310,37 +319,60 @@ convertExprToStmts expr = do
         Call "print" [arg] -> do
             traceM $ "=== Converting print statement ==="
             traceM $ "Input arg: " ++ show arg
-            converted <- convertToIRExpr arg
+            converted <- convertToIRExprWithSymbols symTable arg
             traceM $ "Converted arg: " ++ show converted
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             let stmt = (IRProcCall "print" [converted], meta)
             traceM $ "Generated statement: " ++ show stmt
             return [stmt]
         _ -> do
-            converted <- convertToIRExpr expr
+            converted <- convertToIRExprWithSymbols symTable expr
             return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
 
+validateStructTypes :: Expr -> Either IRConversionError ()
+validateStructTypes (Call fname [Lit lit])
+  | "_i32" `T.isSuffixOf` (T.pack fname) = case lit of
+      IntLit _ (Just Int32) -> Right ()
+      _ -> Left $ IRTypeError IRTypeInt32 (convertType $ literalToType lit)
+  | "_i64" `T.isSuffixOf` (T.pack fname) = case lit of
+      IntLit _ (Just Int64) -> Right ()
+      _ -> Left $ IRTypeError IRTypeInt64 (convertType $ literalToType lit)
+  | "_f32" `T.isSuffixOf` (T.pack fname) = case lit of
+      FloatLit _ (Just Float32) -> Right ()
+      _ -> Left $ IRTypeError IRTypeFloat32 (convertType $ literalToType lit)
+  | "_f64" `T.isSuffixOf` (T.pack fname) = case lit of
+      FloatLit _ (Just Float64) -> Right ()
+      _ -> Left $ IRTypeError IRTypeFloat64 (convertType $ literalToType lit)
+validateStructTypes _ = Right ()
+
+-- Helper to get type from literal
+literalToType :: Literal -> Type
+literalToType (IntLit _ (Just t)) = TypeNum t
+literalToType (FloatLit _ (Just t)) = TypeNum t
+literalToType _ = TypeVoid
+
+isStructCall :: Expr -> Bool
+isStructCall (Call fname _) = isFnameStructConstructor fname
+isStructCall _ = False
+
 -- Helper to determine IR type from AST expression
-typeFromExpr :: Expr -> IRType
-typeFromExpr (Lit (FloatLit _ (Just Float32))) = IRTypeFloat32
-typeFromExpr (Lit (FloatLit _ (Just Float64))) = IRTypeFloat64
-typeFromExpr (Lit (IntLit _ (Just Int32))) = IRTypeInt32
-typeFromExpr (Lit (IntLit _ (Just Int64))) = IRTypeInt64
-typeFromExpr (Call fname args) | isFnameStructConstructor fname =
-    -- Check for numeric type arguments to generate concrete type name
-    let concreteTypeName = case args of
-          [Lit (IntLit _ (Just Int32))] -> fname ++ "_i32"
-          [Lit (IntLit _ (Just Int64))] -> fname ++ "_i64"
-          [Lit (FloatLit _ (Just Float32))] -> fname ++ "_f32"
-          [Lit (FloatLit _ (Just Float64))] -> fname ++ "_f64"
-          _ -> fname
-    in IRTypeStruct concreteTypeName (StructId 0)  -- Using same StructId for now
-typeFromExpr (Call fname _) | isFnameStructConstructor fname =
+typeFromExpr :: Expr -> Maybe SymbolTable -> IRType
+typeFromExpr (Lit (FloatLit _ (Just Float32))) _ = IRTypeFloat32
+typeFromExpr (Lit (FloatLit _ (Just Float64))) _ = IRTypeFloat64
+typeFromExpr (Lit (IntLit _ (Just Int32))) _ = IRTypeInt32
+typeFromExpr (Lit (IntLit _ (Just Int64))) _ = IRTypeInt64
+typeFromExpr (Call fname args) symTable | isFnameStructConstructor fname =
+    case symTable >>= \st -> M.lookup fname (structNames st) of
+      Just sid -> case symTable >>= \st -> lookupStruct sid st of
+        Just def -> IRTypeStruct fname sid  -- Found the struct, use its real ID
+        Nothing -> error "Struct ID found but no definition" -- Will improve error handling
+      Nothing -> error $ "Unknown struct type: " ++ fname    -- Will improve error handling
+typeFromExpr (Call fname _) _ | isFnameStructConstructor fname =
     -- When we see a struct constructor call, use the name as the struct type
     IRTypeStruct fname (StructId 0)
-typeFromExpr (StructLit name _) =
+typeFromExpr (StructLit name _) _ =
     IRTypeStruct name (StructId 0)
-typeFromExpr _ = IRTypeVoid  -- Default case
+typeFromExpr _ _ = IRTypeVoid  -- Default case
 
 -- Helper to convert AST types to IR types
 convertType :: Type -> IRType
@@ -350,9 +382,9 @@ convertType TypeVoid = IRTypeVoid
 convertType (TypeStruct sid name) =
   IRTypeStruct name sid
 
-convertTops :: [TopLevel] -> Maybe LoopContext -> Either IRConversionError (IRBlock, IRMetadata)
-convertTops tops ctx = do
-    stmts <- concat <$> mapM (\t -> convertTop t ctx) tops
+convertTops :: SymbolTable -> [TopLevel] -> Maybe LoopContext -> Either IRConversionError (IRBlock, IRMetadata)
+convertTops symTable tops ctx = do
+    stmts <- concat <$> mapM (\t -> convertTop symTable t ctx) tops
     -- Get last metadata to preserve literal type info
     let lastMeta = if null stmts
         then mkMetadata IRTypeVoid (S.singleton PureEffect)
@@ -360,8 +392,8 @@ convertTops tops ctx = do
     let returnStmt = (IRReturn Nothing, mkMetadata IRTypeVoid (S.singleton PureEffect))
     return (IRBlock "main.entry" (stmts ++ [returnStmt]), lastMeta)
 
-convertTop :: TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
+convertTop :: SymbolTable -> TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertTop symTable (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
     let isBreakPattern = case thenExpr of
           Block _ blockExprs _ -> any isBreakStmt blockExprs
           _ -> False
@@ -370,7 +402,7 @@ convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
           Just loopCtx -> loopEndLabel loopCtx
           Nothing -> "if_end"
 
-    condExpr <- convertToIRExpr cond
+    condExpr <- convertToIRExprWithSymbols symTable cond
     let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
 
     if isBreakPattern
@@ -381,7 +413,7 @@ convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
                    ]
         else do
             -- Normal if case
-            thenStmts <- convertBlock thenExpr ctx
+            thenStmts <- convertBlock symTable thenExpr ctx
             return $ [ (IRJumpIfZero condExpr targetLabel, meta) ]
                     ++ thenStmts
                     ++ [ (IRLabel targetLabel, meta) ]
@@ -395,7 +427,7 @@ convertTop (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
         Just loopCtx -> loopNumber loopCtx
         Nothing -> 0
 
-convertTop (TLExpr (While cond body)) prevCtx = do
+convertTop symTable (TLExpr (While cond body)) prevCtx = do
     -- Generate next loop number based on previous context
     let nextNum = case prevCtx of
           Just ctx -> loopNumber ctx + 1
@@ -407,8 +439,8 @@ convertTop (TLExpr (While cond body)) prevCtx = do
     let ctx = LoopContext nextNum endLabel
 
     -- Convert condition and body with new context
-    condExpr <- convertToIRExpr cond
-    bodyStmts <- convertBlock body (Just ctx)
+    condExpr <- convertToIRExprWithSymbols symTable cond
+    bodyStmts <- convertBlock symTable body (Just ctx)
 
     -- Remove any trailing goto statements from bodyStmts that would duplicate the loop goto
     let cleanBodyStmts = removeTrailingGoto startLabel bodyStmts
@@ -429,10 +461,10 @@ convertTop (TLExpr (While cond body)) prevCtx = do
         (stmt@(IRGoto l, _):rest) | l == label -> reverse rest
         _ -> stmts
 
-convertTop (TLExpr (VarDecl name value)) ctx = do
+convertTop symTable (TLExpr (VarDecl name value)) ctx = do
     traceM $ "Converting top-level variable declaration: " ++ name
     traceM $ "With value: " ++ show value
-    convertedExpr <- convertToIRExpr value
+    convertedExpr <- convertToIRExprWithSymbols symTable value
 
     let irType = case value of
           Lit (IntLit _ mtype) ->
@@ -468,40 +500,40 @@ convertTop (TLExpr (VarDecl name value)) ctx = do
     traceM $ "Using IR type: " ++ show irType
     return [(IRVarDecl name irType convertedExpr, meta)]
 
-convertTop (TLExpr (Break _)) Nothing =
+convertTop _ (TLExpr (Break _)) Nothing =
     Left $ IRError "Break statement outside loop"
-convertTop (TLExpr (Break _)) (Just ctx) = do
+convertTop _ (TLExpr (Break _)) (Just ctx) = do
     let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
     return [(IRGoto (loopEndLabel ctx), meta)]
 
-convertTop (TLExpr (Assign name expr)) _ = do
-    convertedExpr <- convertToIRExpr expr
+convertTop symTable (TLExpr (Assign name expr)) _ = do
+    convertedExpr <- convertToIRExprWithSymbols symTable expr
     let meta = mkMetadata IRTypeVoid (S.singleton WriteEffect)
     return [(IRAssign name convertedExpr, meta)]
 
-convertTop (TLExpr (AssignOp name op expr)) _ = do
-    convertedExpr <- convertToIRExpr expr
+convertTop symTable (TLExpr (AssignOp name op expr)) _ = do
+    convertedExpr <- convertToIRExprWithSymbols symTable expr
     let meta = mkMetadata IRTypeVoid (S.singleton WriteEffect)
     return [(IRAssignOp name op convertedExpr, meta)]
 
-convertTop (TLExpr e) ctx = case e of
+convertTop symTable (TLExpr e) ctx = case e of
     -- Handle Let expression directly
-    Let {} -> convertExprToStmts e
+    Let {} -> convertExprToStmts symTable e
     -- Other top-level expressions continue to use convertExpr
-    _ -> (:[]) <$> convertExpr e
+    _ -> (:[]) <$> convertExpr symTable e
 
-convertBlock :: Expr -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertBlock (Block _ blockExprs _) ctx = do
+convertBlock :: SymbolTable -> Expr -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertBlock symTable (Block _ blockExprs _) ctx = do
     -- Convert each expression in block with context
-    stmtsLists <- mapM (\e -> convertTop (TLExpr e) ctx) blockExprs
+    stmtsLists <- mapM (\e -> convertTop symTable (TLExpr e) ctx) blockExprs
     return $ concat stmtsLists
-convertBlock expr _ = do
+convertBlock symTable expr _ = do
     -- Single expression blocks
-    converted <- convertExpr expr
+    converted <- convertExpr symTable expr
     return [converted]
 
-convertExpr :: Expr -> Either IRConversionError (IRStmt, IRMetadata)
-convertExpr (Call "print" [arg]) = do
+convertExpr :: SymbolTable -> Expr -> Either IRConversionError (IRStmt, IRMetadata)
+convertExpr symTable (Call "print" [arg]) = do
     traceM $ "Converting print expression with arg: " ++ show arg
     case arg of
         BinOp op e1 e2 | op `elem` [Add, Sub, Mul, Div] -> do  -- Add Sub to supported ops
@@ -514,12 +546,12 @@ convertExpr (Call "print" [arg]) = do
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [IRLit result], meta)
         Call fname args -> do
-            convertedArgs <- mapM convertToIRExpr args
+            convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [IRCall fname convertedArgs], meta)
         FieldAccess expr field -> do
             -- Handle field access expression directly
-            convertedExpr <- convertToIRExpr (FieldAccess expr field)
+            convertedExpr <- convertToIRExprWithSymbols symTable (FieldAccess expr field)
             let meta = mkMetadata IRTypeFloat32 (S.singleton IOEffect)
             return (IRProcCall "print" [convertedExpr], meta)
         Var name -> do
@@ -527,15 +559,15 @@ convertExpr (Call "print" [arg]) = do
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [IRVar name], meta)
         _ -> do
-            converted <- convertToIRExpr arg
+            converted <- convertToIRExprWithSymbols symTable arg
             traceM $ "Converted print arg to: " ++ show converted
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [converted], meta)
 
-convertExpr (Call "print" _) =
+convertExpr _ (Call "print" _) =
     Left $ IRInvalidFunction "print requires exactly one argument"
 
-convertExpr e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
+convertExpr _ e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 
 -- Helper to evaluate binary operations at compile time
 evalBinOp :: Op -> IRLiteral -> IRLiteral -> Either IRConversionError IRLiteral
@@ -599,11 +631,15 @@ convertToLiteral expr = case expr of
 
 -- Helper to convert expressions to IR
 convertToIRExpr :: Expr -> Either IRConversionError IRExpr
-convertToIRExpr (VarDecl name value) = do
+convertToIRExpr expr = convertToIRExprWithSymbols emptySymbolTable expr
+
+
+convertToIRExprWithSymbols :: SymbolTable -> Expr -> Either IRConversionError IRExpr
+convertToIRExprWithSymbols symTable (VarDecl name value) = do
     traceM $ "Converting variable declaration in expression: " ++ name
-    convertedExpr <- convertToIRExpr value
+    convertedExpr <- convertToIRExprWithSymbols symTable value
     Right $ IRCall "var_decl" [IRLit (IRStringLit name), convertedExpr]
-convertToIRExpr (Lit lit) = case lit of
+convertToIRExprWithSymbols _ (Lit lit) = case lit of
   IntLit val mtype -> case mtype of
     Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
     Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
@@ -621,77 +657,110 @@ convertToIRExpr (Lit lit) = case lit of
       Nothing -> Right $ IRLit $ IRFloat32Lit (read val)  -- Default choice
   StringLit val -> Right $ IRLit $ IRStringLit val
   BooleanLit val -> Right $ IRLit $ IRBoolLit val
-convertToIRExpr (Var name) = Right $ IRVar name
-convertToIRExpr (Call fname args)
+convertToIRExprWithSymbols _ (Var name) = Right $ IRVar name
+convertToIRExprWithSymbols symTable (Call fname args)
   | isFnameStructConstructor fname = do
-    traceM $ "\n=== Converting generic struct instantiation ==="
-    traceM $ "Name: " ++ fname
-    convertedArgs <- mapM convertToIRExpr args
+      traceM $ "\n=== Converting struct instantiation ==="
+      traceM $ "Name: " ++ fname
+      convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
 
-    -- Generate concrete type name based on argument types
-    let concreteTypeName = case args of
-          [Lit (IntLit _ (Just Int32))] -> fname ++ "_i32"
-          [Lit (IntLit _ (Just Int64))] -> fname ++ "_i64"
-          [Lit (FloatLit _ (Just Float32))] -> fname ++ "_f32"
-          [Lit (FloatLit _ (Just Float64))] -> fname ++ "_f64"
-          _ -> fname
-
-    traceM $ "Generated concrete type: " ++ concreteTypeName
-    Right $ IRCall "struct_lit"
-      (IRLit (IRStringLit concreteTypeName) : convertedArgs)
-convertToIRExpr (Call fname args) = do
-    traceM $ "\n=== convertToIRExpr Call ==="
-    traceM $ "Function name: " ++ fname
-    traceM $ "Args: " ++ show args
-    convertedArgs <- mapM convertToIRExpr args
-    traceM $ "Converted args: " ++ show convertedArgs
-    -- Add struct constructor case
-    if isFnameStructConstructor fname
+      let hasTypeParam = '[' `elem` fname && ']' `elem` fname
+      if hasTypeParam
         then do
-            traceM $ "Processing struct constructor: " ++ fname
-            case convertedArgs of
-                [] -> Left $ IRError "Empty struct constructor"
-                _ -> do
-                    let expr = IRCall "struct_lit" (IRLit (IRStringLit fname) : convertedArgs)
-                    traceM $ "Generated struct expr: " ++ show expr
-                    Right expr
-        else Right $ IRCall fname convertedArgs
-convertToIRExpr (Block _ blockExprs _) = do
+          let baseName = takeWhile (/= '[') fname
+          traceM $ "Base name extracted: " ++ baseName
+          let paramType = case dropWhile (/= '[') fname of
+                ('[':'i':'3':'2':']':_) -> TypeNum Int32
+                ('[':'i':'6':'4':']':_) -> TypeNum Int64
+                ('[':'f':'3':'2':']':_) -> TypeNum Float32
+                ('[':'f':'6':'4':']':_) -> TypeNum Float64
+                _ -> error $ "Invalid type parameter in: " ++ fname
+
+          -- Add field type validation here
+          case args of
+            [Lit lit] -> do
+              let litType = case lit of
+                    IntLit _ (Just t) -> TypeNum t
+                    FloatLit _ (Just t) -> TypeNum t
+                    _ -> TypeNum Int32  -- Default case
+              traceM $ "Validating struct field type: expected=" ++ show paramType ++
+                       ", got=" ++ show litType
+              when (litType /= paramType) $
+                Left $ IRTypeError
+                  (convertType litType)
+                  (convertType paramType)
+            _ -> Left $ IRError "Invalid struct initialization"
+
+          let concreteTypeName = baseName ++ "_" ++ typeToSuffix paramType
+          traceM $ "Generated concrete type name: " ++ concreteTypeName
+          traceM $ "Final struct literal IR: " ++ show (IRCall "struct_lit"
+                                                        (IRLit (IRStringLit concreteTypeName) : convertedArgs))
+          Right $ IRCall "struct_lit"
+            (IRLit (IRStringLit concreteTypeName) : convertedArgs)
+        else case convertedArgs of
+          [] -> Left $ IRError "Empty struct constructor"
+          (IRLit lit:_) -> do
+            Right $ IRCall "struct_lit"
+              (IRLit (IRStringLit fname) : convertedArgs)
+          _ -> Right $ IRCall "struct_lit"
+               (IRLit (IRStringLit fname) : convertedArgs)
+        -- else case convertedArgs of
+        --   [] -> Left $ IRError "Empty struct constructor"
+        --   (IRLit lit:_) -> do
+        --     -- Infer type suffix from literal
+        --     let inferredSuffix = case lit of
+        --           IRInt32Lit _ -> "_i32"
+        --           IRInt64Lit _ -> "_i64"
+        --           IRFloat32Lit _ -> "_f32"
+        --           IRFloat64Lit _ -> "_f64"
+        --           _ -> ""  -- No suffix for other literals
+        --     let specializedName = fname ++ inferredSuffix
+        --     Right $ IRCall "struct_lit"
+        --       (IRLit (IRStringLit specializedName) : convertedArgs)
+        --   _ -> Right $ IRCall "struct_lit"
+        --        (IRLit (IRStringLit fname) : convertedArgs)
+  | otherwise = do
+      traceM $ "\n=== convertToIRExprWithSymbols Call ==="
+      traceM $ "Function name: " ++ fname
+      traceM $ "Args: " ++ show args
+      convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+      traceM $ "Converted args: " ++ show convertedArgs
+      Right $ IRCall fname convertedArgs
+convertToIRExprWithSymbols symTable (Block _ blockExprs _) = do
     -- Handle last expression in block as result
     case blockExprs of
         [] -> Left $ IRError "Empty block"
-        exprs -> convertToIRExpr (last exprs)
-convertToIRExpr (BinOp op e1 e2) = do
+        exprs -> convertToIRExprWithSymbols symTable (last exprs)
+convertToIRExprWithSymbols symTable (BinOp op e1 e2) = do
     traceM $ "Converting binary operation: " ++ show op
-    left <- convertToIRExpr e1
-    right <- convertToIRExpr e2
+    left <- convertToIRExprWithSymbols symTable e1
+    right <- convertToIRExprWithSymbols symTable e2
     case op of
       Lt -> Right $ IRCall "Lt" [left, right]
       Gt -> Right $ IRCall "Gt" [left, right]
       Eq -> Right $ IRCall "Eq" [left, right]
       _ -> Right $ IRCall (opToString op) [left, right]
-convertToIRExpr (FieldAccess expr field) = do
-    traceM $ "\n=== convertToIRExpr: FieldAccess ==="
+convertToIRExprWithSymbols symTable (FieldAccess expr field) = do
+    traceM $ "\n=== convertToIRExprWithSymbols: FieldAccess ==="
     traceM $ "Base expression: " ++ show expr
     traceM $ "Field: " ++ field
-    convertedExpr <- convertToIRExpr expr
+    convertedExpr <- convertToIRExprWithSymbols symTable expr
     traceM $ "Converted base: " ++ show convertedExpr
     let result = IRCall "field_access" [convertedExpr, IRLit (IRStringLit field)]
     traceM $ "Generated field access: " ++ show result
     Right result
-convertToIRExpr (StructLit name fields) = do
+convertToIRExprWithSymbols symTable (StructLit name fields)  = do
     -- Get the struct ID from the symbol table
     let dummyId = StructId 0  -- TODO: Look up proper ID from symbol table
     -- Convert each field expression
     convertedFields <- mapM (\(fname, expr) -> do
-        irExpr <- convertToIRExpr expr
+        irExpr <- convertToIRExprWithSymbols symTable expr
         return (fname, irExpr)) fields
     -- Create struct literal call with field name/value pairs
     Right $ IRCall "struct_lit" (IRLit (IRStringLit name) :
         concatMap (\(fname, expr) ->
             [IRLit (IRStringLit fname), expr]) convertedFields)
-convertToIRExpr e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
-convertToIRExpr e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
+convertToIRExprWithSymbols _ e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 
 -- | Test if a name represents a struct constructor
 isFnameStructConstructor :: String -> Bool

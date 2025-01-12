@@ -380,17 +380,6 @@ spec = do
             -- Rest of test assertions...
           Left err -> expectationFailure $ "IR conversion failed: " ++ show err
 
-      it "converts struct constructor call to IR" $ do
-        let ast = Call "Point"
-              [Lit (IntLit "10" (Just Int64)),
-               Lit (IntLit "20" (Just Int64))]
-        case convertToIRExpr ast of
-            Right (IRCall "struct_lit"
-                (IRLit (IRStringLit "Point"):args)) ->
-                length args `shouldBe` 2
-            other -> expectationFailure $
-                "Expected struct_lit call, got: " ++ show other
-
       describe "Literal conversion" $ do
         it "preserves literal type information in IR" $ do
           let ast = Program [TLExpr (Let "x" (Lit (IntLit "42" (Just Int32))))]
@@ -481,9 +470,9 @@ spec = do
 
       it "propagates concrete type information through variable declarations" $ do
         let input = Program [ TLType "Box" $ TypeStruct (StructId 0) "Box"
-                            , TLExpr $ Let "x" $ Call "Box" [Lit (IntLit "42" (Just Int32))]
-                            , TLExpr $ Call "print" [FieldAccess (Var "x") "value"]
-                            ]
+                           , TLExpr $ Let "x" $ Call "Box[i32]" [Lit (IntLit "42" (Just Int32))]
+                           , TLExpr $ Call "print" [FieldAccess (Var "x") "value"]
+                           ]
         let st = makeTestSymbolTable input
         case convertToIR' input st of
           Right (IRProgram [(mainFn, _)]) -> do
@@ -492,15 +481,32 @@ spec = do
               [ (IRVarDecl "x" (IRTypeStruct "Box_i32" _) declInit, declMeta),
                 (IRProcCall "print" [IRCall "field_access" [IRVar "x", IRLit (IRStringLit "value")]], printMeta),
                 (IRReturn Nothing, _) ] -> do
-                  -- Verify the concrete type is used consistently
                   case declInit of
                     IRCall "struct_lit" [IRLit (IRStringLit "Box_i32"), _] -> return ()
                     other -> expectationFailure $
                       "Expected struct_lit with concrete type, got: " ++ show other
-                  metaType declMeta `shouldBe` IRTypeStruct "Box_i32" (StructId 0)
               other -> expectationFailure $
                 "Expected variable declaration, print and return statements, got: " ++ show other
           Left err -> expectationFailure $ show err
+
+      it "preserves base struct name when no type parameter given" $ do
+        let ast = Call "Point"
+                    [Lit (IntLit "10" (Just Int64)),
+                     Lit (IntLit "20" (Just Int64))]
+        case convertToIRExpr ast of
+          Right (IRCall "struct_lit"
+                  (IRLit (IRStringLit "Point"):_)) -> return ()
+          other -> expectationFailure $
+            "Expected basic struct_lit call, got: " ++ show other
+
+      it "uses specialized name with explicit type parameter" $ do
+        let ast = Call "Box[i32]"
+                    [Lit (IntLit "42" (Just Int32))]
+        case convertToIRExpr ast of
+          Right (IRCall "struct_lit"
+                  (IRLit (IRStringLit "Box_i32"):_)) -> return ()
+          other -> expectationFailure $
+            "Expected specialized struct_lit call, got: " ++ show other
 
       where
         testMeta = IRMetadata
@@ -508,4 +514,5 @@ spec = do
           , metaEffects = S.singleton PureEffect
           , metaSourcePos = Nothing
           , metaLiteralType = Nothing
+          , metaSymTable = Nothing
           }

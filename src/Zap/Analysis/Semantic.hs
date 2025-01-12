@@ -11,7 +11,7 @@ module Zap.Analysis.Semantic
 import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
-import Data.List (nub)
+import Data.List (isPrefixOf, nub)
 import Data.Maybe (fromJust)
 import qualified Data.Map.Strict as M
 import Debug.Trace
@@ -111,17 +111,32 @@ collectDeclarations (TLDecl (DFunc name params retType _)) = do
 collectDeclarations (TLDecl (DStruct name fields)) = do
     (vars, funs, structs, blocks, symbols) <- get
     put (vars, funs, M.insert name fields structs, blocks, symbols)
--- Add this case:
 collectDeclarations (TLType name (TypeStruct sid _)) = do
     (vars, funs, structs, blocks, symbols) <- get
     -- Look up struct definition
     case lookupStruct sid symbols of
         Just def -> do
-            -- Create function signature with field types as parameters
+            -- Register base constructor function
             let paramTypes = map snd (structFields def)
-            -- Register constructor function that returns the struct type
             let retType = TypeStruct sid name
-            put (vars, M.insert name (FuncSig paramTypes retType) funs, structs, blocks, symbols)
+            let baseFuns = M.insert name (FuncSig paramTypes retType) funs
+
+            -- Find and register specialized versions
+            let specialized = M.filterWithKey
+                              (\k _ -> (name ++ "_") `isPrefixOf` k)
+                              (structNames symbols)
+            let updatedFuns = M.foldlWithKey'
+                              (\fs sname ssid ->
+                                case lookupStruct ssid symbols of
+                                  Just sDef ->
+                                    let sParamTypes = map snd (structFields sDef)
+                                    in M.insert sname (FuncSig sParamTypes (TypeStruct ssid sname)) fs
+                                  Nothing -> fs)
+                              baseFuns
+                              specialized
+
+            put (vars, updatedFuns, structs, blocks, symbols)
+
         Nothing -> throwError $ UndefinedStruct name
 collectDeclarations _ = return ()
 
@@ -165,18 +180,28 @@ checkExpr = \case
 
     Let name val -> do
         checkExpr val
-        -- Need to capture the type of the struct constructor call
         (vars, funs, structs, blocks, symTable) <- get
         let varType = case val of
               Call structName args ->
-                -- If it's a struct constructor, use struct type
-                case M.lookup structName structs of
-                  Just _ -> TypeStruct (fromJust $ M.lookup structName (structNames symTable)) structName
-                  Nothing -> TypeAny
+                -- Check both base and specialized struct names
+                case M.lookup structName (structNames symTable) of
+                  Just sid -> TypeStruct sid structName  -- Use the actual struct ID
+                  Nothing -> case M.lookup (baseStructName structName) (structNames symTable) of
+                    Just _ ->
+                      -- Handle specialized version
+                      case M.lookup structName (structNames symTable) of
+                        Just specSid -> TypeStruct specSid structName
+                        Nothing -> TypeAny
+                    Nothing -> TypeAny
               _ -> TypeAny
-        -- Store variable with its type
+        traceM $ "Assigning type " ++ show varType ++ " to variable " ++ name
         put (M.insert name varType vars, funs, structs, blocks, symTable)
-
+      where
+        -- Helper to get base struct name from specialized name
+        baseStructName :: String -> String
+        baseStructName name =
+          case break (== '_') name of
+            (base, _) -> base
     FieldAccess expr field -> do
         traceM $ "\n=== checkExpr FieldAccess ==="
         traceM $ "Checking field access: " ++ field

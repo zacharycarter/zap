@@ -16,7 +16,7 @@ import Zap.IR
 import Zap.AST (Op(..), StructId(..), StructDef(..), SymbolTable(..), Type(..), lookupStruct)
 
 data CGState = CGState {
-  varTypes :: M.Map String IRType
+  cgVarTypes :: M.Map String IRType
 }
 
 initialCGState :: CGState
@@ -59,11 +59,18 @@ generateStructDefinitions funcs =
   where
     genStructDef :: (String, [(String, IRType)]) -> T.Text
     genStructDef (name, fields) = T.unlines $ map rstrip $ map T.unpack $
-        [ T.concat ["struct ", T.pack name, " {"]
-        , T.intercalate ";\n" $ map genField fields ++ [""]  -- Add trailing semicolon
+        [ T.concat ["struct ", T.pack name, " {"]  -- Use specialized name throughout
+        , T.intercalate ";\n" $ map genField fields ++ [""]
         , "};"
-        , ""  -- Add blank line between struct definitions
+        , ""
         ]
+    -- genStructDef :: (String, [(String, IRType)]) -> T.Text
+    -- genStructDef (name, fields) = T.unlines $ map rstrip $ map T.unpack $
+    --     [ T.concat ["struct ", T.pack name, " {"]
+    --     , T.intercalate ";\n" $ map genField fields ++ [""]  -- Add trailing semicolon
+    --     , "};"
+    --     , ""  -- Add blank line between struct definitions
+    --     ]
 
     genField :: (String, IRType) -> T.Text
     genField (fname, ftype) = T.concat
@@ -91,17 +98,26 @@ collectStructTypes funcs =
         case stmt of
           IRVarDecl _ (IRTypeStruct name sid) init ->
             case init of
-              IRCall "struct_lit" (IRLit (IRStringLit structName):args) ->
-                if isGenericStructName structName
-                  then [(structName, [("value", getArgType (head args))])]
-                  else case symTable >>= lookupStruct sid of
-                         Just def ->
-                           let fields = structFields def
-                           in traceM ("Found struct fields: " ++ show fields) >>
-                              [(structName,
-                                zipWith (\(fname, _) arg -> (fname, getArgType arg))
-                                       fields args)]
-                         Nothing -> traceM "No struct definition found" >> []
+              IRCall "struct_lit" _ -> -- Use specialized name from IRTypeStruct
+                case symTable >>= lookupStruct sid of
+                  Just def ->
+                    let fields = structFields def
+                        fieldTypes = zipWith (\(fname, _) arg -> (fname, getArgType arg))
+                                           fields
+                                           (drop 1 $ case init of IRCall _ args -> args; _ -> [])
+                    in [(name, fieldTypes)]  -- Use the specialized name here
+                  Nothing -> []
+              -- IRCall "struct_lit" (IRLit (IRStringLit structName):args) ->
+              --   if isGenericStructName structName
+              --     then [(structName, [("value", getArgType (head args))])]
+              --     else case symTable >>= lookupStruct sid of
+              --            Just def ->
+              --              let fields = structFields def
+              --              in traceM ("Found struct fields: " ++ show fields) >>
+              --                 [(structName,
+              --                   zipWith (\(fname, _) arg -> (fname, getArgType arg))
+              --                          fields args)]
+              --            Nothing -> traceM "No struct definition found" >> []
               _ -> []
           _ -> []
 
@@ -172,10 +188,19 @@ generateBlockWithState (IRBlock _ stmts) = do
 
 generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateStmtWithState (stmt, _) = case stmt of
+    IRVarDecl name irType@(IRTypeStruct structName _) initExpr -> do
+        -- Track both the temporary struct type for initialization and the variable type
+        modify $ \s -> s { cgVarTypes = M.insert "current_struct_type" irType $
+                                     M.insert name irType $
+                                     cgVarTypes s }
+        exprCode <- generateExprWithState initExpr
+        -- Only remove the temporary struct type, keep the variable type
+        modify $ \s -> s { cgVarTypes = M.delete "current_struct_type" (cgVarTypes s) }
+        return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
+
     IRVarDecl name irType initExpr -> do
-        -- Track variable type in state
-        modify $ \s -> s { varTypes = M.insert name irType (varTypes s) }
-        -- Now generate the variable declaration
+        -- This case remains unchanged as it already tracks variable types correctly
+        modify $ \s -> s { cgVarTypes = M.insert name irType (cgVarTypes s) }
         exprCode <- generateExprWithState initExpr
         let typeStr = case irType of
               IRTypeStruct sname _ -> T.concat ["struct ", T.pack sname]
@@ -260,11 +285,17 @@ generateExprWithState expr = do
             return result
 
         IRCall "struct_lit" (IRLit (IRStringLit name):fields) -> do
-            traceM $ "Generating struct literal"
+            traceM "Generating struct literal"
             traceM $ "Struct name: " ++ name
-            traceM $ "Fields: " ++ show fields
             fieldVals <- mapM generateExprWithState fields
-            let result = T.concat ["(struct ", T.pack name, ") {", T.intercalate ", " fieldVals, "}"]
+
+            -- Get target struct type from variable declaration context
+            st <- get
+            let structName = case M.lookup "current_struct_type" (cgVarTypes st) of
+                             Just (IRTypeStruct specializedName _) -> specializedName
+                             _ -> name
+
+            let result = T.concat ["(struct ", T.pack structName, ") {", T.intercalate ", " fieldVals, "}"]
             traceM $ "Generated struct init: " ++ T.unpack result
             return result
 
@@ -318,7 +349,7 @@ generatePrintExprWithState expr = do
             -- Get stored type information for the variable
             st <- get
             let fmt = case baseExpr of
-                  IRVar name -> case M.lookup name (varTypes st) of
+                  IRVar name -> case M.lookup name (cgVarTypes st) of
                     Just (IRTypeStruct sname _) ->
                         if "_i64" `T.isSuffixOf` T.pack sname then "%ld"
                         else if "_f32" `T.isSuffixOf` T.pack sname then "%f"
@@ -347,13 +378,13 @@ generatePrintExprWithState expr = do
 
         IRVar name -> do
             st <- get
-            let fmt = case M.lookup name (varTypes st) of
-                  Just (IRTypeStruct sname _) ->
-                    if "_i64" `T.isSuffixOf` T.pack sname then "%ld"
-                    else if "_f32" `T.isSuffixOf` T.pack sname then "%f"
-                    else if "_f64" `T.isSuffixOf` T.pack sname then "%lf"
-                    else "%d"
-                  _ -> "%d"
+            let fmt = case M.lookup name (cgVarTypes st) of
+                  Just IRTypeInt32 -> "%d"
+                  Just IRTypeInt64 -> "%ld"
+                  Just IRTypeFloat32 -> "%f"
+                  Just IRTypeFloat64 -> "%lf"
+                  _ -> "%d"  -- Fallback
+            traceM $ "Variable " ++ name ++ " type format: " ++ T.unpack fmt
             return (T.pack name, fmt)
 
         IRLit (IRVarRef name) ->

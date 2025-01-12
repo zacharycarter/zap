@@ -15,9 +15,14 @@ module Zap.AST
   , StructId(..)
   , StructDef(..)
   , emptySymbolTable
+  , getSpecializedName
   , lookupStruct
   , registerStruct
   , registerParamStruct
+  , registerSpecializedStruct
+  , typeToSuffix
+  , registerVarType
+  , lookupVarType
   ) where
 
 import qualified Data.Map.Strict as M
@@ -109,10 +114,16 @@ data Expr
   | Lit Literal
   deriving (Show, Eq)
 
+data VarType = VarType
+  { varName :: String
+  , varType :: Type
+  } deriving (Show, Eq)
+
 data SymbolTable = SymbolTable
   { nextStructId :: StructId
   , structDefs :: M.Map StructId StructDef
   , structNames :: M.Map String StructId
+  , varTypes :: M.Map String Type
   } deriving (Show, Eq)
 
 emptySymbolTable :: SymbolTable
@@ -120,6 +131,7 @@ emptySymbolTable = SymbolTable
   { nextStructId = StructId 0  -- Start IDs at 0
   , structDefs = M.empty       -- No struct definitions initially
   , structNames = M.empty      -- No struct names initially
+  , varTypes = M.empty         -- No var types initially
   }
 
 lookupStruct :: StructId -> SymbolTable -> Maybe StructDef
@@ -156,3 +168,54 @@ registerParamStruct name params fields st =
           , structNames = M.insert name sid (structNames st)
           }
     in (sid, st')
+
+substituteStructParams :: StructDef -> [(String, Type)] -> StructDef
+substituteStructParams def substitutions = def
+  { structFields = map substituteField (structFields def)
+  }
+  where
+    substituteField (name, fieldType) =
+      (name, foldr substitute fieldType substitutions)
+    substitute (param, replType) t = substituteTypeParam param replType t
+
+substituteTypeParam :: String -> Type -> Type -> Type
+substituteTypeParam param replacement = go
+  where
+    go t = case t of
+      TypeParam name | name == param -> replacement
+      TypeArray inner -> TypeArray (go inner)
+      TypeStruct sid name -> TypeStruct sid name  -- Keep structs as-is
+      _ -> t  -- Other types stay unchanged
+
+registerSpecializedStruct :: String -> StructDef -> Type -> SymbolTable -> (StructId, SymbolTable)
+registerSpecializedStruct specializationName baseDef paramType st =
+    let substitutions = zip (structParams baseDef) [paramType]
+        specializedDef = (substituteStructParams baseDef substitutions)
+          { structName = specializationName  -- Use the name passed in directly
+          , structParams = []  -- No type params in specialized version
+          }
+        sid = nextStructId st
+        st' = st
+          { nextStructId = StructId (case sid of StructId n -> n + 1)
+          , structDefs = M.insert sid specializedDef (structDefs st)
+          , structNames = M.insert specializationName sid (structNames st)
+          }
+    in (sid, st')
+
+getSpecializedName :: String -> Type -> String
+getSpecializedName base paramType = base ++ "_" ++ typeToSuffix paramType
+
+-- Helper for variable type lookup
+lookupVarType :: String -> SymbolTable -> Maybe Type
+lookupVarType name st = M.lookup name (varTypes st)
+
+-- Helper to register variable type
+registerVarType :: String -> Type -> SymbolTable -> SymbolTable
+registerVarType name typ st = st { varTypes = M.insert name typ (varTypes st) }
+
+typeToSuffix :: Type -> String
+typeToSuffix (TypeNum Int32) = "i32"
+typeToSuffix (TypeNum Int64) = "i64"
+typeToSuffix (TypeNum Float32) = "f32"
+typeToSuffix (TypeNum Float64) = "f64"
+typeToSuffix _ = error "Unsupported type for specialization"

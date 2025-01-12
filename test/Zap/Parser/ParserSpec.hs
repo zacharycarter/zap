@@ -3,6 +3,7 @@ module Zap.Parser.ParserSpec (spec) where
 
 import Test.Hspec
 import Data.Either (isLeft)
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Debug.Trace
 
@@ -262,7 +263,7 @@ spec = do
     it "parses generic type instantiation" $ do
       expectParseSuccess "let x = Box[i32](42'i32)" $ \tops ->
           case tops of
-              [TLExpr (Let "x" (Call "Box" [Lit (IntLit "42" (Just Int32))]))] -> return ()
+              [TLExpr (Let "x" (Call "Box_i32" [Lit (IntLit "42" (Just Int32))]))] -> return ()
               other -> expectationFailure $
                   "Expected generic box instantiation, got: " ++ show other
 
@@ -272,6 +273,88 @@ spec = do
           case tops of
               [TLExpr expr] -> do
                   traceM $ "Got expression: " ++ show expr
-                  expr `shouldBe` Call "Box" [Lit (IntLit "42" (Just Int64))]
+                  expr `shouldBe` Call "Box_i32" [Lit (IntLit "42" (Just Int64))]
               other -> expectationFailure $
                   "Expected top-level expression, got: " ++ show other
+
+    it "registers specialized struct in symbol table" $ do
+      let input = T.unlines [ "type Box[T] = struct"
+                           , "  value: T"
+                           , "let b = Box[i32](42)"
+                           ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        -- Verify base generic struct exists
+        case M.lookup "Box" (structNames st) of
+          Nothing -> expectationFailure "Base struct not found"
+          Just sid -> do
+            let baseDef = lookupStruct sid st
+            baseDef `shouldNotBe` Nothing
+
+        -- Verify specialized version exists
+        case M.lookup "Box_i32" (structNames st) of
+          Nothing -> expectationFailure "Specialized struct not found"
+          Just sid -> do
+            let specDef = lookupStruct sid st
+            specDef `shouldNotBe` Nothing
+            case specDef of
+              Just def -> do
+                structParams def `shouldBe` []  -- No type params in specialized version
+                structFields def `shouldBe` [("value", TypeNum Int32)]  -- T replaced with i32
+              Nothing -> expectationFailure "Could not lookup specialized struct"
+
+    it "substitutes type parameters in struct fields" $ do
+      let input = T.unlines
+            [ "type Box[T] = struct"
+            , "  value: T"
+            , ""
+            , "let b = Box[i32](42)"
+            , "let x: i32 = b.value"
+            ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        -- First verify the struct definition
+        case tops of
+          [TLType name typ@(TypeStruct sid _), _, _] -> do
+            name `shouldBe` "Box"
+            case lookupStruct sid st of
+              Just def -> do
+                structName def `shouldBe` "Box"
+                structParams def `shouldBe` ["T"]
+                structFields def `shouldBe` [("value", TypeParam "T")]
+              Nothing -> expectationFailure "Base struct not found"
+          _ -> expectationFailure $ "Unexpected top level structure: " ++ show tops
+
+        -- Now verify the specialized version exists in symbol table
+        let instantiatedSid = case tops of
+              [_, TLExpr (Let _ (Call "Box_i32" _)), _] ->  -- Updated pattern
+                case M.lookup "Box_i32" (structNames st) of
+                  Just sid -> sid
+                  Nothing -> error "Instantiated struct not found"
+              other -> error $ "Expected Box instantiation, got: " ++ show other
+
+        -- Verify specialized struct has concrete types
+        case lookupStruct instantiatedSid st of
+          Just def -> do
+            structName def `shouldBe` "Box_i32"
+            structParams def `shouldBe` []  -- No type params in concrete version
+            structFields def `shouldBe` [("value", TypeNum Int32)]  -- T replaced with i32
+          Nothing -> expectationFailure "Instantiated struct not found in symbol table"
+
+        -- Verify field access expression has correct type
+        case tops of
+          [_, _, TLExpr (Let "x" (FieldAccess (Var "b") "value"))] -> return ()
+          _ -> expectationFailure "Expected field access with correct variable names"
+
+  describe "Field access type tracking" $ do
+    it "tracks variable types through field access" $ do
+      let input = T.unlines
+            [ "type Box[T] = struct"
+            , "  value: T"
+            , ""
+            , "let b = Box[i32](42)"
+            , "let x: i32 = b.value"  -- Should know b's type
+            ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        case tops of
+          [_, TLExpr (Let "b" _), _] ->
+            lookupVarType "b" st `shouldBe` Just (TypeStruct (StructId 1) "Box_i32")
+          _ -> expectationFailure "Expected Box instantiation"

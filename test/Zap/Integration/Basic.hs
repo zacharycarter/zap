@@ -332,4 +332,81 @@ migratedTests =
       , expectedOutput = "42\n3.140000\n"
       , expectedExitCode = ExitSuccess
       }
+      , TestCase
+        { testName = "print_typed_variables"
+        , sourceCode = T.unlines
+            [ "var x = 42'i64"        -- 64-bit integer
+            , "var y = 3.14'f32"      -- 32-bit float
+            , "var z = 2.718'f64"     -- 64-bit float
+            , "print x"               -- Should use %ld
+            , "print y"               -- Should use %f
+            , "print z"               -- Should use %lf
+            ]
+        , expectedOutput = T.unlines
+            [ "42"
+            , "3.140000"
+            , "2.718000"
+            ]
+        , expectedExitCode = ExitSuccess
+        }
+      , TestCase
+        { testName = "repeated_generic_struct_references"
+        , sourceCode = T.unlines
+            [ "type Box[T] = struct"
+            , "  value: T"
+            , "let a = Box[i32](123)"
+            , "let b = Box[i32](456)"
+            , "print a.value"
+            , "print b.value"
+            ]
+        , expectedOutput = T.unlines
+            [ "123"
+            , "456"
+            ]
+        , expectedExitCode = ExitSuccess
+        }
+      , TestCase
+        { testName = "generic_struct_field_type_checking"
+        , sourceCode = T.unlines
+            [ "type Box[T] = struct"
+            , "  value: T"
+            , ""
+            , "let x = Box[i32](42'i32)"        -- Valid - i32 matches T
+            , "let y = Box[f64](3.14'f32)"      -- Should fail - f32 literal doesn't match T=f64
+            , "print x.value"
+            ]
+        , expectedOutput = ""  -- Should fail during type checking
+        , expectedExitCode = ExitFailure 1
+        }
+      , TestCase
+        { testName = "generic_struct_field_access_typing"
+        , sourceCode = T.unlines
+            [ "type Pair[T] = struct"
+            , "  first: T"
+            , "  second: T"
+            , ""
+            , "let p = Pair[i64](42'i64, 43'i64)"
+            , "let x: i32 = p.first"     -- Should fail - i64 field accessed as i32
+            , "print x"
+            ]
+        , expectedOutput = ""  -- Should fail during type checking
+        , expectedExitCode = ExitFailure 1
+        }
+        -- , TestCase
+        -- { testName = "print_variable_types"
+        -- , sourceCode = T.unlines
+        --     [ "var x = 42'i32"           -- Explicitly typed i32
+        --     , "var y = 3.14'f64"         -- Explicitly typed f64
+        --     , "var z: f32 = 1.0'f32"     -- Type annotation
+        --     , "print x"                  -- Should use %d
+        --     , "print y"                  -- Should use %lf
+        --     , "print z"                  -- Should use %f
+        --     ]
+        -- , expectedOutput = T.unlines
+        --     [ "42"
+        --     , "3.140000"
+        --     , "1.000000"
+        --     ]
+        -- , expectedExitCode = ExitSuccess
+        -- }
   ]
