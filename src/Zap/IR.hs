@@ -14,6 +14,7 @@ module Zap.IR
   , IRConversionError(..)
   , convertToIR'
   , convertToIRExpr
+  , convertToIRExprWithSymbols
   , LiteralType(..)
   , TypeError(..)
   , TypeVar(..)
@@ -266,93 +267,87 @@ convertExprToStmts :: SymbolTable -> Expr -> Either IRConversionError [(IRStmt, 
 convertExprToStmts symTable expr = do
     traceM $ "=== Converting expression to statements: " ++ show expr
     case expr of
-        Let name val -> do
-          traceM $ "Converting Let binding for: " ++ name
+      Let name val -> do
+        traceM $ "Converting Let binding for: " ++ name
 
-          when (isStructCall val) $ validateStructTypes val symTable
+        when (isStructCall val) $ validateStructTypes val symTable
 
-          convertedExpr <- convertToIRExprWithSymbols symTable val
+        convertedExpr <- convertToIRExprWithSymbols symTable val
 
-          -- Extract type from both declaration and expression
-          let declaredType = lookupVarType name symTable
-          let exprType = typeFromExpr val (Just symTable)
+        -- Extract type from both declaration and expression
+        let declaredType = lookupVarType name symTable
 
-          traceM $ "Declared type: " ++ show declaredType
-          traceM $ "Expression type: " ++ show exprType
+        -- let exprType = case val of
+        --       Call fname args | isFnameStructConstructor fname ->
+        --                         case args of
+        --                           (Lit (IntLit _ (Just Int32)):_) ->
+        --                             IRTypeStruct (fname ++ "_i32") (StructId 0)  -- Use specialized name
+        --                           _ -> typeFromExpr val (Just symTable)
+        --       _ -> typeFromExpr val (Just symTable)
+        let exprType = typeFromExpr val (Just symTable)
 
-          -- Enhanced type validation for field access
-          case val of
-              FieldAccess _ _ ->
-                  case (declaredType, exprType) of
-                      (Just (TypeNum Int32), IRTypeInt64) ->
-                          Left $ IRTypeError IRTypeInt32 IRTypeInt64
-                      (Just t1, t2) | convertType t1 /= t2 ->
-                          Left $ IRTypeError (convertType t1) t2
-                      _ -> do
-                          let irType = maybe exprType convertType declaredType
-                          traceM $ "Meta type: " ++ show irType
-                          let meta = mkMetadata irType (S.singleton WriteEffect)
-                          traceM $ "Created metadata: " ++ show meta
-                          traceM $ "Assigned type: " ++ show irType
-                          let stmt = IRVarDecl name irType convertedExpr
-                          traceM $ "Created statement: " ++ show stmt
-                          return [(stmt, meta)]
-              _ -> do
-                  -- Existing type validation for non-field access
-                  let irType = maybe exprType convertType declaredType
-                  traceM $ "Meta type: " ++ show irType
 
-                  -- Create metadata based on type
-                  traceM $ "Creating metadata for: " ++ show val
-                  let meta = case val of
-                        Lit (IntLit _ mtype) ->
-                          let litType = case mtype of
-                                Just nt -> LitInt nt
-                                Nothing -> LitInt Int32
-                          in mkLiteralMetadata irType (S.singleton WriteEffect) litType
-                        Lit (FloatLit _ mtype) ->
-                          let litType = case mtype of
-                                Just nt -> LitFloat nt
-                                Nothing -> LitFloat Float32
-                          in mkLiteralMetadata irType (S.singleton WriteEffect) litType
-                        Lit (StringLit _) ->
-                          mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
-                        StructLit _ _ ->
-                          mkMetadata irType (S.singleton WriteEffect)
-                        _ ->
-                          mkMetadata irType (S.singleton WriteEffect)
+        traceM $ "Expression type after specialization: " ++ show exprType
 
-                  traceM $ "Created metadata: " ++ show meta
+        -- Validate types match
+        case (declaredType, exprType) of
+            (Just (TypeNum Int32), IRTypeInt64) ->
+                Left $ IRTypeError IRTypeInt32 IRTypeInt64
+            _ -> do
+                let irType = maybe exprType convertType declaredType
+                traceM $ "Meta type: " ++ show irType
 
-                  traceM $ "Assigned type: " ++ show irType
-                  let stmt = IRVarDecl name irType convertedExpr
-                  traceM $ "Created statement: " ++ show stmt
-                  return [(stmt, meta)]
-        BinOp op e1 e2 -> do
-            traceM $ "Converting binary operation: " ++ show op
-            left <- convertToIRExprWithSymbols symTable e1
-            right <- convertToIRExprWithSymbols symTable e2
-            -- Create IR binary operation call
-            let opStr = case op of
-                    Add -> "Add"
-                    Sub -> "Sub"
-                    Mul -> "Mul"
-                    Div -> "Div"
-                    _ -> error $ "Unsupported operator: " ++ show op
-            return [(IRStmtExpr (IRCall opStr [left, right]),
-                    mkMetadata IRTypeInt32 (S.singleton PureEffect))]
-        Call "print" [arg] -> do
-            traceM $ "=== Converting print statement ==="
-            traceM $ "Input arg: " ++ show arg
-            converted <- convertToIRExprWithSymbols symTable arg
-            traceM $ "Converted arg: " ++ show converted
-            let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
-            let stmt = (IRProcCall "print" [converted], meta)
-            traceM $ "Generated statement: " ++ show stmt
-            return [stmt]
-        _ -> do
-            converted <- convertToIRExprWithSymbols symTable expr
-            return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+                -- Create metadata based on type
+                traceM $ "Creating metadata for: " ++ show val
+                let meta = case val of
+                      Lit (IntLit _ mtype) ->
+                        let litType = case mtype of
+                              Just nt -> LitInt nt
+                              Nothing -> LitInt Int32
+                        in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+                      Lit (FloatLit _ mtype) ->
+                        let litType = case mtype of
+                              Just nt -> LitFloat nt
+                              Nothing -> LitFloat Float32
+                        in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+                      Lit (StringLit _) ->
+                        mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
+                      StructLit _ _ ->
+                        mkMetadata irType (S.singleton WriteEffect)
+                      _ ->
+                        mkMetadata irType (S.singleton WriteEffect)
+
+                traceM $ "Created metadata: " ++ show meta
+
+                traceM $ "Assigned type: " ++ show irType
+                let stmt = IRVarDecl name irType convertedExpr
+                traceM $ "Created statement: " ++ show stmt
+                return [(stmt, meta)]
+      BinOp op e1 e2 -> do
+          traceM $ "Converting binary operation: " ++ show op
+          left <- convertToIRExprWithSymbols symTable e1
+          right <- convertToIRExprWithSymbols symTable e2
+          -- Create IR binary operation call
+          let opStr = case op of
+                  Add -> "Add"
+                  Sub -> "Sub"
+                  Mul -> "Mul"
+                  Div -> "Div"
+                  _ -> error $ "Unsupported operator: " ++ show op
+          return [(IRStmtExpr (IRCall opStr [left, right]),
+                  mkMetadata IRTypeInt32 (S.singleton PureEffect))]
+      Call "print" [arg] -> do
+          traceM $ "=== Converting print statement ==="
+          traceM $ "Input arg: " ++ show arg
+          converted <- convertToIRExprWithSymbols symTable arg
+          traceM $ "Converted arg: " ++ show converted
+          let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
+          let stmt = (IRProcCall "print" [converted], meta)
+          traceM $ "Generated statement: " ++ show stmt
+          return [stmt]
+      _ -> do
+          converted <- convertToIRExprWithSymbols symTable expr
+          return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
 
 validateStructTypes :: Expr -> SymbolTable -> Either IRConversionError ()
 validateStructTypes (Call fname [Lit lit]) _
@@ -402,11 +397,32 @@ typeFromExpr (Lit (FloatLit _ (Just Float64))) _ = IRTypeFloat64
 typeFromExpr (Lit (IntLit _ (Just Int32))) _ = IRTypeInt32
 typeFromExpr (Lit (IntLit _ (Just Int64))) _ = IRTypeInt64
 typeFromExpr (Call fname args) symTable | isFnameStructConstructor fname =
-    case symTable >>= \st -> M.lookup fname (structNames st) of
-      Just sid -> case symTable >>= \st -> lookupStruct sid st of
-        Just def -> IRTypeStruct fname sid  -- Found the struct, use its real ID
-        Nothing -> error "Struct ID found but no definition" -- Will improve error handling
-      Nothing -> error $ "Unknown struct type: " ++ fname    -- Will improve error handling
+    if '[' `elem` fname && ']' `elem` fname  -- Handle specialized type first
+    then do
+        let baseName = takeWhile (/= '[') fname
+        let paramType = case dropWhile (/= '[') fname of
+              ('[':'i':'3':'2':']':_) -> TypeNum Int32
+              ('[':'i':'6':'4':']':_) -> TypeNum Int64
+              ('[':'f':'3':'2':']':_) -> TypeNum Float32
+              ('[':'f':'6':'4':']':_) -> TypeNum Float64
+              _ -> error $ "Invalid type parameter in: " ++ fname
+        -- Look up base type first
+        case symTable >>= \st -> M.lookup baseName (structNames st) of
+            Just sid -> IRTypeStruct (getSpecializedName baseName paramType) sid
+            Nothing -> error $ "Unknown base struct type: " ++ baseName
+    else  -- Handle non-specialized case
+        case symTable >>= \st -> M.lookup fname (structNames st) of
+          Just sid -> case args of
+            [Lit (IntLit _ (Just Int32))] ->
+              (traceShow $ "\n=== typeFromExpr for struct constructor ===") `seq`
+              (traceShow $ "Found Int32 literal argument for " ++ fname) `seq`
+              (traceShow $ "Looking up specialized version Box_i32") `seq`
+              let specializedName = getSpecializedName fname (TypeNum Int32)
+               in IRTypeStruct specializedName sid
+            _ ->
+              (traceShow $ "Using base type for " ++ fname) `seq`
+              IRTypeStruct fname sid
+          Nothing -> error $ "Unknown struct type: " ++ fname
 typeFromExpr (Call fname _) _ | isFnameStructConstructor fname =
     -- When we see a struct constructor call, use the name as the struct type
     IRTypeStruct fname (StructId 0)
@@ -749,34 +765,49 @@ convertToIRExprWithSymbols symTable (Call fname args)
                   (convertType paramType)
             _ -> Left $ IRError "Invalid struct initialization"
 
-          let concreteTypeName = baseName ++ "_" ++ typeToSuffix paramType
+          let concreteTypeName = getSpecializedName baseName paramType
           traceM $ "Generated concrete type name: " ++ concreteTypeName
-          traceM $ "Final struct literal IR: " ++ show (IRCall "struct_lit"
-                                                        (IRLit (IRStringLit concreteTypeName) : convertedArgs))
-          Right $ IRCall "struct_lit"
-            (IRLit (IRStringLit concreteTypeName) : convertedArgs)
-        else case convertedArgs of
-          [] -> Left $ IRError "Empty struct constructor"
-          (IRLit lit:_) -> do
-            Right $ IRCall "struct_lit"
-              (IRLit (IRStringLit fname) : convertedArgs)
-          _ -> Right $ IRCall "struct_lit"
-               (IRLit (IRStringLit fname) : convertedArgs)
-        -- else case convertedArgs of
-        --   [] -> Left $ IRError "Empty struct constructor"
-        --   (IRLit lit:_) -> do
-        --     -- Infer type suffix from literal
-        --     let inferredSuffix = case lit of
-        --           IRInt32Lit _ -> "_i32"
-        --           IRInt64Lit _ -> "_i64"
-        --           IRFloat32Lit _ -> "_f32"
-        --           IRFloat64Lit _ -> "_f64"
-        --           _ -> ""  -- No suffix for other literals
-        --     let specializedName = fname ++ inferredSuffix
-        --     Right $ IRCall "struct_lit"
-        --       (IRLit (IRStringLit specializedName) : convertedArgs)
-        --   _ -> Right $ IRCall "struct_lit"
-        --        (IRLit (IRStringLit fname) : convertedArgs)
+
+          -- Look up base struct and register specialized version if needed
+          case M.lookup baseName (structNames symTable) of
+            Just baseId -> case lookupStruct baseId symTable of
+              Just baseDef -> do
+                -- Register specialized version if needed
+                let (_, newSymTable) = registerSpecializedStruct
+                      concreteTypeName baseDef paramType symTable
+                Right $ IRCall "struct_lit"
+                  (IRLit (IRStringLit concreteTypeName) : convertedArgs)
+              Nothing -> Left $ IRError $ "Invalid struct type: " ++ baseName
+            Nothing -> Left $ IRError $ "Undefined struct: " ++ baseName
+
+        else case args of
+          [arg] -> do  -- Handle single-argument generic struct case
+            let paramType = case arg of
+                  Lit (IntLit _ (Just Int32)) -> TypeNum Int32
+                  Lit (IntLit _ (Just Int64)) -> TypeNum Int64
+                  Lit (FloatLit _ (Just Float32)) -> TypeNum Float32
+                  Lit (FloatLit _ (Just Float64)) -> TypeNum Float64
+                  _ -> TypeNum Int32  -- Default for now
+
+            -- Look up base struct and register specialized version
+            case M.lookup fname (structNames symTable) of
+              Just baseId -> case lookupStruct baseId symTable of
+                Just baseDef -> do
+                  -- Create specialized name
+                  let specializedName = getSpecializedName fname paramType
+                  -- Register specialized version
+                  let (_, newSymTable) = registerSpecializedStruct
+                        specializedName baseDef paramType symTable
+                  traceM $ "Created specialized struct: " ++ specializedName
+                  -- Return specialized constructor call
+                  Right $ IRCall "struct_lit"
+                    (IRLit (IRStringLit specializedName) : convertedArgs)
+                Nothing -> Left $ IRError $ "Invalid struct type: " ++ fname
+              Nothing -> Left $ IRError $ "Undefined struct: " ++ fname
+
+          _ -> Right $ IRCall "struct_lit"  -- Non-generic case
+                 (IRLit (IRStringLit fname) : convertedArgs)
+
   | otherwise = do
       traceM $ "\n=== convertToIRExprWithSymbols Call ==="
       traceM $ "Function name: " ++ fname

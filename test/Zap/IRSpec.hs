@@ -500,9 +500,13 @@ spec = do
             "Expected basic struct_lit call, got: " ++ show other
 
       it "uses specialized name with explicit type parameter" $ do
+        -- First register the base struct
+        let (baseId, symTable) = registerStruct "Box"
+                                  [("value", TypeNum Int32)]
+                                  emptySymbolTable
         let ast = Call "Box[i32]"
-                    [Lit (IntLit "42" (Just Int32))]
-        case convertToIRExpr ast of
+                      [Lit (IntLit "42" (Just Int32))]
+        case convertToIRExprWithSymbols symTable ast of
           Right (IRCall "struct_lit"
                   (IRLit (IRStringLit "Box_i32"):_)) -> return ()
           other -> expectationFailure $
