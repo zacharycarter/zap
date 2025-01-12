@@ -216,6 +216,14 @@ spec = do
                       Nothing -> expectationFailure "Struct not found in symbol table"
               _ -> expectationFailure $ "Unexpected parse result: " ++ show tops
 
+    it "registers variable type annotations in symbol table" $ do
+      let input = T.unlines
+            [ "let x: i32 = 42"
+            , "let y = x"  -- Should be able to look up x's type
+            ]
+      expectParseWithSymbols input $ \(_, symTable) -> do
+          lookupVarType "x" symTable `shouldBe` Just (TypeNum Int32)
+
     it "registers struct in symbol table during parse" $ do
       let input = T.unlines [ "type Point = struct"
                             , "  x: i32"

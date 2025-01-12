@@ -784,6 +784,14 @@ parseSingleBindingLine = do
 
     case locToken nameTok of
         TWord varName -> do
+            -- Register annotated type if present
+            case annotatedType of
+                Just typ -> do
+                    st <- get
+                    modify $ \s -> s { stateSymTable =
+                        registerVarType varName typ (stateSymTable s) }
+                Nothing -> return ()
+
             -- Register type if we can determine it
             case value of
                 Call structName args -> do  -- Struct instantiation

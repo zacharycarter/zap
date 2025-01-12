@@ -269,40 +269,65 @@ convertExprToStmts symTable expr = do
         Let name val -> do
           traceM $ "Converting Let binding for: " ++ name
 
-          when (isStructCall val) $ validateStructTypes val
+          when (isStructCall val) $ validateStructTypes val symTable
 
           convertedExpr <- convertToIRExprWithSymbols symTable val
 
-          -- Extract type from expression
-          let irType = typeFromExpr val (Just symTable)
-          traceM $ "Meta type: " ++ show irType
+          -- Extract type from both declaration and expression
+          let declaredType = lookupVarType name symTable
+          let exprType = typeFromExpr val (Just symTable)
 
-          -- Create metadata based on type
-          traceM $ "Creating metadata for: " ++ show val
-          let meta = case val of
-                Lit (IntLit _ mtype) ->
-                  let litType = case mtype of
-                        Just nt -> LitInt nt
-                        Nothing -> LitInt Int32
-                  in mkLiteralMetadata irType (S.singleton WriteEffect) litType
-                Lit (FloatLit _ mtype) ->
-                  let litType = case mtype of
-                        Just nt -> LitFloat nt
-                        Nothing -> LitFloat Float32
-                  in mkLiteralMetadata irType (S.singleton WriteEffect) litType
-                Lit (StringLit _) ->
-                  mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
-                StructLit _ _ ->
-                  mkMetadata irType (S.singleton WriteEffect)
-                _ ->
-                  mkMetadata irType (S.singleton WriteEffect)
+          traceM $ "Declared type: " ++ show declaredType
+          traceM $ "Expression type: " ++ show exprType
 
-          traceM $ "Created metadata: " ++ show meta
+          -- Enhanced type validation for field access
+          case val of
+              FieldAccess _ _ ->
+                  case (declaredType, exprType) of
+                      (Just (TypeNum Int32), IRTypeInt64) ->
+                          Left $ IRTypeError IRTypeInt32 IRTypeInt64
+                      (Just t1, t2) | convertType t1 /= t2 ->
+                          Left $ IRTypeError (convertType t1) t2
+                      _ -> do
+                          let irType = maybe exprType convertType declaredType
+                          traceM $ "Meta type: " ++ show irType
+                          let meta = mkMetadata irType (S.singleton WriteEffect)
+                          traceM $ "Created metadata: " ++ show meta
+                          traceM $ "Assigned type: " ++ show irType
+                          let stmt = IRVarDecl name irType convertedExpr
+                          traceM $ "Created statement: " ++ show stmt
+                          return [(stmt, meta)]
+              _ -> do
+                  -- Existing type validation for non-field access
+                  let irType = maybe exprType convertType declaredType
+                  traceM $ "Meta type: " ++ show irType
 
-          traceM $ "Assigned type: " ++ show irType
-          let stmt = IRVarDecl name irType convertedExpr
-          traceM $ "Created statement: " ++ show stmt
-          return [(IRVarDecl name irType convertedExpr, meta)]
+                  -- Create metadata based on type
+                  traceM $ "Creating metadata for: " ++ show val
+                  let meta = case val of
+                        Lit (IntLit _ mtype) ->
+                          let litType = case mtype of
+                                Just nt -> LitInt nt
+                                Nothing -> LitInt Int32
+                          in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+                        Lit (FloatLit _ mtype) ->
+                          let litType = case mtype of
+                                Just nt -> LitFloat nt
+                                Nothing -> LitFloat Float32
+                          in mkLiteralMetadata irType (S.singleton WriteEffect) litType
+                        Lit (StringLit _) ->
+                          mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
+                        StructLit _ _ ->
+                          mkMetadata irType (S.singleton WriteEffect)
+                        _ ->
+                          mkMetadata irType (S.singleton WriteEffect)
+
+                  traceM $ "Created metadata: " ++ show meta
+
+                  traceM $ "Assigned type: " ++ show irType
+                  let stmt = IRVarDecl name irType convertedExpr
+                  traceM $ "Created statement: " ++ show stmt
+                  return [(stmt, meta)]
         BinOp op e1 e2 -> do
             traceM $ "Converting binary operation: " ++ show op
             left <- convertToIRExprWithSymbols symTable e1
@@ -329,8 +354,8 @@ convertExprToStmts symTable expr = do
             converted <- convertToIRExprWithSymbols symTable expr
             return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
 
-validateStructTypes :: Expr -> Either IRConversionError ()
-validateStructTypes (Call fname [Lit lit])
+validateStructTypes :: Expr -> SymbolTable -> Either IRConversionError ()
+validateStructTypes (Call fname [Lit lit]) _
   | "_i32" `T.isSuffixOf` (T.pack fname) = case lit of
       IntLit _ (Just Int32) -> Right ()
       _ -> Left $ IRTypeError IRTypeInt32 (convertType $ literalToType lit)
@@ -343,7 +368,22 @@ validateStructTypes (Call fname [Lit lit])
   | "_f64" `T.isSuffixOf` (T.pack fname) = case lit of
       FloatLit _ (Just Float64) -> Right ()
       _ -> Left $ IRTypeError IRTypeFloat64 (convertType $ literalToType lit)
-validateStructTypes _ = Right ()
+validateStructTypes (FieldAccess baseExpr fieldName) symTable = do
+  case baseExpr of
+    Var varName ->
+      case lookupVarType varName symTable of
+          Just (TypeStruct sid _) ->
+              case lookupStruct sid symTable of
+                  Just def ->
+                      case lookup fieldName (structFields def) of
+                          Just fieldType -> Right ()
+                          Nothing -> Left $ IRError $
+                              "Field " ++ fieldName ++ " not found"
+                  Nothing -> Left $ IRError "Invalid struct type"
+          _ -> Left $ IRError "Not a struct type"
+    _ -> Left $ IRError "Invalid base expression for field access"
+
+validateStructTypes _ _ = Right ()
 
 -- Helper to get type from literal
 literalToType :: Literal -> Type
@@ -372,6 +412,24 @@ typeFromExpr (Call fname _) _ | isFnameStructConstructor fname =
     IRTypeStruct fname (StructId 0)
 typeFromExpr (StructLit name _) _ =
     IRTypeStruct name (StructId 0)
+typeFromExpr (FieldAccess baseExpr fieldName) symTable =
+    case symTable of
+        Just st ->
+            -- Get base expression type
+            case baseExpr of
+                Var varName ->
+                    case lookupVarType varName st of
+                        Just (TypeStruct sid structName) ->
+                            case lookupStruct sid st of
+                                Just def ->
+                                    -- Find field type
+                                    case lookup fieldName (structFields def) of
+                                        Just fieldType -> convertType fieldType
+                                        Nothing -> IRTypeVoid
+                                Nothing -> IRTypeVoid
+                        _ -> IRTypeVoid
+                _ -> IRTypeVoid
+        Nothing -> IRTypeVoid
 typeFromExpr _ _ = IRTypeVoid  -- Default case
 
 -- Helper to convert AST types to IR types
