@@ -276,16 +276,7 @@ convertExprToStmts symTable expr = do
 
         -- Extract type from both declaration and expression
         let declaredType = lookupVarType name symTable
-
-        -- let exprType = case val of
-        --       Call fname args | isFnameStructConstructor fname ->
-        --                         case args of
-        --                           (Lit (IntLit _ (Just Int32)):_) ->
-        --                             IRTypeStruct (fname ++ "_i32") (StructId 0)  -- Use specialized name
-        --                           _ -> typeFromExpr val (Just symTable)
-        --       _ -> typeFromExpr val (Just symTable)
         let exprType = typeFromExpr val (Just symTable)
-
 
         traceM $ "Expression type after specialization: " ++ show exprType
 

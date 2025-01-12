@@ -392,21 +392,21 @@ migratedTests =
         , expectedOutput = ""  -- Should fail during type checking
         , expectedExitCode = ExitFailure 1
         }
-        -- , TestCase
-        -- { testName = "print_variable_types"
-        -- , sourceCode = T.unlines
-        --     [ "var x = 42'i32"           -- Explicitly typed i32
-        --     , "var y = 3.14'f64"         -- Explicitly typed f64
-        --     , "var z: f32 = 1.0'f32"     -- Type annotation
-        --     , "print x"                  -- Should use %d
-        --     , "print y"                  -- Should use %lf
-        --     , "print z"                  -- Should use %f
-        --     ]
-        -- , expectedOutput = T.unlines
-        --     [ "42"
-        --     , "3.140000"
-        --     , "1.000000"
-        --     ]
-        -- , expectedExitCode = ExitSuccess
-        -- }
+        , TestCase
+        { testName = "print_variable_types"
+        , sourceCode = T.unlines
+            [ "var x = 42'i32"           -- Explicitly typed i32
+            , "var y = 3.14'f64"         -- Explicitly typed f64
+            , "var z: f32 = 1.0'f32"     -- Type annotation
+            , "print x"                  -- Should use %d
+            , "print y"                  -- Should use %lf
+            , "print z"                  -- Should use %f
+            ]
+        , expectedOutput = T.unlines
+            [ "42"
+            , "3.140000"
+            , "1.000000"
+            ]
+        , expectedExitCode = ExitSuccess
+        }
   ]

@@ -1217,10 +1217,33 @@ parseVarDecl = do
     traceM "Parsing variable declaration"
     _ <- matchToken (\t -> t == TWord "var") "var"
     nameTok <- matchToken isValidName "identifier"
+
+    -- Parse optional type annotation
+    annotatedType <- do
+        st <- get
+        case stateTokens st of
+            (tok:_) | locToken tok == TColon -> do
+                traceM "Found type annotation"
+                _ <- matchToken (== TColon) ":"
+                typeTok <- matchToken isValidName "type name"
+                declaredType <- parseTypeToken typeTok
+                return $ Just declaredType
+            _ -> return Nothing
+
     _ <- matchToken (== (TOperator "=")) "equals sign"
     value <- parseExpression
+
     case locToken nameTok of
-        TWord name -> return $ VarDecl name value
+        TWord name -> do
+            -- Register variable type if annotation was present
+            case annotatedType of
+                Just typ -> do
+                    st <- get
+                    modify $ \s -> s { stateSymTable =
+                        registerVarType name typ (stateSymTable s) }
+                Nothing -> return ()
+
+            return $ VarDecl name value
         _ -> throwError $ UnexpectedToken nameTok "identifier"
 
 parseExprFromText :: T.Text -> Either ParseError Expr
