@@ -352,6 +352,36 @@ spec = do
           [_, _, TLExpr (Let "x" (FieldAccess (Var "b") "value"))] -> return ()
           _ -> expectationFailure "Expected field access with correct variable names"
 
+
+    it "creates distinct specialized types for different type params" $ do
+      let input = T.unlines
+            [ "type Pair[S, T] = struct"
+            , "  first: S"
+            , "  second: T"
+            , "let p1 = Pair[i64, i32](42'i64, 17'i32)"
+            , "let p2 = Pair[i32, i64](17'i32, 42'i64)"  -- Same types, different order
+            ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        -- Verify both specialized versions exist with correct fields
+        let p1Name = "Pair_i64_i32"
+        let p2Name = "Pair_i32_i64"
+
+        -- Check first specialization
+        case M.lookup p1Name (structNames st) of
+          Just sid1 -> case lookupStruct sid1 st of
+            Just def1 -> structFields def1 `shouldBe`
+              [("first", TypeNum Int64), ("second", TypeNum Int32)]
+            Nothing -> expectationFailure "First specialized struct not found"
+          Nothing -> expectationFailure "First specialization not registered"
+
+        -- Check second specialization
+        case M.lookup p2Name (structNames st) of
+          Just sid2 -> case lookupStruct sid2 st of
+            Just def2 -> structFields def2 `shouldBe`
+              [("first", TypeNum Int32), ("second", TypeNum Int64)]
+            Nothing -> expectationFailure "Second specialized struct not found"
+          Nothing -> expectationFailure "Second specialization not registered"
+
   describe "Field access type tracking" $ do
     it "tracks variable types through field access" $ do
       let input = T.unlines

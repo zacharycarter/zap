@@ -220,30 +220,6 @@ parseTypeDefinition givenName params = do
     modify $ \s -> s { stateSymTable = newSt }
     return $ TypeStruct sid name
 
-parseTypeParams :: Parser [String]
-parseTypeParams = do
-    st <- get
-    case stateTokens st of
-        (tok:_) | locToken tok == TLeftBracket -> do
-            _ <- matchToken (== TLeftBracket) "["
-            params <- parseParams
-            _ <- matchToken (== TRightBracket) "]"
-            return params
-        _ -> return []  -- No type parameters
-  where
-    parseParams = do
-        tok <- matchToken isValidName "type parameter"
-        case locToken tok of
-            TWord name -> do
-                st <- get
-                case stateTokens st of
-                    (next:_) | locToken next == TComma -> do
-                        _ <- matchToken (== TComma) ","
-                        rest <- parseParams
-                        return (name : rest)
-                    _ -> return [name]
-            _ -> throwError $ UnexpectedToken tok "type parameter name"
-
 parseStructFields :: Parser [(String, Type)]
 parseStructFields = do
     traceM "Parsing struct fields"

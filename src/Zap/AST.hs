@@ -187,11 +187,11 @@ substituteTypeParam param replacement = go
       TypeStruct sid name -> TypeStruct sid name  -- Keep structs as-is
       _ -> t  -- Other types stay unchanged
 
-registerSpecializedStruct :: String -> StructDef -> Type -> SymbolTable -> (StructId, SymbolTable)
-registerSpecializedStruct specializationName baseDef paramType st =
-    let substitutions = zip (structParams baseDef) [paramType]
+registerSpecializedStruct :: String -> StructDef -> [Type] -> SymbolTable -> (StructId, SymbolTable)
+registerSpecializedStruct specializationName baseDef paramTypes st =
+    let substitutions = zip (structParams baseDef) paramTypes
         specializedDef = (substituteStructParams baseDef substitutions)
-          { structName = specializationName  -- Use the name passed in directly
+          { structName = specializationName
           , structParams = []  -- No type params in specialized version
           }
         sid = nextStructId st

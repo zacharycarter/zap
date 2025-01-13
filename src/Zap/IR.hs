@@ -765,7 +765,7 @@ convertToIRExprWithSymbols symTable (Call fname args)
               Just baseDef -> do
                 -- Register specialized version if needed
                 let (_, newSymTable) = registerSpecializedStruct
-                      concreteTypeName baseDef paramType symTable
+                      concreteTypeName baseDef [paramType] symTable
                 Right $ IRCall "struct_lit"
                   (IRLit (IRStringLit concreteTypeName) : convertedArgs)
               Nothing -> Left $ IRError $ "Invalid struct type: " ++ baseName
@@ -788,7 +788,7 @@ convertToIRExprWithSymbols symTable (Call fname args)
                   let specializedName = getSpecializedName fname paramType
                   -- Register specialized version
                   let (_, newSymTable) = registerSpecializedStruct
-                        specializedName baseDef paramType symTable
+                        specializedName baseDef [paramType] symTable
                   traceM $ "Created specialized struct: " ++ specializedName
                   -- Return specialized constructor call
                   Right $ IRCall "struct_lit"

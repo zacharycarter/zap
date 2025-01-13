@@ -392,7 +392,7 @@ migratedTests =
         , expectedOutput = ""  -- Should fail during type checking
         , expectedExitCode = ExitFailure 1
         }
-        , TestCase
+      , TestCase
         { testName = "print_variable_types"
         , sourceCode = T.unlines
             [ "var x = 42'i32"           -- Explicitly typed i32
@@ -408,5 +408,34 @@ migratedTests =
             , "1.000000"
             ]
         , expectedExitCode = ExitSuccess
+        }
+      , TestCase
+        { testName = "multi_param_generic_struct"
+        , sourceCode = T.unlines
+            [ "type Pair[S, T] = struct"  -- Two type parameters
+            , "  first: S"
+            , "  second: T"
+            , ""
+            , "let p = Pair[i64, i32](42'i64, 17'i32)"  -- Different types
+            , "print p.first"   -- Should print 64-bit int
+            , "print p.second"  -- Should print 32-bit int
+            ]
+        , expectedOutput = T.unlines
+            [ "42"      -- i64 format
+            , "17"      -- i32 format
+            ]
+        , expectedExitCode = ExitSuccess
+        }
+      , TestCase
+        { testName = "multi_param_type_safety"
+        , sourceCode = T.unlines
+            [ "type Pair[S, T] = struct"
+            , "  first: S"
+            , "  second: T"
+            , ""
+            , "let p = Pair[i32](42)"  -- Missing second type parameter
+            ]
+        , expectedOutput = ""  -- Should fail compilation
+        , expectedExitCode = ExitFailure 1
         }
   ]
