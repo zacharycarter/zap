@@ -26,6 +26,7 @@ module Zap.AST
   ) where
 
 import qualified Data.Map.Strict as M
+import Debug.Trace
 
 data NumType
   = Int32
@@ -169,14 +170,35 @@ registerParamStruct name params fields st =
           }
     in (sid, st')
 
-substituteStructParams :: StructDef -> [(String, Type)] -> StructDef
-substituteStructParams def substitutions = def
-  { structFields = map substituteField (structFields def)
-  }
+substituteStructParams :: StructDef -> [(String, Type)] -> SymbolTable -> StructDef
+substituteStructParams def substitutions st =
+    trace ("\n=== substituteStructParams ===\n" ++
+           "Input def: " ++ show def ++ "\n" ++
+           "Substitutions: " ++ show substitutions ++ "\n" ++
+           "Symbol table: " ++ show st) $
+    let result = def { structFields = map substituteField (structFields def) }
+    in trace ("Result: " ++ show result) result
   where
     substituteField (name, fieldType) =
-      (name, foldr substitute fieldType substitutions)
-    substitute (param, replType) t = substituteTypeParam param replType t
+        let newType = foldr (substitute st) fieldType substitutions
+        in (name, newType)
+
+    substitute :: SymbolTable -> (String, Type) -> Type -> Type
+    substitute st (param, replType) t = substituteTypeParamWithSymbols param replType t st
+
+substituteTypeParamWithSymbols :: String -> Type -> Type -> SymbolTable -> Type
+substituteTypeParamWithSymbols param replacement t st = go t
+  where
+    go t = case t of
+      TypeParam name | name == param -> replacement
+      TypeArray inner -> TypeArray (go inner)
+      TypeStruct sid name ->
+        -- Look up struct definition to check params
+        case lookupStruct sid st of
+          Just def | any (`elem` structParams def) [param] ->
+            TypeStruct sid (getSpecializedName name replacement)
+          _ -> t
+      _ -> t
 
 substituteTypeParam :: String -> Type -> Type -> Type
 substituteTypeParam param replacement = go
@@ -184,13 +206,23 @@ substituteTypeParam param replacement = go
     go t = case t of
       TypeParam name | name == param -> replacement
       TypeArray inner -> TypeArray (go inner)
-      TypeStruct sid name -> TypeStruct sid name  -- Keep structs as-is
-      _ -> t  -- Other types stay unchanged
+      TypeStruct sid name ->
+        -- If this struct refers to Box[T], substitute T recursively
+        case lookupStruct sid emptySymbolTable of
+          Just def | param `elem` structParams def ->
+            -- This is a parameterized struct, substitute the type parameter
+            TypeStruct sid (name ++ "_" ++ typeToSuffix replacement)
+          _ -> t
+      _ -> t
 
 registerSpecializedStruct :: String -> StructDef -> [Type] -> SymbolTable -> (StructId, SymbolTable)
 registerSpecializedStruct specializationName baseDef paramTypes st =
+    trace ("\n=== registerSpecializedStruct ===" ++
+           "\nBase struct: " ++ show baseDef ++
+           "\nParam types: " ++ show paramTypes ++
+           "\nCurrent symbol table: " ++ show st) $
     let substitutions = zip (structParams baseDef) paramTypes
-        specializedDef = (substituteStructParams baseDef substitutions)
+        specializedDef = (substituteStructParams baseDef substitutions st)
           { structName = specializationName
           , structParams = []  -- No type params in specialized version
           }
@@ -200,7 +232,8 @@ registerSpecializedStruct specializationName baseDef paramTypes st =
           , structDefs = M.insert sid specializedDef (structDefs st)
           , structNames = M.insert specializationName sid (structNames st)
           }
-    in (sid, st')
+    in trace ("Updated symbol table: " ++ show st') $
+       (sid, st')
 
 getSpecializedName :: String -> Type -> String
 getSpecializedName base paramType = base ++ "_" ++ typeToSuffix paramType

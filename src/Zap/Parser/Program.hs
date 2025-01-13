@@ -8,6 +8,7 @@ module Zap.Parser.Program
 import Control.Monad (when)
 import Control.Monad.State
 import Control.Monad.Except
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Debug.Trace
 import Zap.Analysis.Lexical
@@ -267,14 +268,34 @@ parseType = do
         TWord "f64" -> do
             traceM "Recognized Float64"
             return $ TypeNum Float64
-        TWord name
-            -- If it's a single uppercase letter, treat as type parameter
-            | length name == 1 && isUpper (head name) -> do
-                traceM $ "Recognized type parameter: " ++ name
-                return $ TypeParam name
-            | otherwise -> do
-                traceM $ "Unrecognized type name: " ++ name
-                throwError $ UnexpectedToken tok "type name"
+        TWord typeName -> do
+            st <- get
+            case stateTokens st of
+                -- Handle generic type reference (e.g. Box[T])
+                (next:_) | locToken next == TLeftBracket -> do
+                    traceM $ "Parsing generic type reference: " ++ typeName
+                    -- Parse the type parameter
+                    params <- parseTypeParams
+                    -- Look up base struct in symbol table
+                    case M.lookup typeName (structNames $ stateSymTable st) of
+                        Just sid -> do
+                            -- Return generic type reference using struct ID
+                            return $ TypeStruct sid typeName
+                        Nothing -> do
+                            -- Still allow parsing even if struct not found yet
+                            -- Type checking will validate later
+                            return $ TypeStruct (StructId 0) typeName
+
+                -- Original cases for basic types and type parameters
+                _ -> case typeName of
+                    "i32" -> return $ TypeNum Int32
+                    "i64" -> return $ TypeNum Int64
+                    "f32" -> return $ TypeNum Float32
+                    "f64" -> return $ TypeNum Float64
+                    -- Single uppercase letter is a type parameter
+                    _ | length typeName == 1 && isUpper (head typeName) ->
+                        return $ TypeParam typeName
+                    _ -> throwError $ UnexpectedToken tok "type name"
         _ -> throwError $ UnexpectedToken tok "type name"
   where
     isUpper c = c >= 'A' && c <= 'Z'

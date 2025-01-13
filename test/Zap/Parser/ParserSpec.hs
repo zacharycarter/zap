@@ -382,6 +382,51 @@ spec = do
             Nothing -> expectationFailure "Second specialized struct not found"
           Nothing -> expectationFailure "Second specialization not registered"
 
+    it "handles nested type parameter substitution" $ do
+      let input = T.unlines
+            [ "type Nested[T] = struct"
+            , "  inner: Box[T]"  -- Nested use of type parameter
+            , "  value: T"
+            , ""
+            , "type Box[S] = struct"
+            , "  data: S"
+            , ""
+            , "let x = Nested[i32]"
+            , "  (Box[i32](42), 17)"  -- Create nested structure
+            , ""
+            , "print x.inner.data"  -- Should access inner Box's data
+            ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        -- Verify base structs exist
+        case M.lookup "Box" (structNames st) of
+          Nothing -> expectationFailure "Base Box struct not found"
+          Just sid -> do
+            let baseDef = lookupStruct sid st
+            baseDef `shouldNotBe` Nothing
+
+        case M.lookup "Nested" (structNames st) of
+          Nothing -> expectationFailure "Base Nested struct not found"
+          Just sid -> do
+            let baseDef = lookupStruct sid st
+            baseDef `shouldNotBe` Nothing
+
+        -- Verify specialized versions exist with substituted types
+        case M.lookup "Box_i32" (structNames st) of
+          Nothing -> expectationFailure "Specialized Box not found"
+          Just sid -> case lookupStruct sid st of
+            Just def -> structFields def `shouldBe`
+              [("data", TypeNum Int32)]
+            Nothing -> expectationFailure "Could not lookup specialized Box"
+
+        case M.lookup "Nested_i32" (structNames st) of
+          Nothing -> expectationFailure "Specialized Nested not found"
+          Just sid -> case lookupStruct sid st of
+            Just def -> structFields def `shouldBe`
+              [ ("inner", TypeStruct (StructId 0) "Box_i32")  -- Should reference specialized Box
+              , ("value", TypeNum Int32)
+              ]
+            Nothing -> expectationFailure "Could not lookup specialized Nested"
+
   describe "Field access type tracking" $ do
     it "tracks variable types through field access" $ do
       let input = T.unlines
