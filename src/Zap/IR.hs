@@ -935,19 +935,6 @@ genExprConstraints (IRCall name args) = do
             -- Generate constraints without validation
             return [ TEq leftType rightType
                   , TEq (IRTypeVar (TypeVar 0)) leftType ]
-            -- -- Validate numeric types first
-            -- unless (isNumericType leftType && isNumericType rightType) $ do
-            --     traceM $ "Type error: non-numeric types in Add operation"
-            --     Left $ UnificationError leftType rightType
-            -- let resultVar = TypeVar 0
-            -- -- First establish operands must match
-            -- let baseConstraints = [TEq leftType rightType]
-            -- -- Then determine result type based on operand types
-            -- resultType <- case (leftType, rightType) of
-            --     (t1, t2) | t1 == t2 -> Right t1  -- Same types preserve precision
-            --     _ -> coerceTypes leftType rightType  -- Different types promote
-            -- return $ baseConstraints ++
-            --         [TEq (IRTypeVar resultVar) resultType]
         ("Mul", [left, right]) -> do
             traceM "Processing Mul operation"
             leftType <- exprType left
@@ -957,17 +944,6 @@ genExprConstraints (IRCall name args) = do
             -- Generate constraints without validation
             return [ TEq leftType rightType
                   , TEq (IRTypeVar (TypeVar 0)) leftType ]
-            -- -- Validate numeric types first
-            -- unless (isNumericType leftType && isNumericType rightType) $ do
-            --     traceM $ "Type error: non-numeric types in Add operation"
-            --     Left $ UnificationError leftType rightType
-            -- let resultVar = TypeVar 1
-            -- let baseConstraints = [TEq leftType rightType]
-            -- resultType <- case (leftType, rightType) of
-            --     (t1, t2) | t1 == t2 -> Right t1
-            --     _ -> coerceTypes leftType rightType
-            -- return $ baseConstraints ++
-            --         [TEq (IRTypeVar resultVar) resultType]
         _ -> do
             -- For other operators, collect type constraints without checking
             argTypes <- mapM exprType args

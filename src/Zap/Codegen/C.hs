@@ -234,55 +234,6 @@ orderStructsByDeps structs =
                         (n, fields) <- structs,
                         n == name]
 
--- collectStructTypes :: [(IRFuncDecl, IRMetadata)] -> [(String, [(String, IRType)])]
--- collectStructTypes funcs =
---     let mainStructs = case funcs of
---           [(mainFn, meta)] -> do
---               traceM $ "\n=== Collecting struct types ==="
---               traceM $ "Metadata symbol table: " ++ show (metaSymTable meta)
---               findStructTypes (fnBody mainFn) (metaSymTable meta)
---           _ -> []
---     in L.nubBy (\(n1,_) (n2,_) -> n1 == n2) mainStructs
---   where
---     findStructTypes :: IRBlock -> Maybe SymbolTable -> [(String, [(String, IRType)])]
---     findStructTypes (IRBlock _ stmts) symTable =
---       concatMap (findStmtStructTypes symTable) stmts
-
---     findStmtStructTypes :: Maybe SymbolTable -> (IRStmt, IRMetadata) -> [(String, [(String, IRType)])]
---     findStmtStructTypes symTable (stmt, _) = do
---         traceM $ "\n=== Finding struct types in statement ==="
---         traceM $ "Statement: " ++ show stmt
---         traceM $ "Symbol table: " ++ show symTable
---         case stmt of
---             IRVarDecl _ (IRTypeStruct name sid) init ->
---                 case symTable >>= lookupStruct sid of
---                     Just def ->
---                         -- Convert AST field types to IR types
---                         let fieldTypes = map convertFieldType (structFields def)
---                         in [(name, fieldTypes)]
---                     Nothing -> []
---             _ -> []
---       where
---         convertFieldType :: (String, Type) -> (String, IRType)
---         convertFieldType (name, typ) = case typ of
---             TypeStruct sid structName -> (name, IRTypeStruct structName sid)
---             TypeNum Int32 -> (name, IRTypeInt32)
---             TypeNum Int64 -> (name, IRTypeInt64)
---             TypeNum Float32 -> (name, IRTypeFloat32)
---             TypeNum Float64 -> (name, IRTypeFloat64)
---             other -> (name, IRTypeInt32)  -- Default case
-
---     isGenericStructName :: String -> Bool
---     isGenericStructName name = any (\suffix -> suffix `L.isSuffixOf` name)
---                                   ["_i32", "_i64", "_f32", "_f64"]
-
---     getArgType :: IRExpr -> IRType
---     getArgType (IRLit (IRInt32Lit _)) = IRTypeInt32
---     getArgType (IRLit (IRInt64Lit _)) = IRTypeInt64
---     getArgType (IRLit (IRFloat32Lit _)) = IRTypeFloat32
---     getArgType (IRLit (IRFloat64Lit _)) = IRTypeFloat64
---     getArgType _ = IRTypeInt32
-
 -- Helper to convert IR types to C types
 irTypeToC :: IRType -> T.Text
 irTypeToC IRTypeInt32 = "int32_t"
