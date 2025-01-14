@@ -7,13 +7,14 @@ module Zap.Codegen.C
 import Data.Char (isSpace)
 import qualified Data.List as L
 import qualified Data.Text as T
+import Control.Monad (forM_)
 import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.Map.Strict as M
 import Debug.Trace
 
 import Zap.IR
-import Zap.AST (Op(..), StructId(..), StructDef(..), SymbolTable(..), Type(..), lookupStruct)
+import Zap.AST
 
 data CGState = CGState {
   cgVarTypes :: M.Map String IRType
@@ -64,73 +65,223 @@ generateStructDefinitions funcs =
         , "};"
         , ""
         ]
-    -- genStructDef :: (String, [(String, IRType)]) -> T.Text
-    -- genStructDef (name, fields) = T.unlines $ map rstrip $ map T.unpack $
-    --     [ T.concat ["struct ", T.pack name, " {"]
-    --     , T.intercalate ";\n" $ map genField fields ++ [""]  -- Add trailing semicolon
-    --     , "};"
-    --     , ""  -- Add blank line between struct definitions
-    --     ]
 
     genField :: (String, IRType) -> T.Text
-    genField (fname, ftype) = T.concat
-        ["    ", irTypeToC ftype, " ", T.pack fname]
+    genField (fname, ftype) =
+        let
+            _ = trace ("\n=== generateField ===\n" ++
+                      "Field: " ++ fname ++ "\n" ++
+                      "Type: " ++ show ftype) ()
+        in case ftype of
+            IRTypeStruct sname _ ->
+                let
+                    _ = trace ("Generating struct field with name: " ++ sname) ()
+                in T.concat ["    struct ", T.pack sname, " ", T.pack fname]
+            _ -> T.concat ["    ", irTypeToC ftype, " ", T.pack fname]
 
 collectStructTypes :: [(IRFuncDecl, IRMetadata)] -> [(String, [(String, IRType)])]
 collectStructTypes funcs =
-    let mainStructs = case funcs of
+    let allStructs = case funcs of
           [(mainFn, meta)] -> do
-              traceM $ "\n=== Collecting struct types ==="
-              traceM $ "Metadata symbol table: " ++ show (metaSymTable meta)
-              findStructTypes (fnBody mainFn) (metaSymTable meta)
+              traceM $ "\n=== collectStructTypes: initial collection ==="
+              traceM $ "Metadata symbol table: "
+              case metaSymTable meta of
+                Just st -> do
+                    traceM $ "  Struct definitions:"
+                    forM_ (M.toList $ structDefs st) $ \(sid, def) ->
+                        traceM $ "    " ++ show sid ++ " -> " ++ show def
+                    traceM $ "  Struct names:"
+                    forM_ (M.toList $ structNames st) $ \(name, sid) ->
+                        traceM $ "    " ++ name ++ " -> " ++ show sid
+                Nothing -> traceM "  No symbol table found"
+
+              let found = findStructTypes (fnBody mainFn) (metaSymTable meta)
+              traceM $ "\nFound direct structs and their fields:"
+              forM_ found $ \(name, fields) -> do
+                  traceM $ "  Struct: " ++ name
+                  forM_ fields $ \(fname, ftype) ->
+                      traceM $ "    Field: " ++ fname ++ " -> " ++ show ftype
+              found
           _ -> []
-    in L.nubBy (\(n1,_) (n2,_) -> n1 == n2) mainStructs
+
+    in do
+        traceM $ "\n=== collectStructTypes: dependency ordering ==="
+        let deps = [(name, getStructDeps fields) | (name, fields) <- allStructs]
+        traceM "Dependencies:"
+        forM_ deps $ \(name, depList) ->
+            traceM $ "  " ++ name ++ " depends on: " ++ show depList
+
+        let ordered = orderStructsByDeps allStructs
+        traceM "\nFinal ordered structs:"
+        forM_ ordered $ \(name, fields) -> do
+            traceM $ "  Struct: " ++ name
+            forM_ fields $ \(fname, ftype) ->
+                traceM $ "    Field: " ++ fname ++ " -> " ++ show ftype
+        ordered
   where
     findStructTypes :: IRBlock -> Maybe SymbolTable -> [(String, [(String, IRType)])]
     findStructTypes (IRBlock _ stmts) symTable =
-      concatMap (findStmtStructTypes symTable) stmts
+        let directStructs = concatMap (findStmtStructTypes symTable) stmts
+            -- Add dependent structs from fields and process them recursively
+            depStructs = concatMap (getDependentStructs symTable) directStructs
+        in L.nubBy (\(n1,_) (n2,_) -> n1 == n2) (directStructs ++ depStructs)
+      where
+        findStmtStructTypes :: Maybe SymbolTable -> (IRStmt, IRMetadata) -> [(String, [(String, IRType)])]
+        findStmtStructTypes symTable (stmt, _) = do
+            traceM $ "\n=== Finding struct types in statement ==="
+            traceM $ "Statement: " ++ show stmt
+            traceM $ "Symbol table: " ++ show symTable
+            case stmt of
+                IRVarDecl _ (IRTypeStruct name sid) init ->
+                    case symTable >>= lookupStruct sid of
+                        Just def ->
+                            -- Register base constructor function
+                            [(name, map (convertFieldType symTable) (structFields def))]
+                        Nothing -> []
+                _ -> []
+               
+        getDependentStructs :: Maybe SymbolTable -> (String, [(String, IRType)]) -> [(String, [(String, IRType)])]
+        getDependentStructs symTable (name, fields) =
+            -- Extract each struct field type and get its definition
+            [ (depName, getStructFields symTable depSid)
+            | (_, fieldType) <- fields  -- First bind all fields
+            , case fieldType of  -- Then match struct types
+                IRTypeStruct depName depSid   -- Get struct name and ID
+                    | depName /= name ->  -- Avoid recursion
+                        True  -- Include this struct
+                    | otherwise ->
+                        False  -- Skip self-references
+                _ -> False  -- Skip non-struct fields
+            , let IRTypeStruct depName depSid = fieldType  -- Bind the matched values
+            ]  -- The result tuple uses the bound depName and depSid
 
-    findStmtStructTypes :: Maybe SymbolTable -> (IRStmt, IRMetadata) -> [(String, [(String, IRType)])]
-    findStmtStructTypes symTable (stmt, _) = do
-        traceM $ "\n=== Finding struct types in statement ==="
-        traceM $ "Statement: " ++ show stmt
-        traceM $ "Symbol table: " ++ show symTable
-        case stmt of
-          IRVarDecl _ (IRTypeStruct name sid) init ->
-            case init of
-              IRCall "struct_lit" _ -> -- Use specialized name from IRTypeStruct
-                case symTable >>= lookupStruct sid of
-                  Just def ->
-                    let fields = structFields def
-                        fieldTypes = zipWith (\(fname, _) arg -> (fname, getArgType arg))
-                                           fields
-                                           (drop 1 $ case init of IRCall _ args -> args; _ -> [])
-                    in [(name, fieldTypes)]  -- Use the specialized name here
-                  Nothing -> []
-              -- IRCall "struct_lit" (IRLit (IRStringLit structName):args) ->
-              --   if isGenericStructName structName
-              --     then [(structName, [("value", getArgType (head args))])]
-              --     else case symTable >>= lookupStruct sid of
-              --            Just def ->
-              --              let fields = structFields def
-              --              in traceM ("Found struct fields: " ++ show fields) >>
-              --                 [(structName,
-              --                   zipWith (\(fname, _) arg -> (fname, getArgType arg))
-              --                          fields args)]
-              --            Nothing -> traceM "No struct definition found" >> []
-              _ -> []
-          _ -> []
+        getStructFields :: Maybe SymbolTable -> StructId -> [(String, IRType)]
+        getStructFields (Just st) sid = case lookupStruct sid st of
+            Just def -> map (convertFieldType (Just st)) (structFields def)
+            Nothing -> []
+        getStructFields Nothing _ = []
 
-    isGenericStructName :: String -> Bool
-    isGenericStructName name = any (\suffix -> suffix `L.isSuffixOf` name)
-                                  ["_i32", "_i64", "_f32", "_f64"]
+    convertFieldType :: Maybe SymbolTable -> (String, Type) -> (String, IRType)
+    convertFieldType symTable (name, typ) = case typ of
+        TypeStruct sid structName ->
+            case symTable >>= lookupStruct sid of
+                Just def ->
+                    case structParams def of
+                        [] -> (name, IRTypeStruct structName sid)  -- Not generic
+                        _  ->
+                            -- For generic structs, look up concrete type
+                            case lookupSpecializedStruct symTable structName of
+                                Just (specName, specSid) ->
+                                    (name, IRTypeStruct specName specSid)
+                                Nothing -> (name, IRTypeStruct structName sid)
+                Nothing -> (name, IRTypeStruct structName sid)
+        TypeNum Int32 -> (name, IRTypeInt32)
+        TypeNum Int64 -> (name, IRTypeInt64)
+        TypeNum Float32 -> (name, IRTypeFloat32)
+        TypeNum Float64 -> (name, IRTypeFloat64)
+        TypeParam param ->
+            -- Look up concrete type for this parameter
+            case symTable >>= lookupConcreteType param of
+                Just concrete -> (name, concrete)
+                Nothing -> (name, IRTypeInt32)  -- Default, but log warning
 
-    getArgType :: IRExpr -> IRType
-    getArgType (IRLit (IRInt32Lit _)) = IRTypeInt32
-    getArgType (IRLit (IRInt64Lit _)) = IRTypeInt64
-    getArgType (IRLit (IRFloat32Lit _)) = IRTypeFloat32
-    getArgType (IRLit (IRFloat64Lit _)) = IRTypeFloat64
-    getArgType _ = IRTypeInt32
+-- Helper to find specialized version of a struct
+lookupSpecializedStruct :: Maybe SymbolTable -> String -> Maybe (String, StructId)
+lookupSpecializedStruct (Just st) baseName =
+    let specializations = filter (\(name, _) -> (T.pack baseName) `T.isPrefixOf` (T.pack name))
+                         $ M.toList $ structNames st
+    in case specializations of
+        [(name, sid)] -> Just (name, sid)
+        _ -> Nothing
+lookupSpecializedStruct Nothing _ = Nothing
+
+-- Helper to find concrete type for a type parameter
+lookupConcreteType :: String -> SymbolTable -> Maybe IRType
+lookupConcreteType param st =
+    -- Look through struct defs directly using Map.foldrWithKey
+    let specializationMap = M.foldrWithKey findConcreteTypes M.empty (structDefs st)
+    in M.lookup param specializationMap
+  where
+    findConcreteTypes :: StructId -> StructDef -> M.Map String IRType -> M.Map String IRType
+    findConcreteTypes _ def acc =
+        case (structParams def, structFields def) of
+            ([param'], [(_, TypeNum Int32)]) -> M.insert param' IRTypeInt32 acc
+            ([param'], [(_, TypeNum Int64)]) -> M.insert param' IRTypeInt64 acc
+            ([param'], [(_, TypeNum Float32)]) -> M.insert param' IRTypeFloat32 acc
+            ([param'], [(_, TypeNum Float64)]) -> M.insert param' IRTypeFloat64 acc
+            _ -> acc
+
+getStructDeps :: [(String, IRType)] -> [String]
+getStructDeps fields = [name | (_, IRTypeStruct name _) <- fields]
+
+orderStructsByDeps :: [(String, [(String, IRType)])] -> [(String, [(String, IRType)])]
+orderStructsByDeps structs =
+    let -- Build dependency graph: struct name -> list of struct names it depends on
+        deps = [(name, getStructDeps fields) | (name, fields) <- structs]
+
+        -- Helper to check if struct A depends on struct B
+        dependsOn name1 name2 =
+            case lookup name1 deps of
+                Just depList -> name2 `elem` depList
+                Nothing -> False
+
+        -- Sort based on dependencies - if A depends on B, B comes first
+        sortedNames = L.sortBy (\n1 n2 ->
+            if dependsOn n1 n2 then GT
+            else if dependsOn n2 n1 then LT
+            else EQ) (map fst structs)
+    in [(name, fields) | name <- sortedNames,
+                        (n, fields) <- structs,
+                        n == name]
+
+-- collectStructTypes :: [(IRFuncDecl, IRMetadata)] -> [(String, [(String, IRType)])]
+-- collectStructTypes funcs =
+--     let mainStructs = case funcs of
+--           [(mainFn, meta)] -> do
+--               traceM $ "\n=== Collecting struct types ==="
+--               traceM $ "Metadata symbol table: " ++ show (metaSymTable meta)
+--               findStructTypes (fnBody mainFn) (metaSymTable meta)
+--           _ -> []
+--     in L.nubBy (\(n1,_) (n2,_) -> n1 == n2) mainStructs
+--   where
+--     findStructTypes :: IRBlock -> Maybe SymbolTable -> [(String, [(String, IRType)])]
+--     findStructTypes (IRBlock _ stmts) symTable =
+--       concatMap (findStmtStructTypes symTable) stmts
+
+--     findStmtStructTypes :: Maybe SymbolTable -> (IRStmt, IRMetadata) -> [(String, [(String, IRType)])]
+--     findStmtStructTypes symTable (stmt, _) = do
+--         traceM $ "\n=== Finding struct types in statement ==="
+--         traceM $ "Statement: " ++ show stmt
+--         traceM $ "Symbol table: " ++ show symTable
+--         case stmt of
+--             IRVarDecl _ (IRTypeStruct name sid) init ->
+--                 case symTable >>= lookupStruct sid of
+--                     Just def ->
+--                         -- Convert AST field types to IR types
+--                         let fieldTypes = map convertFieldType (structFields def)
+--                         in [(name, fieldTypes)]
+--                     Nothing -> []
+--             _ -> []
+--       where
+--         convertFieldType :: (String, Type) -> (String, IRType)
+--         convertFieldType (name, typ) = case typ of
+--             TypeStruct sid structName -> (name, IRTypeStruct structName sid)
+--             TypeNum Int32 -> (name, IRTypeInt32)
+--             TypeNum Int64 -> (name, IRTypeInt64)
+--             TypeNum Float32 -> (name, IRTypeFloat32)
+--             TypeNum Float64 -> (name, IRTypeFloat64)
+--             other -> (name, IRTypeInt32)  -- Default case
+
+--     isGenericStructName :: String -> Bool
+--     isGenericStructName name = any (\suffix -> suffix `L.isSuffixOf` name)
+--                                   ["_i32", "_i64", "_f32", "_f64"]
+
+--     getArgType :: IRExpr -> IRType
+--     getArgType (IRLit (IRInt32Lit _)) = IRTypeInt32
+--     getArgType (IRLit (IRInt64Lit _)) = IRTypeInt64
+--     getArgType (IRLit (IRFloat32Lit _)) = IRTypeFloat32
+--     getArgType (IRLit (IRFloat64Lit _)) = IRTypeFloat64
+--     getArgType _ = IRTypeInt32
 
 -- Helper to convert IR types to C types
 irTypeToC :: IRType -> T.Text
@@ -285,19 +436,27 @@ generateExprWithState expr = do
             return result
 
         IRCall "struct_lit" (IRLit (IRStringLit name):fields) -> do
-            traceM "Generating struct literal"
-            traceM $ "Struct name: " ++ name
+            traceM $ "Generating struct literal for: " ++ name
             fieldVals <- mapM generateExprWithState fields
 
-            -- Get target struct type from variable declaration context
-            st <- get
-            let structName = case M.lookup "current_struct_type" (cgVarTypes st) of
-                             Just (IRTypeStruct specializedName _) -> specializedName
-                             _ -> name
-
-            let result = T.concat ["(struct ", T.pack structName, ") {", T.intercalate ", " fieldVals, "}"]
-            traceM $ "Generated struct init: " ++ T.unpack result
-            return result
+            case fields of
+                [IRCall "struct_lit" [IRLit (IRStringLit innerName), innerVal], val2] -> do
+                    -- Nested struct initialization - use correct type names
+                    let result = T.concat ["(struct ", T.pack name, ") {",
+                                         "(struct ", T.pack innerName, ") {",
+                                         T.intercalate ", " [genField innerVal], "}, ",
+                                         genField val2, "}"]
+                    traceM $ "Generated nested struct init: " ++ T.unpack result
+                    return result
+                _ -> do
+                    let result = T.concat ["(struct ", T.pack name, ") {",
+                                         T.intercalate ", " fieldVals, "}"]
+                    traceM $ "Generated simple struct init: " ++ T.unpack result
+                    return result
+            where
+                genField val = case val of
+                    IRLit lit -> generateLiteral lit
+                    _ -> T.pack $ show val
 
         IRCall "print" [expr] -> do
             traceM $ "\n=== generateExpr: print ==="

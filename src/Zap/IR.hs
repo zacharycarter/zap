@@ -445,7 +445,12 @@ convertType (TypeNum Int32) = IRTypeInt32
 convertType (TypeNum Int64) = IRTypeInt64
 convertType TypeVoid = IRTypeVoid
 convertType (TypeStruct sid name) =
-  IRTypeStruct name sid
+    -- If this is a specialized struct (e.g. Box_i32), use that name
+    if "_" `T.isInfixOf` (T.pack name)
+    then IRTypeStruct name sid
+    else IRTypeStruct name sid
+convertType (TypeParam _) = IRTypeVar (TypeVar 0)  -- Track type parameters
+convertType _ = IRTypeVoid
 
 convertTops :: SymbolTable -> [TopLevel] -> Maybe LoopContext -> Either IRConversionError (IRBlock, IRMetadata)
 convertTops symTable tops ctx = do
@@ -722,11 +727,14 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
       Nothing -> Right $ IRLit $ IRFloat32Lit (read val)  -- Default choice
   StringLit val -> Right $ IRLit $ IRStringLit val
   BooleanLit val -> Right $ IRLit $ IRBoolLit val
+
 convertToIRExprWithSymbols _ (Var name) = Right $ IRVar name
 convertToIRExprWithSymbols symTable (Call fname args)
   | isFnameStructConstructor fname = do
-      traceM $ "\n=== Converting struct instantiation ==="
-      traceM $ "Name: " ++ fname
+      traceM $ "\n=== convertToIRExprWithSymbols: struct constructor ==="
+      traceM $ "Constructor name: " ++ fname
+      traceM $ "Arguments: " ++ show args
+      traceM $ "Symbol table structs: " ++ show (structDefs symTable)
       convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
 
       let hasTypeParam = '[' `elem` fname && ']' `elem` fname
@@ -773,26 +781,42 @@ convertToIRExprWithSymbols symTable (Call fname args)
 
         else case args of
           [arg] -> do  -- Handle single-argument generic struct case
-            let paramType = case arg of
-                  Lit (IntLit _ (Just Int32)) -> TypeNum Int32
-                  Lit (IntLit _ (Just Int64)) -> TypeNum Int64
-                  Lit (FloatLit _ (Just Float32)) -> TypeNum Float32
-                  Lit (FloatLit _ (Just Float64)) -> TypeNum Float64
-                  _ -> TypeNum Int32  -- Default for now
+            -- Add logging to trace constructor lookup
+            traceM $ "\n=== Checking specialized struct constructor ==="
+            traceM $ "Looking up name: " ++ fname
+            traceM $ "Current struct names: " ++ show (M.toList $ structNames symTable)
 
-            -- Look up base struct and register specialized version
+            -- First check if we're already working with a specialized type
             case M.lookup fname (structNames symTable) of
-              Just baseId -> case lookupStruct baseId symTable of
-                Just baseDef -> do
-                  -- Create specialized name
-                  let specializedName = getSpecializedName fname paramType
-                  -- Register specialized version
-                  let (_, newSymTable) = registerSpecializedStruct
-                        specializedName baseDef [paramType] symTable
-                  traceM $ "Created specialized struct: " ++ specializedName
-                  -- Return specialized constructor call
-                  Right $ IRCall "struct_lit"
-                    (IRLit (IRStringLit specializedName) : convertedArgs)
+              Just sid -> case lookupStruct sid symTable of
+                Just def -> if null (structParams def)
+                  then do
+                    -- Already specialized - use directly
+                    traceM $ "Found existing specialized type: " ++ fname
+                    Right $ IRCall "struct_lit"
+                      (IRLit (IRStringLit fname) : convertedArgs)
+                  else do
+                    -- Original generic type - handle specialization
+                    let paramType = case arg of
+                          Lit (IntLit _ (Just Int32)) -> TypeNum Int32
+                          Lit (IntLit _ (Just Int64)) -> TypeNum Int64
+                          Lit (FloatLit _ (Just Float32)) -> TypeNum Float32
+                          Lit (FloatLit _ (Just Float64)) -> TypeNum Float64
+                          _ -> TypeNum Int32
+
+                    let specializedName = getSpecializedName fname paramType
+                    traceM $ "Specializing generic type: " ++ fname ++ " to " ++ specializedName
+
+                    -- Check if specialized version exists
+                    case M.lookup specializedName (structNames symTable) of
+                      Just specSid -> Right $ IRCall "struct_lit"
+                                      (IRLit (IRStringLit specializedName) : convertedArgs)
+                      Nothing -> do
+                        let (_, newSymTable) = registerSpecializedStruct
+                              specializedName def [paramType] symTable
+                        traceM $ "Created specialized struct: " ++ specializedName
+                        Right $ IRCall "struct_lit"
+                          (IRLit (IRStringLit specializedName) : convertedArgs)
                 Nothing -> Left $ IRError $ "Invalid struct type: " ++ fname
               Nothing -> Left $ IRError $ "Undefined struct: " ++ fname
 
