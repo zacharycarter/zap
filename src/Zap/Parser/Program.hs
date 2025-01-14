@@ -32,55 +32,79 @@ runParserWithState p tokens = runStateT p (ParseState tokens 0 0 emptySymbolTabl
 
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
-  traceM "\n=== Starting parseTopLevels ==="
-  let ctx = makeIndentContext TopLevel 0 0
-  parseTopLevelsWith ctx
+  st <- get
+  traceM $ "\n=== Starting parseTopLevels ==="
+  traceM $ "Current state indent: " ++ show (stateIndent st)
+  traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
 
-parseTopLevelsWith :: IndentContext -> Parser [TopLevel]
-parseTopLevelsWith ctx = do
-    st <- get
-    traceM $ "\n=== parseTopLevelsWith ==="
-    traceM $ "Context type: " ++ show ctx
-    traceM $ "Current state indent: " ++ show (stateIndent st)
-    traceM $ "Current context: " ++ show ctx
-    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+  let ptlLoop ptlAcc = let
+        loop = do
+          st' <- get
+          traceM $ "\n=== Top-level parsing loop ==="
+          traceM $ "Current accumulator: " ++ show ptlAcc
+          case stateTokens st' of
+              [] -> return $ reverse ptlAcc
+              (tok:_) -> case locToken tok of
+                  TEOF -> do
+                      traceM "Encountered TEOF while parsing top level expressions"
+                      return $ reverse ptlAcc
+                  TType -> do
+                      traceM "Encountered TType while parsing top level expressions"
+                      origIndent <- gets stateIndent
+                      -- Consume `type` keyword
+                      _ <- matchToken (== TType) "type"
 
-    case stateTokens st of
-        [] -> return []
-        (tok:_) -> case locToken tok of
-            TEOF -> do
-                traceM "Encountered TEOF while parsing top level expressions"
-                return []
-            TType -> do
-                let typeCtx = IndentContext { baseIndent = locCol tok + 2
-                                           , parentIndent = baseIndent ctx
-                                           , blockType = BasicBlock }
-                traceM $ "Created type context: " ++ show typeCtx
-                expr <- parseTopLevel ctx
+                      -- Try to parse type block
+                      let typeLoop typeAcc = let
+                            innerLoop = do
+                              st'' <- get
+                              traceM $ "\n=== Type block parsing loop ==="
+                              traceM $ "Type accumulator: " ++ show typeAcc
+                              case stateTokens st'' of
+                                (tok':_)
+                                  | locToken tok' == TEOF -> do
+                                      traceM "Encountered TEOF in type block parsing loop!"
+                                      modify $ \s -> s { stateIndent = origIndent }
+                                      let finalAcc = typeAcc ++ ptlAcc
+                                      traceM $ "Final accumulator after TEOF: " ++ show finalAcc
+                                      return $ reverse finalAcc
+                                  | locCol tok' > locCol tok -> do
+                                      traceM $ "Parsing type declaration at col " ++ show (locCol tok')
+                                      modify $ \s -> s { stateIndent = locCol tok' }
+                                      td <- parseSingleTypeDecl
+                                      traceM $ "Parsed type declaration: " ++ show td
+                                      typeLoop (td : typeAcc)
+                                  | locCol tok' <= locCol tok -> do
+                                      traceM $ "Found token at col " ++ show (locCol tok') ++
+                                              " <= base indent " ++ show (locCol tok)++
+                                              ", ending type block"
+                                      modify $ \s -> s { stateIndent = origIndent }
+                                      let newAcc = typeAcc ++ ptlAcc
+                                      traceM $ "Continuing with accumulator: " ++ show newAcc
+                                      ptlLoop newAcc  -- Continue with accumulated declarations
+                                _ -> do
+                                    traceM "No more tokens in type block!"
+                                    modify $ \s -> s { stateIndent = origIndent }
+                                    let finalAcc = typeAcc ++ ptlAcc
+                                    traceM $ "Final accumulator at end: " ++ show finalAcc
+                                    return $ reverse finalAcc
+                            in innerLoop
 
-                -- Look ahead at next token
-                st' <- get
-                case stateTokens st' of
-                    (nextTok:_) | locToken nextTok == TWord "let" ||
-                                 locToken nextTok == TWord "print" -> do
-                        traceM $ "Found non-type declaration, reverting to top context"
-                        modify $ \s -> s { stateIndent = 0 }  -- Reset indent
-                        rest <- parseTopLevelsWith ctx
-                        return (expr : rest)
-                    _ -> do
-                        -- Continue with type context for more type declarations
-                        traceM $ "Continuing with type context: " ++ show typeCtx
-                        rest <- parseTopLevelsWith typeCtx
-                        return (expr : rest)
-            _ -> do
-                expr <- parseTopLevel ctx
-                rest <- parseTopLevelsWith ctx
-                traceM $ "Parsed top level: " ++ show expr ++ " " ++ show rest
-                return (expr : rest)
+                      typeResult <- typeLoop []
+                      traceM $ "All type declarations parsed in type block: " ++ show typeResult
+                      return typeResult
 
- 
-parseTopLevel :: IndentContext -> Parser TopLevel
-parseTopLevel ctx = do
+                  _ -> do
+                      traceM $ "Encountered token while parsing top level expressions: " ++ show tok
+                      expr <- parseTopLevel
+                      traceM $ "Parsed expression: " ++ show expr
+                      ptlLoop (expr : ptlAcc)
+        in loop
+
+  ptlLoop []
+
+parseTopLevel :: Parser TopLevel
+parseTopLevel = do
     st <- get
     traceM "\n--- Parsing Single Top Level Expression ---"
     traceM $ "Current state indent: " ++ show (stateIndent st)
@@ -100,25 +124,6 @@ parseTopLevel ctx = do
                     traceM "Found variable declaration at top-level"
                     expr <- parseVarDecl
                     return $ TLExpr expr
-                TType -> do
-                    traceM $ "\n=== Parsing type block ==="
-                    traceM $ "Original indent: " ++ show origIndent
-                    traceM $ "Creating type block context"
-
-                    _ <- matchToken (== TType) "type"
-                    let typeBlockIndent = locCol tok + 2
-
-                    -- Create new context for type block
-                    let typeCtx = IndentContext
-                            { baseIndent = typeBlockIndent
-                            , parentIndent = origIndent
-                            , blockType = BasicBlock }  -- Change from TopLevel
-
-                    traceM $ "New type context: " ++ show typeCtx
-                    modify $ \s -> s { stateIndent = typeBlockIndent }
-
-                    -- Parse remaining type declarations with new context
-                    parseSingleTypeDecl
                 TWord "print" -> do
                     traceM "Found print statement at top-level"
                     if origIndent > 0
@@ -154,15 +159,10 @@ parseTopLevel ctx = do
                     traceM $ "Found identifier: " ++ name
                     traceM $ "Token indent: " ++ show (locCol tok)
                     traceM $ "State indent: " ++ show (stateIndent st)
-
-                    case blockType ctx of  -- Check passed context
-                        BasicBlock | locCol tok == stateIndent st -> do
-                            traceM $ "Parsing as type declaration"
-                            parseSingleTypeDecl
-                        _ -> do
-                            traceM $ "Parsing as expression"
-                            expr <- parseExpression
-                            return $ TLExpr expr
+                    traceM $ "Parsing expression"
+                    expr <- parseExpression
+                    traceM $ "Parsed expression: " ++ show expr
+                    return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"
