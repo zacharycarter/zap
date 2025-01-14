@@ -438,4 +438,22 @@ migratedTests =
         , expectedOutput = ""  -- Should fail compilation
         , expectedExitCode = ExitFailure 1
         }
+      , TestCase
+        { testName = "nested_type_param_substitution"
+        , sourceCode = T.unlines
+            [ "type Nested[T] = struct"
+            , "  inner: Box[T]"  -- Nested use of type parameter
+            , "  value: T"
+            , ""
+            , "type Box[S] = struct"
+            , "  data: S"
+            , ""
+            , "let x = Nested[i32]"
+            , "  (Box[i32](42), 17)"  -- Create nested structure
+            , ""
+            , "print x.inner.data"  -- Should access inner Box's data
+            ]
+        , expectedOutput = "32"
+        , expectedExitCode = ExitSuccess
+        }
   ]

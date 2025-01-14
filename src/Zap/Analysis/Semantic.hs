@@ -11,7 +11,7 @@ module Zap.Analysis.Semantic
 import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
-import Data.List (isPrefixOf, nub)
+import Data.List (isInfixOf, isPrefixOf, nub)
 import Data.Maybe (fromJust)
 import qualified Data.Map.Strict as M
 import Debug.Trace
@@ -152,12 +152,11 @@ checkWellFormed tl = return tl
 checkExpr :: Expr -> SemCheck ()
 checkExpr = \case
     VarDecl name val -> do
-        checkExpr val  -- Check the initialization value
+        checkExpr val
         (vars, funs, structs, blocks, symbols) <- get
         put (M.insert name TypeAny vars, funs, structs, blocks, symbols)
-   
+
     Call name args -> do
-        -- Verify function exists and arity matches
         (_, funs, _, _, _) <- get
         case M.lookup name funs of
             Nothing -> throwError $ UndefinedFunction name
@@ -167,12 +166,13 @@ checkExpr = \case
                 mapM_ checkExpr args
 
     Var name -> do
-        -- Check variable is in scope
         (vars, _, _, _, _) <- get
         unless (M.member name vars) $
             throwError $ UndefinedVariable name
 
-    Lit (StringLit s) -> when (null s) $ throwError EmptyStringLiteral
+    Lit lit -> case lit of
+        StringLit s -> when (null s) $ throwError EmptyStringLiteral
+        _ -> return ()  -- Other literals are always valid
 
     BinOp _ e1 e2 -> do
         checkExpr e1
@@ -183,46 +183,23 @@ checkExpr = \case
         (vars, funs, structs, blocks, symTable) <- get
         let varType = case val of
               Call structName args ->
-                -- Check both base and specialized struct names
                 case M.lookup structName (structNames symTable) of
-                  Just sid -> TypeStruct sid structName  -- Use the actual struct ID
-                  Nothing -> case M.lookup (baseStructName structName) (structNames symTable) of
-                    Just _ ->
-                      -- Handle specialized version
-                      case M.lookup structName (structNames symTable) of
-                        Just specSid -> TypeStruct specSid structName
-                        Nothing -> TypeAny
-                    Nothing -> TypeAny
+                  Just sid -> TypeStruct sid structName
+                  Nothing -> TypeAny
               _ -> TypeAny
         traceM $ "Assigning type " ++ show varType ++ " to variable " ++ name
         put (M.insert name varType vars, funs, structs, blocks, symTable)
-      where
-        -- Helper to get base struct name from specialized name
-        baseStructName :: String -> String
-        baseStructName name =
-          case break (== '_') name of
-            (base, _) -> base
+
     FieldAccess expr field -> do
         traceM $ "\n=== checkExpr FieldAccess ==="
         traceM $ "Checking field access: " ++ field
         traceM $ "Base expression: " ++ show expr
 
-        checkExpr expr
+        checkExpr expr  -- First validate the base expression
         (vars, funs, structs, blocks, symTable) <- get
-        traceM $ "Current symbol table: " ++ show symTable
-        traceM $ "Current structs map: " ++ show structs
 
-        baseType <- case expr of
-            Var name -> do
-                traceM $ "Looking up variable type: " ++ name
-                case M.lookup name vars of
-                    Just t -> return t
-                    Nothing -> throwError $ UndefinedVariable name
-            _ -> throwError $ UndefinedFunction "Expression cannot be used in field access"
+        baseType <- getBaseType expr vars symTable
 
-        traceM $ "Base type: " ++ show baseType
-
-        -- Validate struct access
         case baseType of
             TypeStruct sid name -> case lookupStruct sid symTable of
                 Just def -> case lookup field (structFields def) of
@@ -231,7 +208,80 @@ checkExpr = \case
                 Nothing -> throwError $ UndefinedStruct name
             _ -> throwError $ InvalidStruct "Field access requires struct type"
 
-    _ -> return ()
+    Break _ -> return ()  -- Break statements are checked elsewhere
+
+    Result expr -> checkExpr expr
+
+    If cond thenExpr elseExpr -> do
+        checkExpr cond
+        checkExpr thenExpr
+        checkExpr elseExpr
+
+    While cond body -> do
+        checkExpr cond
+        checkExpr body
+
+    Block _ exprs mResult -> do
+        mapM_ checkExpr exprs
+        mapM_ checkExpr mResult
+
+    Assign name expr -> do
+        checkExpr expr
+        (vars, _, _, _, _) <- get
+        unless (M.member name vars) $
+            throwError $ UndefinedVariable name
+
+    AssignOp name _ expr -> do
+        checkExpr expr
+        (vars, _, _, _, _) <- get
+        unless (M.member name vars) $
+            throwError $ UndefinedVariable name
+
+  where
+    getBaseType :: Expr -> VarEnv -> SymbolTable -> SemCheck Type
+    getBaseType expr vars symTable = do
+        traceM $ "\n=== getBaseType ==="
+        traceM $ "Resolving type for: " ++ show expr
+        case expr of
+            Var name -> case M.lookup name vars of
+                Just t -> do
+                    traceM $ "Found variable type: " ++ show t
+                    return t
+                Nothing -> throwError $ UndefinedVariable name
+
+            FieldAccess baseExpr field -> do
+                baseType <- getBaseType baseExpr vars symTable
+                traceM $ "Base expression type: " ++ show baseType
+                case baseType of
+                    TypeStruct sid name -> do
+                        traceM $ "Looking up struct: " ++ name ++ " (sid: " ++ show sid ++ ")"
+                        case lookupStruct sid symTable of
+                            Just def -> do
+                                traceM $ "Found struct definition: " ++ show def
+                                case lookup field (structFields def) of
+                                    Just fieldType -> do
+                                        -- Handle type specialization for struct fields
+                                        let resolvedType = case fieldType of
+                                                TypeStruct _ fieldStructName ->
+                                                    -- Look up specialized version if it exists
+                                                    case name of
+                                                        specializedName | "_" `isInfixOf` specializedName ->
+                                                            let baseName = takeWhile (/= '_') fieldStructName
+                                                                suffix = dropWhile (/= '_') specializedName
+                                                                specializedFieldType = baseName ++ suffix
+                                                            in case M.lookup specializedFieldType (structNames symTable) of
+                                                                Just specializedSid ->
+                                                                    TypeStruct specializedSid specializedFieldType
+                                                                Nothing -> fieldType
+                                                        _ -> fieldType
+                                                _ -> fieldType
+                                        traceM $ "Resolved field type: " ++ show resolvedType
+                                        return resolvedType
+                                    Nothing -> throwError $ UndefinedField name field
+                            Nothing -> throwError $ UndefinedStruct name
+                    _ -> throwError $ InvalidStruct "Field access requires struct type"
+
+            _ -> throwError $ InvalidStruct "Invalid base expression for field access"
 
 checkDecl :: Decl -> SemCheck ()
 checkDecl (DFunc _ params _ body) = do
