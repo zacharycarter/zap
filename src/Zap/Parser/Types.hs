@@ -18,6 +18,7 @@ data BlockType
   = TopLevel
   | BasicBlock      -- For blocks like "block test:"
   | FunctionBlock
+  | TypeBlock
   deriving (Show, Eq)
 
 data IndentContext = IndentContext

@@ -38,35 +38,59 @@ parseTopLevels = do
 
 parseTopLevelsWith :: IndentContext -> Parser [TopLevel]
 parseTopLevelsWith ctx = do
-  st <- get
-  traceM $ "\n=== parseTopLevelsWith ==="
-  traceM $ "Context type: " ++ show ctx
-  traceM $ "Current state indent: " ++ show (stateIndent st)
-  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
-  case stateTokens st of
-    [] -> return []
-    (tok:_) -> case locToken tok of
-      TEOF -> do
-        traceM "Encountered TEOF while parsing top level expressions"
-        return []
-      _ -> do
-        -- Reset indentation for each top-level expression
-        modify $ \s -> s { stateIndent = 0 }
-        expr <- parseTopLevel
-        rest <- parseTopLevelsWith ctx
-        traceM $ "Parsed top level: " ++ show expr ++ " " ++ show rest
-        return (expr : rest)
+    st <- get
+    traceM $ "\n=== parseTopLevelsWith ==="
+    traceM $ "Context type: " ++ show ctx
+    traceM $ "Current state indent: " ++ show (stateIndent st)
+    traceM $ "Current context: " ++ show ctx
+    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
 
-parseTopLevel :: Parser TopLevel
-parseTopLevel = do
+    case stateTokens st of
+        [] -> return []
+        (tok:_) -> case locToken tok of
+            TEOF -> do
+                traceM "Encountered TEOF while parsing top level expressions"
+                return []
+            TType -> do
+                let typeCtx = IndentContext { baseIndent = locCol tok + 2
+                                           , parentIndent = baseIndent ctx
+                                           , blockType = BasicBlock }
+                traceM $ "Created type context: " ++ show typeCtx
+                expr <- parseTopLevel ctx
+
+                -- Look ahead at next token
+                st' <- get
+                case stateTokens st' of
+                    (nextTok:_) | locToken nextTok == TWord "let" ||
+                                 locToken nextTok == TWord "print" -> do
+                        traceM $ "Found non-type declaration, reverting to top context"
+                        modify $ \s -> s { stateIndent = 0 }  -- Reset indent
+                        rest <- parseTopLevelsWith ctx
+                        return (expr : rest)
+                    _ -> do
+                        -- Continue with type context for more type declarations
+                        traceM $ "Continuing with type context: " ++ show typeCtx
+                        rest <- parseTopLevelsWith typeCtx
+                        return (expr : rest)
+            _ -> do
+                expr <- parseTopLevel ctx
+                rest <- parseTopLevelsWith ctx
+                traceM $ "Parsed top level: " ++ show expr ++ " " ++ show rest
+                return (expr : rest)
+
+ 
+parseTopLevel :: IndentContext -> Parser TopLevel
+parseTopLevel ctx = do
     st <- get
     traceM "\n--- Parsing Single Top Level Expression ---"
+    traceM $ "Current state indent: " ++ show (stateIndent st)
     traceM $ "Current state: " ++ show st
     -- Store original indent level
     origIndent <- gets stateIndent
     case stateTokens st of
         (tok:_) -> do
             traceM $ "Processing token: " ++ show tok
+            traceM $ "Token column: " ++ show (locCol tok)
             case locToken tok of
                 TWord "while" -> do
                     traceM "Found while expression at top-level"
@@ -77,22 +101,24 @@ parseTopLevel = do
                     expr <- parseVarDecl
                     return $ TLExpr expr
                 TType -> do
-                    traceM "\n=== Parsing type declaration ==="
+                    traceM $ "\n=== Parsing type block ==="
+                    traceM $ "Original indent: " ++ show origIndent
+                    traceM $ "Creating type block context"
+
                     _ <- matchToken (== TType) "type"
-                    typeNameTok <- matchToken isValidName "type name"
+                    let typeBlockIndent = locCol tok + 2
 
-                    -- Parse optional type parameters here before equals sign
-                    typeParams <- parseTypeParams
+                    -- Create new context for type block
+                    let typeCtx = IndentContext
+                            { baseIndent = typeBlockIndent
+                            , parentIndent = origIndent
+                            , blockType = BasicBlock }  -- Change from TopLevel
 
-                    _ <- matchToken (== (TOperator "=")) "equals sign"
-                    case locToken typeNameTok of
-                        TWord name -> do
-                            traceM $ "Parsing type definition for: " ++ name
-                            typeDefinition <- parseTypeDefinition (T.pack name) typeParams  -- Pass type params
-                            let tl = TLType name typeDefinition
-                            traceM $ "Created type declaration: " ++ show tl
-                            return tl
-                        _ -> throwError $ UnexpectedToken typeNameTok "type name"
+                    traceM $ "New type context: " ++ show typeCtx
+                    modify $ \s -> s { stateIndent = typeBlockIndent }
+
+                    -- Parse remaining type declarations with new context
+                    parseSingleTypeDecl
                 TWord "print" -> do
                     traceM "Found print statement at top-level"
                     if origIndent > 0
@@ -125,20 +151,18 @@ parseTopLevel = do
                     traceM $ "Parsed function declaration: " ++ show decl
                     return $ TLDecl decl
                 TWord name | isValidName (locToken tok) -> do
-                    traceM $ "Found identifier at top-level"
-                    expr <- parseExpression  -- Use full expression parser
-                    return $ TLExpr expr
-                -- TWord name | isValidName (locToken tok) -> do
-                --     traceM $ "Found identifier at top-level"
-                --     -- Look ahead for assignment operators
-                --     st' <- get
-                --     case drop 1 $ stateTokens st' of
-                --         (t:_) | locToken t == TOperator "=" || locToken t == TOperator "+=" -> do
-                --             expr <- parseAssign Nothing
-                --             return $ TLExpr expr
-                --         _ -> do
-                --             expr <- parseMaybeCall name
-                --             return $ TLExpr expr
+                    traceM $ "Found identifier: " ++ name
+                    traceM $ "Token indent: " ++ show (locCol tok)
+                    traceM $ "State indent: " ++ show (stateIndent st)
+
+                    case blockType ctx of  -- Check passed context
+                        BasicBlock | locCol tok == stateIndent st -> do
+                            traceM $ "Parsing as type declaration"
+                            parseSingleTypeDecl
+                        _ -> do
+                            traceM $ "Parsing as expression"
+                            expr <- parseExpression
+                            return $ TLExpr expr
                 _ -> do
                     traceM $ "Unexpected token in top level: " ++ show tok
                     throwError $ UnexpectedToken tok "expected 'print', 'let', or 'block'"
@@ -199,6 +223,22 @@ parseLetBlock = do
                     traceM $ "Let block ended due to other token: " ++ show tok
                     return []
 
+parseSingleTypeDecl :: Parser TopLevel
+parseSingleTypeDecl = do
+    st <- get
+    traceM $ "\n=== parseSingleTypeDecl ==="
+    traceM $ "Current indent: " ++ show (stateIndent st)
+    traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+    typeNameTok <- matchToken isValidName "type name"
+    typeParams <- parseTypeParams
+    _ <- matchToken (== (TOperator "=")) "equals sign"
+    case locToken typeNameTok of
+        TWord name -> do
+            traceM $ "Parsing type definition for: " ++ name
+            typeDefinition <- parseTypeDefinition (T.pack name) typeParams
+            return $ TLType name typeDefinition
+        _ -> throwError $ UnexpectedToken typeNameTok "type name"
+
 parseTypeDefinition :: T.Text -> [String] -> Parser Type
 parseTypeDefinition givenName params = do
     traceM $ "\n=== parseTypeDefinition ==="
@@ -223,18 +263,38 @@ parseTypeDefinition givenName params = do
 
 parseStructFields :: Parser [(String, Type)]
 parseStructFields = do
-    traceM "Parsing struct fields"
+    traceM $ "\n=== Parsing struct fields ==="
+    -- Get current state for indentation check
+    st <- get
+    traceM $ "Current state: " ++ show st
+
+    let fieldBaseIndent = case stateTokens st of
+          (tok:_) -> locCol tok - 2  -- Base indent is 2 less than field indent
+          _ -> 0
+    traceM $ "Field base indentation level: " ++ show fieldBaseIndent
+
     let loop acc = do
           st <- get
-          traceM $ "Struct fields loop, tokens: " ++ show (take 3 $ stateTokens st)
+          traceM $ "\n=== Struct fields loop ==="
+          traceM $ "Field base indent: " ++ show fieldBaseIndent
+          traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+
           case stateTokens st of
-            (tok:_) | isValidName (locToken tok) -> do
-                        field <- parseStructField
-                        traceM $ "Parsed struct field: " ++ show field
-                        loop (field : acc)
+            (tok:_)
+              | isValidName (locToken tok) && locCol tok > fieldBaseIndent -> do
+                  traceM $ "Parsing field at col " ++ show (locCol tok)
+                  field <- parseStructField
+                  traceM $ "Parsed struct field: " ++ show field
+                  loop (field : acc)
+              | locCol tok <= fieldBaseIndent -> do
+                  traceM $ "Found token at col " ++ show (locCol tok) ++
+                          " <= base indent " ++ show fieldBaseIndent ++
+                          ", ending struct fields"
+                  return $ reverse acc
             _ -> do
-                traceM "No more struct fields"
+                traceM "No more tokens"
                 return $ reverse acc
+
     result <- loop []
     traceM $ "All struct fields parsed: " ++ show result
     return result

@@ -425,7 +425,9 @@ parseTypeParams :: Parser [String]
 parseTypeParams = do
     traceM "\n=== parseTypeParams ==="
     st <- get
-    traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
+    traceM $ "\n=== parseTypeParams ==="
+    traceM $ "Current indent: " ++ show (stateIndent st)
+    traceM $ "Next tokens: " ++ show (take 5 $ stateTokens st)
     case stateTokens st of
         (tok:_) | locToken tok == TLeftBracket -> do
             _ <- matchToken (== TLeftBracket) "["

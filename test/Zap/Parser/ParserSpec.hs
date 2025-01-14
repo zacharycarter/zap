@@ -441,3 +441,39 @@ spec = do
           [_, TLExpr (Let "b" _), _] ->
             lookupVarType "b" st `shouldBe` Just (TypeStruct (StructId 1) "Box_i32")
           _ -> expectationFailure "Expected Box instantiation"
+
+  describe "Multiple type declarations" $ do
+    it "parses multiple indented type declarations after type keyword" $ do
+      let input = T.unlines
+            [ "type"
+            , "  Box[S] = struct"
+            , "    data: S"
+            , ""
+            , "  Nested[S, T] = struct"
+            , "    inner: Box[T]"
+            , "    second: S"
+            ]
+      expectParseWithSymbols input $ \(tops, st) -> do
+        case tops of
+          [first@(TLType "Box" _), second@(TLType "Nested" _)] -> do
+            -- Verify Box struct
+            case first of
+              TLType _ (TypeStruct sid1 _) -> do
+                case lookupStruct sid1 st of
+                  Just def -> do
+                    structParams def `shouldBe` ["S"]
+                    structFields def `shouldBe` [("data", TypeParam "S")]
+                  Nothing -> expectationFailure "Box struct not found"
+
+            -- Verify Nested struct
+            case second of
+              TLType _ (TypeStruct sid2 _) -> do
+                case lookupStruct sid2 st of
+                  Just def -> do
+                    structParams def `shouldBe` ["S", "T"]
+                    structFields def `shouldBe`
+                      [ ("inner", TypeStruct (StructId 0) "Box")
+                      , ("second", TypeParam "S")
+                      ]
+                  Nothing -> expectationFailure "Nested struct not found"
+          _ -> expectationFailure $ "Expected two type declarations, got: " ++ show tops
