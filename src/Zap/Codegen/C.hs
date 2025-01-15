@@ -6,8 +6,9 @@ module Zap.Codegen.C
 
 import Data.Char (isSpace)
 import qualified Data.List as L
+import qualified Data.Set as S
 import qualified Data.Text as T
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Monad.State
 import Control.Monad.Except
 import qualified Data.Map.Strict as M
@@ -16,12 +17,18 @@ import Debug.Trace
 import Zap.IR
 import Zap.AST
 
-data CGState = CGState {
-  cgVarTypes :: M.Map String IRType
-}
+data CGState = CGState
+  { cgVarTypes :: M.Map String IRType
+  , cgUsedLabels :: S.Set String
+  , cgDeclaredLabels :: S.Set String
+  }
 
 initialCGState :: CGState
-initialCGState = CGState M.empty
+initialCGState = CGState
+  { cgVarTypes = M.empty
+  , cgUsedLabels = S.empty
+  , cgDeclaredLabels = S.empty
+  }
 
 data CGenError
   = UnsupportedType IRType
@@ -29,7 +36,7 @@ data CGenError
   deriving (Show, Eq)
 
 generateC :: IRProgram -> Either CGenError T.Text
-generateC prog = evalStateT (generateCWithState prog) (CGState M.empty)
+generateC prog = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty)
 
 generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
 generateCWithState (IRProgram funcs) = do
@@ -57,10 +64,23 @@ generateCWithState (IRProgram funcs) = do
           ]
 
     lift $ traceM $ "\n=== Final Generated Program ===\n" ++ T.unpack program
+
+    checkUnusedLabels
+
     return program
   where
     isMainFunc (IRFuncDecl {fnName = "main"}) = True
     isMainFunc _ = False
+
+-- Debug helper for checking unused labels
+checkUnusedLabels :: StateT CGState (Either CGenError) ()
+checkUnusedLabels = do
+    st <- get
+    let declared = cgDeclaredLabels st
+    let used = cgUsedLabels st
+    let unused = S.difference declared used
+    when (not $ S.null unused) $
+        lift $ traceM $ "Warning: Unused labels: " ++ show (S.toList unused)
 
 -- Helper for generating function declarations
 generateFunctionDeclaration :: (IRFuncDecl, IRMetadata) -> T.Text
@@ -263,6 +283,7 @@ irTypeToC _ = "void"  -- Default case
 
 generateFunctionWithState :: (IRFuncDecl, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateFunctionWithState (func, _) = do
+    traceM $ "\n=== generateFunctionWithState: " ++ show func ++ " ==="
     -- Convert body with state tracking
     body <- generateBlockWithState (fnBody func)
 
@@ -309,6 +330,7 @@ generateBlockWithState (IRBlock _ stmts) = do
 generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateStmtWithState (stmt, _) = case stmt of
     IRVarDecl name irType@(IRTypeStruct structName _) initExpr -> do
+        traceM $ "\n=== generateStmtWithState: IRVarDecl | IRTypeStruct ==="
         -- Track both the temporary struct type for initialization and the variable type
         modify $ \s -> s { cgVarTypes = M.insert "current_struct_type" irType $
                                      M.insert name irType $
@@ -319,6 +341,7 @@ generateStmtWithState (stmt, _) = case stmt of
         return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
 
     IRVarDecl name irType initExpr -> do
+        traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
         -- This case remains unchanged as it already tracks variable types correctly
         modify $ \s -> s { cgVarTypes = M.insert name irType (cgVarTypes s) }
         exprCode <- generateExprWithState initExpr
@@ -327,26 +350,33 @@ generateStmtWithState (stmt, _) = case stmt of
               _ -> irTypeToC irType
         return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
 
-    IRStmtExpr (IRLit (IRBoolLit False)) ->
+    IRStmtExpr (IRLit (IRBoolLit False)) -> do
+        traceM $ "\n=== generateStmtWithState: IRStmtExpr | IRBoolLit False ==="
         -- Don't generate return for break's false literal
         return ""
 
     IRStmtExpr expr -> do
+        traceM $ "\n=== generateStmtWithState: IRStmtExpr ==="
         exprCode <- generateExprWithState expr
+        -- return $ T.concat ["    return ", exprCode, ";"]
         return $ T.concat ["    return ", exprCode, ";"]
 
-    IRReturn Nothing ->
+    IRReturn Nothing -> do
+        traceM $ "\n=== generateStmtWithState: IRReturn Nothing ==="
         return "    return 0;"
 
     IRReturn (Just expr) -> do
+        traceM $ "\n=== generateStmtWithState: IRReturn ==="
         exprCode <- generateExprWithState expr
         return $ T.concat ["    return ", exprCode, ";"]
 
     IRAssign name expr -> do
+        traceM $ "\n=== generateStmtWithState: IRAssign ==="
         exprCode <- generateExprWithState expr
         return $ T.concat ["    ", T.pack name, " = ", exprCode, ";"]
 
     IRAssignOp name op expr -> do
+        traceM $ "\n=== generateStmtWithState: IRAssignOp ==="
         exprCode <- generateExprWithState expr
         let opStr = case op of
               Add -> "+="
@@ -356,34 +386,87 @@ generateStmtWithState (stmt, _) = case stmt of
               _ -> error $ "Unsupported compound assignment operator: " ++ show op
         return $ T.concat ["    ", T.pack name, " ", T.pack opStr, " ", exprCode, ";"]
 
-    IRLabel label ->
+    IRLabel label | "while_" `T.isPrefixOf` T.pack label -> do
+        traceM $ "\n=== generateStmtWithState: IRLabel | \"while_\" ==="
+        markLabelDeclared label
+        trackLabel label  -- Mark while labels as used when declared
+        traceM $ "Tracking label usage in IRLabel | \"while_\": " ++ label
         return $ T.concat [T.pack label, ":"]
 
+    IRLabel label -> do
+        traceM $ "\n=== generateStmtWithState: IRLabel ==="
+        markLabelDeclared label
+        st <- get
+        if isLabelUsed label st
+            then return $ T.concat [T.pack label, ":"]
+            else return "" -- Skip unused labels
+
     IRGoto label | "while_" `T.isPrefixOf` T.pack label -> do
+        traceM $ "\n=== generateStmtWithState: IRGoto | \"while_\" ==="
         -- Preserve while loop gotos
+        trackLabel label
+        traceM $ "Tracking label usage in IRGoto | \"while_\": " ++ label
         return $ T.concat ["    goto ", T.pack label, ";"]
 
-    IRGoto "if_end" ->
+    IRGoto "if_end" -> do
+        traceM $ "\n=== generateStmtWithState: IRGoto \"if_end\" ==="
         -- Skip redundant goto if_end when we have a break
         return ""
 
-    IRGoto label ->
+    IRGoto label -> do
+        traceM $ "\n=== generateStmtWithState: IRGoto ==="
+        trackLabel label
+        traceM $ "Tracking label usage in IRGoto: " ++ label
         return $ T.concat ["    goto ", T.pack label, ";"]
 
     IRJumpIfTrue cond label -> do
+        traceM $ "\n=== generateStmtWithState: IRJumpIfTrue ==="
+        trackLabel label  -- Add this line
+        traceM $ "Tracking label usage in IRJumpIfTrue: " ++ label
         condCode <- generateExprWithState cond
         return $ T.concat ["    if (", condCode, ") goto ", T.pack label, ";"]
 
     IRJumpIfZero cond label -> do
+        traceM $ "\n=== generateStmtWithState: IRJumpIfZero ==="
+        trackLabel label
+        st <- get
+        traceM $ "\n=== Processing Jump ===\n" ++
+                 "Jump target: " ++ label ++ "\n" ++
+                 "Used labels after update: " ++ show (cgUsedLabels st)
         condCode <- generateExprWithState cond
         return $ T.concat ["    if (!(", condCode, ")) goto ", T.pack label, ";"]
 
     IRProcCall "print" [expr] -> do
+        traceM $ "\n=== generateStmtWithState: IRProcCall \"print\" ==="
         (value, fmt) <- generatePrintExprWithState expr
         return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
 
-    IRProcCall name _ ->
+    IRProcCall name _ -> do
+        traceM $ "\n=== generateStmtWithState: IRProcCall ==="
         lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported procedure: " ++ name
+
+-- Label tracking helpers
+trackLabel :: String -> StateT CGState (Either CGenError) ()
+trackLabel label = do
+    before <- get
+    traceM $ "trackLabel - before: " ++ show (cgUsedLabels before)
+    modify $ \s -> s { cgUsedLabels = S.insert label (cgUsedLabels s) }
+    after <- get
+    traceM $ "trackLabel - after: " ++ show (cgUsedLabels after)
+
+markLabelDeclared :: String -> StateT CGState (Either CGenError) ()
+markLabelDeclared label = do
+    before <- get
+    traceM $ "markLabelDeclared - before: " ++ show (cgDeclaredLabels before)
+    modify $ \s -> s { cgDeclaredLabels = S.insert label (cgDeclaredLabels s) }
+    after <- get
+    traceM $ "markLabelDeclared - after: " ++ show (cgDeclaredLabels after)
+
+isLabelUsed :: String -> CGState -> Bool
+isLabelUsed label st = S.member label (cgUsedLabels st)
+
+isLabelDeclared :: String -> CGState -> Bool
+isLabelDeclared label st = S.member label (cgDeclaredLabels st)
 
 -- Helper to detect if a condition is already negated
 isNegatedCondition :: T.Text -> Bool

@@ -2,9 +2,9 @@
 
 module Zap.Codegen.CSpec (spec) where
 
+import Test.Hspec
 import qualified Data.Set as S
 import qualified Data.Text as T
-import Test.Hspec
 
 import Zap.AST
 import Zap.IR
@@ -87,12 +87,38 @@ spec = do
               T.isInfixOf "int32_t x;" code `shouldBe` True
               T.isInfixOf "int32_t y;" code `shouldBe` True
             Left err -> expectationFailure $ show err
+
+    describe "Label generation" $ do
+      it "only generates used labels in control flow" $ do
+        let input = IRProgram
+              [ ( IRFuncDecl "main" [] IRTypeVoid
+                  (IRBlock "entry"
+                    [ (IRLabel "start", testMeta)
+                    , (IRJumpIfZero (IRLit (IRBoolLit True)) "exit", testMeta)  -- Only uses "exit"
+                    , (IRLabel "unused", testMeta)                               -- Never referenced
+                    , (IRLabel "exit", testMeta)
+                    , (IRReturn Nothing, testMeta)
+                    ])
+                , testMeta)
+              ]
+
+        case generateC input of
+          Right code -> do
+            -- The generated code shows we're doing the right thing:
+            -- 1. Only "exit:" label appears
+            -- 2. "start:" and "unused:" are skipped
+            T.isInfixOf "exit:" code `shouldBe` True     -- Used in jump, should be present
+            T.isInfixOf "start:" code `shouldBe` False   -- Never used, should be absent
+            T.isInfixOf "unused:" code `shouldBe` False  -- Never used, should be absent
+
+          Left err ->
+            expectationFailure $ "Code generation failed: " ++ show err
            
       where
         testMeta = IRMetadata
-          { metaType = IRTypeVar (TypeVar 0)
+          { metaType = IRTypeVoid
           , metaEffects = S.singleton PureEffect
           , metaSourcePos = Nothing
           , metaLiteralType = Nothing
-          , metaSymTable = Just emptySymbolTable
+          , metaSymTable = Nothing
           }

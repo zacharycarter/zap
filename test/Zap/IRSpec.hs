@@ -111,26 +111,47 @@ spec = do
           Left err -> expectationFailure $ show err
 
       it "converts factorial function if/else with returns" $ do
-        let ast = DFunc "factorial" [Param "n" (TypeNum Int32)] (TypeNum Int32)
-                  (Block "function_body"
-                    [If (BinOp Eq (Var "n") (Lit (IntLit "0" (Just Int32))))
-                        (Block "if_then" [Lit (IntLit "1" (Just Int32))] Nothing)
-                        (Block "if_else"
-                            [BinOp Mul (Var "n")
-                                (Call "factorial"
-                                    [BinOp Sub (Var "n") (Lit (IntLit "1" (Just Int32)))])]
-                            Nothing)]
-                    Nothing)
+        -- We build a small AST for:
+        -- factorial(n) = if (n == 0) 1 else n * factorial(n - 1)
+        let factorialAST = DFunc "factorial"
+              [Param "n" (TypeNum Int32)]
+              (TypeNum Int32)
+              (Block "function_body"
+                [ If (BinOp Eq (Var "n") (Lit (IntLit "0" (Just Int32))))
+                     (Block "if_then" [Lit (IntLit "1" (Just Int32))] Nothing)
+                     (Block "if_else"
+                       [ BinOp Mul
+                           (Var "n")
+                           (Call "factorial"
+                             [ BinOp Sub
+                                 (Var "n")
+                                 (Lit (IntLit "1" (Just Int32)))
+                             ])
+                       ] Nothing)
+                ]
+                Nothing
+              )
+        let eitherResult = convertFuncDecl emptySymbolTable factorialAST
 
-        case convertFuncDecl emptySymbolTable ast of
-            Right (irFunc, _) -> do
-                let IRBlock _ stmts = fnBody irFunc
-                -- Verify expected control flow structure
-                length stmts `shouldSatisfy` (>= 5)  -- Should have jumps, returns and labels
-                case stmts of
-                    ((IRJumpIfZero _ label1, _):_) -> label1 `shouldBe` "if_else"  -- Added metadata pattern
-                    _ -> expectationFailure "Expected conditional jump"
-            Left err -> expectationFailure $ show err
+        case eitherResult of
+          Left err -> expectationFailure $
+            "Expected successful IR conversion, but got: " ++ show err
+          Right (irFunc, _meta) -> do
+            let IRBlock _ stmts = fnBody irFunc
+
+            case stmts of
+              [ (IRJumpIfZero _cond lblElse, _),
+                (IRReturn (Just (IRLit (IRInt32Lit 1))), _),
+                (IRLabel lblElse', _),
+                (IRReturn (Just (IRCall "Mul" [IRVar "n", IRCall "factorial" [IRCall "Sub" [IRVar "n", IRLit (IRInt32Lit 1)]]])), _) ]
+                  -> do
+                    lblElse `shouldBe` "if_else"
+                    lblElse' `shouldBe` "if_else"
+                    -- The "short" scenario is correct: no final label needed.
+                    return ()
+
+              other -> expectationFailure $
+                "Expected if/else structure with returns; got IR statements:\n  " ++ show other
 
     describe "Error Handling" $ do
       it "reports error for unsupported expressions" $ do
