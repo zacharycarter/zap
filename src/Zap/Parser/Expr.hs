@@ -1302,6 +1302,10 @@ parseFuncDecl = do
     traceM "Parsing function declaration"
     _ <- matchToken (\t -> t == TWord "fn") "fn"
     nameTok <- matchToken isValidName "function name"
+
+    typeParams <- parseTypeParams
+    traceM $ "Parsed type parameters: " ++ show typeParams
+
     _ <- matchToken (== TLeftParen) "("
 
     params <- parseParams
@@ -1336,7 +1340,7 @@ parseFuncDecl = do
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
                         let body = Block "function_body" [expr] Nothing
                         case locToken nameTok of
-                            TWord name -> return $ DFunc name params retType body
+                            TWord name -> return $ DFunc name typeParams params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"
                     | otherwise -> do
                         -- Continue parsing block contents normally
@@ -1344,7 +1348,7 @@ parseFuncDecl = do
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
                         let body = Block "function_body" (expr:rest) result
                         case locToken nameTok of
-                            TWord name -> return $ DFunc name params retType body
+                            TWord name -> return $ DFunc name typeParams params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"
 
                 [] -> throwError $ EndOfInput "function body"
@@ -1391,6 +1395,9 @@ parseTypeToken tok = case locToken tok of
     TWord "i64" -> return $ TypeNum Int64
     TWord "f32" -> return $ TypeNum Float32
     TWord "f64" -> return $ TypeNum Float64
+    -- NEW: Handle type parameters as valid types
+    TWord name | length name == 1 && isUpper (head name) ->
+        return $ TypeParam name
     _ -> throwError $ UnexpectedToken tok "valid type"
 
 parseVarDecl :: Parser Expr

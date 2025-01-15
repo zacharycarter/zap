@@ -28,6 +28,7 @@ spec = do
       it "maintains proper function parameter scope" $ do
         let ast = Program
               [ TLDecl $ DFunc "f"
+                  []
                   [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
                   (Var "x")
@@ -37,6 +38,7 @@ spec = do
       it "prevents access to function parameters outside function" $ do
         let ast = Program
               [ TLDecl $ DFunc "f"
+                  []
                   [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
                   (Var "x")
@@ -52,6 +54,7 @@ spec = do
       it "validates function arity" $ do
         let ast = Program
               [ TLDecl $ DFunc "f"
+                  []
                   [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
                   (Var "x")
@@ -61,8 +64,8 @@ spec = do
 
       it "prevents duplicate function definitions" $ do
         let ast = Program
-              [ TLDecl $ DFunc "f" [] TypeBool (Lit (BooleanLit True))
-              , TLDecl $ DFunc "f" [] TypeBool (Lit (BooleanLit False))
+              [ TLDecl $ DFunc "f" [] [] TypeBool (Lit (BooleanLit True))
+              , TLDecl $ DFunc "f" [] [] TypeBool (Lit (BooleanLit False))
               ]
         analyze ast `shouldBe` Left (RecursionInGlobalScope "f")
 
@@ -112,6 +115,7 @@ spec = do
       it "validates literal types against declarations" $ do
         let ast = Program
               [ TLDecl $ DFunc "test"
+                  []
                   [Param "x" (TypeNum Int32)]
                   (TypeNum Int32)
                   (Lit (IntLit "42" Nothing))

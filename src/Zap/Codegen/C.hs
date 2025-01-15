@@ -284,42 +284,109 @@ irTypeToC _ = "void"  -- Default case
 generateFunctionWithState :: (IRFuncDecl, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateFunctionWithState (func, _) = do
     traceM $ "\n=== generateFunctionWithState: " ++ show func ++ " ==="
-    -- Convert body with state tracking
-    body <- generateBlockWithState (fnBody func)
 
-    -- Determine return type (unchanged)
-    let typeStr = case fnRetType func of
-          IRTypeInt32 -> "int32_t"
-          IRTypeVoid -> "void"
-          _ -> "int"  -- Default to int for now
+    case fnRetType func of
+        IRTypeVar _ -> do
+          traceM $ "Skipping generic function"
+          return ""  -- Skip generic functions
+        _ -> do
+          body <- generateBlockWithState (fnBody func)
+          traceM $ "Converted body: " ++ show body
 
-    -- Generate function signature (unchanged)
-    let signature = case fnName func of
-          "main" -> T.pack "int main(void)"
-          _ -> T.concat [T.pack typeStr, " ", T.pack (fnName func), "(", generateParams (fnParams func), ")"]
+          -- NEW: Check if this is a specialized function
+          let isSpecialized = '_' `elem` fnName func
+          let specializedType = if isSpecialized
+              then case drop 1 $ dropWhile (/= '_') $ fnName func of
+                  "i32" -> Just IRTypeInt32
+                  "i64" -> Just IRTypeInt64
+                  "f32" -> Just IRTypeFloat32
+                  "f64" -> Just IRTypeFloat64
+                  _ -> Nothing
+              else Nothing
+          traceM $ "Specialized type: " ++ show specializedType
 
-    -- Return function text (unchanged but lift the string creation)
-    return $ T.unlines $ map rstrip $ map T.unpack $
-      [ signature <> T.pack " {"
-      , body
-      , "}"
-      ]
+          -- Determine return type (extended)
+          let typeStr = case fnRetType func of
+                IRTypeVar _ -> case specializedType of
+                    Just concreteType -> irTypeToC concreteType
+                    Nothing -> "void"  -- Generic functions use void
+                IRTypeInt32 -> "int32_t"
+                IRTypeVoid -> "void"
+                _ -> "int"  -- Default to int for now
+          traceM $ "Type str: " ++ show typeStr
 
-  where
-    -- Helper to generate parameter list
-    generateParams :: [(String, IRType)] -> T.Text
-    generateParams [] = T.pack "void"
-    generateParams params = T.intercalate ", " $ map formatParam params
+          -- Generate function signature (unchanged)
+          let signature = case fnName func of
+                "main" -> T.pack "int main(void)"
+                _ -> T.concat [typeStr, " ", T.pack (fnName func), "(", generateParams specializedType (fnParams func), ")"]
 
-    -- Helper to format individual parameters
-    formatParam :: (String, IRType) -> T.Text
-    formatParam (name, typ) = T.concat [paramTypeToC typ, " ", T.pack name]
+          traceM $ "Signature: " ++ show signature
 
-    -- Helper to convert IR types to C types
-    paramTypeToC :: IRType -> T.Text
-    paramTypeToC IRTypeInt32 = "int32_t"
-    paramTypeToC IRTypeVoid = "void"
-    paramTypeToC _ = "int"  -- Default to int for now
+          -- Return function text (unchanged)
+          let result = T.unlines $ map rstrip $ map T.unpack $ [ signature <> T.pack " {", body, "}"]
+
+          traceM $ "Final generated function: " ++ show result
+
+          return $ result
+        where
+          -- Helper to generate parameter list (modified to handle specialization)
+          generateParams :: Maybe IRType -> [(String, IRType)] -> T.Text
+          generateParams _ [] = T.pack "void"
+          generateParams mSpecType params = T.intercalate ", " $ map (formatParam mSpecType) params
+
+          -- Helper to format individual parameters (modified)
+          formatParam :: Maybe IRType -> (String, IRType) -> T.Text
+          formatParam mSpecType (name, typ) = case typ of
+              IRTypeVar _ -> case mSpecType of
+                  Just concrete -> T.concat [irTypeToC concrete, " ", T.pack name]
+                  Nothing -> T.concat ["void ", T.pack name]
+              _ -> T.concat [paramTypeToC typ, " ", T.pack name]
+
+          -- Helper to convert IR types to C types (unchanged)
+          paramTypeToC :: IRType -> T.Text
+          paramTypeToC IRTypeInt32 = "int32_t"
+          paramTypeToC IRTypeVoid = "void"
+          paramTypeToC _ = "int"  -- Default to int for now
+
+-- generateFunctionWithState :: (IRFuncDecl, IRMetadata) -> StateT CGState (Either CGenError) T.Text
+-- generateFunctionWithState (func, _) = do
+--     traceM $ "\n=== generateFunctionWithState: " ++ show func ++ " ==="
+--     -- Convert body with state tracking
+--     body <- generateBlockWithState (fnBody func)
+
+--     -- Determine return type (unchanged)
+--     let typeStr = case fnRetType func of
+--           IRTypeInt32 -> "int32_t"
+--           IRTypeVoid -> "void"
+--           _ -> "int"  -- Default to int for now
+
+--     -- Generate function signature (unchanged)
+--     let signature = case fnName func of
+--           "main" -> T.pack "int main(void)"
+--           _ -> T.concat [T.pack typeStr, " ", T.pack (fnName func), "(", generateParams (fnParams func), ")"]
+
+--     -- Return function text (unchanged but lift the string creation)
+--     return $ T.unlines $ map rstrip $ map T.unpack $
+--       [ signature <> T.pack " {"
+--       , body
+--       , "}"
+--       ]
+
+--   where
+--     -- Helper to generate parameter list
+--     generateParams :: [(String, IRType)] -> T.Text
+--     generateParams [] = T.pack "void"
+--     generateParams params = T.intercalate ", " $ map formatParam params
+
+--     -- Helper to format individual parameters
+--     formatParam :: (String, IRType) -> T.Text
+--     formatParam (name, typ) = T.concat [paramTypeToC typ, " ", T.pack name]
+
+--     -- Helper to convert IR types to C types
+--     paramTypeToC :: IRType -> T.Text
+--     paramTypeToC IRTypeInt32 = "int32_t"
+--     paramTypeToC IRTypeVoid = "void"
+--     paramTypeToC _ = "int"  -- Default to int for now
 
 generateBlockWithState :: IRBlock -> StateT CGState (Either CGenError) T.Text
 generateBlockWithState (IRBlock _ stmts) = do

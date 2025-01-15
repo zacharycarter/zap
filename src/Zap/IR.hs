@@ -200,7 +200,11 @@ convertToIR' (Program tops) symTable = do
     traceM $ "Found functions: " ++ show funcs
     traceM $ "Found expressions: " ++ show exprs
 
-    convertedFuncs <- mapM (convertFuncDecl symTable) funcs
+    -- Handle specialized function generation
+    let specializedFuncs = concatMap (generateSpecializedVersions symTable) funcs
+    traceM $ "Generated specialized functions: " ++ show specializedFuncs
+
+    convertedFuncs <- mapM (convertFuncDecl symTable) (funcs ++ specializedFuncs)
     (mainBlock, mainMeta) <- convertTops symTable exprs Nothing
     let mainFunc = ( IRFuncDecl
           { fnName = "main"
@@ -223,10 +227,44 @@ convertToIR' (Program tops) symTable = do
     partitionFuncs :: [TopLevel] -> ([Decl], [TopLevel])
     partitionFuncs = foldr splitFunc ([], [])
       where
-        splitFunc (TLDecl d@(DFunc _ _ _ _)) (fs, ts) =
+        splitFunc (TLDecl d@(DFunc _ _ _ _ _)) (fs, ts) =
             (d:fs, ts)
         splitFunc t (fs, ts) = (fs, t:ts)
 
+-- Helper for function specialization
+generateSpecializedVersions :: SymbolTable -> Decl -> [Decl]
+generateSpecializedVersions st (DFunc name typeParams params retType body) = do
+    traceM $ "\n=== Generationg specialized version of " ++ name ++ " ==="
+    -- Look for specialized versions in symbol table using String operations
+    let specialized = M.filterWithKey
+          (\k _ -> (name ++ "_") `isPrefixOf` k)
+          (funcDefs st)
+
+    traceM $ "Found specialized versions of " ++ name ++ ": " ++ show specialized
+
+    M.elems $ M.mapWithKey (\specName def ->
+        -- Create specialized declaration with concrete types
+        let concreteType = case dropWhile (/= '_') specName of
+              "_i32" -> TypeNum Int32
+              "_i64" -> TypeNum Int64
+              "_f32" -> TypeNum Float32
+              "_f64" -> TypeNum Float64
+              _ -> TypeNum Int32  -- Default fallback
+        in DFunc specName []
+             [Param n (substituteTypeParamWithSymbols tp concreteType t st) |
+              Param n t <- params,
+              tp <- typeParams]
+             (substituteTypeParamWithSymbols (head typeParams) concreteType retType st)
+             body
+      ) specialized
+  where
+    -- String-specific prefix check
+    isPrefixOf :: String -> String -> Bool
+    isPrefixOf [] _ = True
+    isPrefixOf _ [] = False
+    isPrefixOf (x:xs) (y:ys) = x == y && isPrefixOf xs ys
+
+generateSpecializedVersions _ _ = []
 
 --------------------------------------------------------------------------------
 --                    Convert Function Declarations
@@ -250,15 +288,37 @@ convertFuncDecl
   :: SymbolTable
   -> Decl
   -> Either IRConversionError (IRFuncDecl, IRMetadata)
-convertFuncDecl symTable (DFunc name params retType (Block label bodyExprs blockResult)) = do
+convertFuncDecl symTable (DFunc name typeParams params retType (Block label bodyExprs blockResult)) = do
     traceM $ "\n=== Converting function: " ++ name
     traceM $ "Parameters: " ++ show params
     traceM $ "Return type: " ++ show retType
     traceM $ "Converting params: " ++ show params
+    traceM $ "Type params: " ++ show typeParams
 
-    let irParams = [(pname, convertType ptyp) | Param pname ptyp <- params]
+    -- NEW: Check if this is a specialized version
+    let isSpecialized = '_' `elem` name
+    let baseType = if isSpecialized
+                    then let suffix = dropWhile (/= '_') name
+                         in case (drop 1 suffix) of
+                              "i32" -> Just IRTypeInt32
+                              "i64" -> Just IRTypeInt64
+                              "f32" -> Just IRTypeFloat32
+                              "f64" -> Just IRTypeFloat64
+                              _ -> Nothing
+                    else Nothing
+
+    traceM $ "Is specialized: " ++ show isSpecialized
+    traceM $ "Base type: " ++ show baseType
+
+    -- Modify param conversion to handle specialization
+    let irParams = case baseType of
+          Just concreteType ->
+            [(pname, concreteType) | Param pname _ <- params]
+          Nothing ->
+            [(pname, convertType ptyp) | Param pname ptyp <- params]
     traceM $ "IRParams: " ++ show irParams
 
+    -- Rest of the existing conversion logic
     traceM $ "Converting body expressions: " ++ show bodyExprs
     convertedStmts <- concat <$> mapM (convertExprToStmts symTable) bodyExprs
     traceM $ "converted statements: " ++ show convertedStmts
@@ -270,10 +330,13 @@ convertFuncDecl symTable (DFunc name params retType (Block label bodyExprs block
 
     traceM $ "alreadyEndsInReturn" ++ show alreadyEndsInReturn
 
-    let retTypeIR  = convertType retType
+    -- Modify return type based on specialization
+    let retTypeIR = case baseType of
+          Just concreteType -> concreteType
+          Nothing -> convertType retType
     let returnMeta = mkMetadata retTypeIR (S.singleton PureEffect)
 
-    -- If the last statement is not a Return, add fallback:
+    -- Keep existing return statement handling
     let finalStmts =
           if alreadyEndsInReturn
             then convertedStmts
@@ -293,7 +356,7 @@ convertFuncDecl symTable (DFunc name params retType (Block label bodyExprs block
          , funcMeta
          )
 
-convertFuncDecl _ (DFunc name _ _ body) =
+convertFuncDecl _ (DFunc name _ _ _ body) =
   Left $ IRUnsupportedExpr $
     "Function body must be a block: " ++ show body
 
@@ -379,6 +442,12 @@ convertExprToStmts symTable expr = do
           let stmt = (IRProcCall "print" [converted], meta)
           traceM $ "Generated statement: " ++ show stmt
           return [stmt]
+
+      Var name -> do
+          -- When converting a variable reference in function position, make it a return
+          traceM $ "Converting variable reference to return: " ++ name
+          let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+          return [(IRReturn (Just (IRVar name)), meta)]
 
       _ -> do
           traceM $ "No pattern matched in convertExprToStmts, falling through to: " ++ show expr

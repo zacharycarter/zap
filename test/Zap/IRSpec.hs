@@ -114,6 +114,7 @@ spec = do
         -- We build a small AST for:
         -- factorial(n) = if (n == 0) 1 else n * factorial(n - 1)
         let factorialAST = DFunc "factorial"
+              []
               [Param "n" (TypeNum Int32)]
               (TypeNum Int32)
               (Block "function_body"

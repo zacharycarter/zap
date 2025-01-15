@@ -14,8 +14,10 @@ module Zap.AST
   , SymbolTable(..)
   , StructId(..)
   , StructDef(..)
+  , FunctionDef(..)
   , emptySymbolTable
   , getSpecializedName
+  , getSpecializedFuncName
   , lookupStruct
   , registerStruct
   , registerParamStruct
@@ -23,9 +25,13 @@ module Zap.AST
   , typeToSuffix
   , registerVarType
   , lookupVarType
+  , specializeFunctionDef
+  , substituteTypeParam
+  , substituteTypeParamWithSymbols
   ) where
 
 import qualified Data.Map.Strict as M
+import qualified Data.Text as T
 import Debug.Trace
 
 data NumType
@@ -75,7 +81,7 @@ data Param = Param String Type
   deriving (Show, Eq)
 
 data Decl
-  = DFunc String [Param] Type Expr
+  = DFunc String [String] [Param] Type Expr
   | DStruct String [(String, Type)]
   deriving (Show, Eq)
 
@@ -120,19 +126,29 @@ data VarType = VarType
   , varType :: Type
   } deriving (Show, Eq)
 
+data FunctionDef = FunctionDef
+  { funcName :: String
+  , funcParams :: [Param]
+  , funcTypeParams :: [String]
+  , funcRetType :: Type
+  , funcBody :: Expr
+  } deriving (Show, Eq)
+
 data SymbolTable = SymbolTable
   { nextStructId :: StructId
   , structDefs :: M.Map StructId StructDef
   , structNames :: M.Map String StructId
   , varTypes :: M.Map String Type
+  , funcDefs :: M.Map String FunctionDef
   } deriving (Show, Eq)
 
 emptySymbolTable :: SymbolTable
 emptySymbolTable = SymbolTable
-  { nextStructId = StructId 0  -- Start IDs at 0
-  , structDefs = M.empty       -- No struct definitions initially
-  , structNames = M.empty      -- No struct names initially
-  , varTypes = M.empty         -- No var types initially
+  { nextStructId = StructId 0
+  , structDefs = M.empty
+  , structNames = M.empty
+  , varTypes = M.empty
+  , funcDefs = M.empty
   }
 
 lookupStruct :: StructId -> SymbolTable -> Maybe StructDef
@@ -235,8 +251,31 @@ registerSpecializedStruct specializationName baseDef paramTypes st =
     in trace ("Updated symbol table: " ++ show st') $
        (sid, st')
 
+-- Helper to instantiate a function definition with concrete types
+specializeFunctionDef :: FunctionDef -> [Type] -> SymbolTable -> Either String FunctionDef
+specializeFunctionDef def typeArgs st
+    | length (funcTypeParams def) /= length typeArgs =
+        Left $ "Wrong number of type arguments for " ++ funcName def
+    | otherwise = do
+        let subst = zip (funcTypeParams def) typeArgs
+        let newParams = map (substituteParamType subst) (funcParams def)
+        let newRetType = foldr (\(param, typ) -> substituteTypeParam param typ) (funcRetType def) subst
+        Right $ def
+            { funcName = getSpecializedFuncName (funcName def) typeArgs
+            , funcParams = newParams
+            , funcTypeParams = []  -- No type params in specialized version
+            , funcRetType = newRetType
+            }
+  where
+    substituteParamType subst (Param name typ) =
+        Param name $ foldr (\(param, repl) -> substituteTypeParam param repl) typ subst
+
 getSpecializedName :: String -> Type -> String
 getSpecializedName base paramType = base ++ "_" ++ typeToSuffix paramType
+
+getSpecializedFuncName :: String -> [Type] -> String
+getSpecializedFuncName base typeArgs =
+    base ++ "_" ++ T.unpack (T.intercalate "_" (map (T.pack . typeToSuffix) typeArgs))
 
 -- Helper for variable type lookup
 lookupVarType :: String -> SymbolTable -> Maybe Type

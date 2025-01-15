@@ -471,4 +471,15 @@ migratedTests =
         , expectedOutput = "120\n"
         , expectedExitCode = ExitSuccess
         }
+      , TestCase
+        { testName = "simple_generic_function"
+        , sourceCode = T.unlines
+            [ "fn id[T](x: T): T ="
+            , "  x"
+            , ""
+            , "print id[i32](42)"
+            ]
+        , expectedOutput = "42\n"
+        , expectedExitCode = ExitSuccess
+        }
   ]

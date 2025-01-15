@@ -66,7 +66,21 @@ analyzeWithSymbols prog@(Program tops) symTable =
         mapM_ collectTypeDeclarations tops
         mapM_ collectDeclarations tops
         processedTops <- mapM checkWellFormed tops
-        return $ Program processedTops) (initialEnvWithSymbols symTable)
+
+        -- NEW: Extract specialized functions from symbol table
+        (_, _, _, _, finalSymbols) <- get
+        let specializedDecls = map (\(name, def) ->
+                TLDecl $ DFunc name
+                  [] -- No type params in specialized version
+                  (funcParams def)
+                  (funcRetType def)
+                  (funcBody def))
+              $ M.toList
+              $ M.filterWithKey (\k _ -> '_' `elem` k)
+              $ funcDefs finalSymbols
+
+        return $ Program (processedTops ++ specializedDecls)
+        ) (initialEnvWithSymbols symTable)
 
 parseSymTable :: Program -> Maybe SymbolTable
 parseSymTable (Program tops) = Just $ foldr collectStructs emptySymbolTable tops
@@ -102,12 +116,16 @@ collectTypeDeclarations (TLType name (TypeStruct sid _)) = do
 collectTypeDeclarations _ = return ()
 
 collectDeclarations :: TopLevel -> SemCheck ()
-collectDeclarations (TLDecl (DFunc name params retType _)) = do
+collectDeclarations (TLDecl (DFunc name typeParams params retType body)) = do
     (vars, funs, structs, blocks, symbols) <- get
     let ptypes = [t | Param _ t <- params]
     when (M.member name funs) $
         throwError $ RecursionInGlobalScope name
-    put (vars, M.insert name (FuncSig ptypes retType) funs, structs, blocks, symbols)
+
+    let funcDef = FunctionDef name params typeParams retType body
+    let newSymbols = symbols { funcDefs = M.insert name funcDef (funcDefs symbols) }
+
+    put (vars, M.insert name (FuncSig ptypes retType) funs, structs, blocks, newSymbols)
 collectDeclarations (TLDecl (DStruct name fields)) = do
     (vars, funs, structs, blocks, symbols) <- get
     put (vars, funs, M.insert name fields structs, blocks, symbols)
@@ -157,14 +175,68 @@ checkExpr = \case
         put (M.insert name TypeAny vars, funs, structs, blocks, symbols)
 
     Call name args -> do
-        (_, funs, _, _, _) <- get
-        case M.lookup name funs of
+        traceM $ "\n=== checkExpr: Call ==="
+        traceM $ "Function name: " ++ name
+        traceM $ "Arguments: " ++ show args
+        (vars, funs, structs, blocks, symbols) <- get
+
+        let baseName = takeWhile (/= '_') name
+        traceM $ "Base name: " ++ baseName
+
+        case M.lookup baseName (funcDefs symbols) of
+            Just funcDef -> do
+                traceM $ "Found generic function: " ++ show funcDef
+
+                -- Extract type args from specialized name
+                let typeStr = drop (length baseName + 1) name
+                let typeArgs = case typeStr of
+                      "i32" -> [TypeNum Int32]
+                      "i64" -> [TypeNum Int64]
+                      "f32" -> [TypeNum Float32]
+                      "f64" -> [TypeNum Float64]
+                      _ -> []
+
+                traceM $ "Type arguments: " ++ show typeArgs
+
+                -- Specialize and register in BOTH maps
+                case specializeFunctionDef funcDef typeArgs symbols of
+                    Right specialized -> do
+                        traceM $ "Specialized function: " ++ show specialized
+
+                        -- Register specialized version in funcDefs
+                        let newSymbols = symbols
+                              { funcDefs = M.insert name specialized (funcDefs symbols) }
+
+                        -- Register function signature
+                        let specializedSig = FuncSig
+                              [t | Param _ t <- funcParams specialized]
+                              (funcRetType specialized)
+                        let newFuns = M.insert name specializedSig funs
+
+                        modify $ \s -> (vars, newFuns, structs, blocks, newSymbols)
+
+                        -- Check args after registering
+                        when (length (funcParams specialized) /= length args) $
+                            throwError $ ArgumentCountMismatch name
+                                (length $ funcParams specialized)
+                                (length args)
+                        mapM_ checkExpr args
+
+                    Left err ->
+                        traceM $ "Specialization failed: " ++ err
+
+            Nothing ->
+                traceM $ "No generic function found with base name: " ++ baseName
+
+        -- Now check if function exists (either original or just-specialized)
+        (_, updatedFuns, _, _, _) <- get  -- Get potentially updated state
+        case M.lookup name updatedFuns of
             Nothing -> throwError $ UndefinedFunction name
             Just (FuncSig params _) -> do
                 when (length params /= length args) $
                     throwError $ ArgumentCountMismatch name (length params) (length args)
                 mapM_ checkExpr args
-
+               
     Var name -> do
         (vars, _, _, _, _) <- get
         unless (M.member name vars) $
@@ -284,7 +356,7 @@ checkExpr = \case
             _ -> throwError $ InvalidStruct "Invalid base expression for field access"
 
 checkDecl :: Decl -> SemCheck ()
-checkDecl (DFunc _ params _ body) = do
+checkDecl (DFunc _ _typeParams params _ body) = do
     -- Create new scope with parameters
     (vars, funs, structs, blocks, symbols) <- get
     let paramVars = M.fromList [(name, typ) | Param name typ <- params]

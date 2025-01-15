@@ -152,7 +152,7 @@ spec = do
               , "  sum"
               ]
         expectParseSuccess input $ \tops ->
-          tops `shouldBe` [TLDecl (DFunc "sum_squares"
+          tops `shouldBe` [TLDecl (DFunc "sum_squares" []
                 [Param "x" (TypeNum Int32), Param "y" (TypeNum Int32)]
                 (TypeNum Int32)
                 (Block
