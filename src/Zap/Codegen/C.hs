@@ -38,6 +38,7 @@ generateCWithState (IRProgram funcs) = do
     -- Generate struct definitions (no state needed)
     let structDefs = generateStructDefinitions funcs
 
+    lift $ traceM $ "\nFunctions to generate: " ++ show (map (fnName . fst) funcs)
     -- Generate each function with state
     functionDefs <- mapM generateFunctionWithState funcs
 
@@ -368,6 +369,7 @@ unnegateCondition cond =
 
 -- Helper for generating literal values
 generateLiteral :: IRLiteral -> T.Text
+generateLiteral (IRBoolLit b) = T.pack $ if b then "1" else "0"
 generateLiteral (IRInt32Lit n) = T.pack $ show n
 generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"  -- Use C long suffix
 generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")  -- Use C float suffix

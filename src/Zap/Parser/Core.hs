@@ -78,7 +78,7 @@ checkBlockIndent :: BlockType -> Int -> Parser ()
 checkBlockIndent bt bi = do
     st <- get
     case stateTokens st of
-        (tok:_) -> do
+        (tok:rest) -> do
             let tokCol = locCol tok
             traceM $ "=== checkBlockIndent ==="
             traceM $ "Block type: " ++ show bt
@@ -87,15 +87,14 @@ checkBlockIndent bt bi = do
             traceM $ "Token: " ++ show (locToken tok)
             case locToken tok of
                 TEOF -> return ()
+                TWord "else" | tokCol <= bi -> return ()  -- Allow else at parent level
                 _ -> case bt of
                     TopLevel -> return ()
                     BasicBlock -> do
-                        traceM $ "Checking BasicBlock indent: " ++ show tokCol ++ " vs " ++ show bi
                         if tokCol < bi
                             then do
-                                -- Found dedent - this is valid block termination
                                 traceM $ "Found block termination dedent"
-                                modify $ \s -> s { stateIndent = tokCol }  -- Set new base indent
+                                modify $ \s -> s { stateIndent = tokCol }
                                 return ()
                             else return ()
                     FunctionBlock -> do

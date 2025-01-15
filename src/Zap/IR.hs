@@ -12,6 +12,7 @@ module Zap.IR
   , IRMetadata(..)
   , Effect(..)
   , IRConversionError(..)
+  , convertFuncDecl
   , convertToIR'
   , convertToIRExpr
   , convertToIRExprWithSymbols
@@ -266,7 +267,28 @@ convertFuncDecl symTable (DFunc name params retType body) = do
 convertExprToStmts :: SymbolTable -> Expr -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertExprToStmts symTable expr = do
     traceM $ "=== Converting expression to statements: " ++ show expr
+    traceM $ "Expression: " ++ show expr
     case expr of
+      If cond thenExpr elseExpr -> do
+          traceM "Converting if/else expression to statements"
+          -- Convert just the condition to an IR expression
+          condExpr <- convertToIRExprWithSymbols symTable cond
+
+          -- Convert the branch expressions to statements directly
+          thenStmts <- convertBlock symTable thenExpr Nothing
+          elseStmts <- convertBlock symTable elseExpr Nothing
+
+          let elseLabel = "if_else"
+          let endLabel = "if_end"
+          let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+
+          -- Return the full statement sequence
+          return $ (IRJumpIfZero condExpr elseLabel, meta) :
+                  thenStmts ++
+                  [(IRGoto endLabel, meta),
+                   (IRLabel elseLabel, meta)] ++
+                  elseStmts ++
+                  [(IRLabel endLabel, meta)]
       Let name val -> do
         traceM $ "Converting Let binding for: " ++ name
 
@@ -337,6 +359,7 @@ convertExprToStmts symTable expr = do
           traceM $ "Generated statement: " ++ show stmt
           return [stmt]
       _ -> do
+          traceM $ "No pattern matched in convertExprToStmts, falling through to: " ++ show expr
           converted <- convertToIRExprWithSymbols symTable expr
           return [(IRStmtExpr converted, mkMetadata IRTypeVoid (S.singleton PureEffect))]
 
@@ -454,7 +477,11 @@ convertType _ = IRTypeVoid
 
 convertTops :: SymbolTable -> [TopLevel] -> Maybe LoopContext -> Either IRConversionError (IRBlock, IRMetadata)
 convertTops symTable tops ctx = do
+    traceM $ "\n=== convertTops ==="
+    traceM $ "Current ctx: " ++ show ctx
+    traceM $ "Tops levels before conversion: " ++ show tops
     stmts <- concat <$> mapM (\t -> convertTop symTable t ctx) tops
+    traceM $ "Converted top-level statements: " ++ show stmts
     -- Get last metadata to preserve literal type info
     let lastMeta = if null stmts
         then mkMetadata IRTypeVoid (S.singleton PureEffect)
@@ -463,30 +490,63 @@ convertTops symTable tops ctx = do
     return (IRBlock "main.entry" (stmts ++ [returnStmt]), lastMeta)
 
 convertTop :: SymbolTable -> TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
+    -- First convert the condition
+    condExpr <- convertToIRExprWithSymbols symTable cond
+
+    -- Convert both branches using existing convertBlock
+    thenStmts <- convertBlock symTable thenExpr ctx
+    elseStmts <- convertBlock symTable elseExpr ctx
+
+    -- Generate labels
+    let elseLabel = "if_else"
+    let endLabel = "if_end"
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+
+    -- Return the complete sequence as a single list
+    return $ (IRJumpIfZero condExpr elseLabel, meta) :
+            thenStmts ++
+            [(IRGoto endLabel, meta),
+             (IRLabel elseLabel, meta)] ++
+            elseStmts ++
+            [(IRLabel endLabel, meta)]
 convertTop symTable (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
+    traceM $ "\n=== convertTop: If expression conversion ==="
     let isBreakPattern = case thenExpr of
           Block _ blockExprs _ -> any isBreakStmt blockExprs
           _ -> False
+
+    traceM $ "isBreakPattern: " ++ show isBreakPattern
 
     let targetLabel = case ctx of
           Just loopCtx -> loopEndLabel loopCtx
           Nothing -> "if_end"
 
+    traceM $ "targetLabel: " ++ show targetLabel
+
+    traceM $ "condExpr before conversion: " ++ show cond
     condExpr <- convertToIRExprWithSymbols symTable cond
+    traceM $ "condExpr after conversion: " ++ show condExpr
     let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    traceM $ "meta: " ++ show meta
 
     if isBreakPattern
         then do
             -- For if/break pattern, jump to loop end if condition is true
-            return [ (IRJumpIfTrue condExpr targetLabel, meta)
-                   , (IRGoto $ "while_" ++ show nextLoopNum ++ "_start", meta)  -- And this one
-                   ]
+            let result =
+                  [ (IRJumpIfTrue condExpr targetLabel, meta)
+                  , (IRGoto $ "while_" ++ show nextLoopNum ++ "_start", meta)  -- And this one
+                  ]
+            traceM $ "Converted if expression: " ++ show result
+            return result
         else do
             -- Normal if case
             thenStmts <- convertBlock symTable thenExpr ctx
-            return $ [ (IRJumpIfZero condExpr targetLabel, meta) ]
+            let result = [ (IRJumpIfZero condExpr targetLabel, meta) ]
                     ++ thenStmts
                     ++ [ (IRLabel targetLabel, meta) ]
+            traceM $ "Converted if expression: " ++ show result
+            return $ result
 
   where
     isBreakStmt (Break _) = True
@@ -634,10 +694,65 @@ convertExpr symTable (Call "print" [arg]) = do
             let meta = mkMetadata IRTypeVoid (S.singleton IOEffect)
             return (IRProcCall "print" [converted], meta)
 
+convertExpr symTable expr@(Lit lit) = do
+    -- Convert the literal to IR expression
+    irExpr <- convertToIRExprWithSymbols symTable expr
+    -- Create metadata based on literal type
+    let meta = case lit of
+          IntLit _ mtype ->
+            let litType = case mtype of
+                  Just nt -> LitInt nt
+                  Nothing -> LitInt Int64  -- Default to 64-bit
+            in mkLiteralMetadata IRTypeInt64 (S.singleton PureEffect) litType
+          FloatLit _ mtype ->
+            let litType = case mtype of
+                  Just nt -> LitFloat nt
+                  Nothing -> LitFloat Float32
+            in mkLiteralMetadata IRTypeFloat32 (S.singleton PureEffect) litType
+          StringLit _ ->
+            mkLiteralMetadata IRTypeString (S.singleton PureEffect) LitString
+          BooleanLit _ ->
+            mkLiteralMetadata IRTypeInt32 (S.singleton PureEffect) LitBoolean
+
+    -- Return literal as expression statement
+    return (IRStmtExpr irExpr, meta)
+
+convertExpr symTable expr@(If cond thenExpr elseExpr) = do
+    traceM $ "\n=== Converting If expression ==="
+    traceM $ "Condition: " ++ show cond
+
+    -- Convert condition
+    condExpr <- convertToIRExprWithSymbols symTable cond
+
+    -- Convert branches
+    thenStmts <- case thenExpr of
+        Block _ exprs _ -> concat <$> mapM (convertExprToStmts symTable) exprs
+        _ -> convertExprToStmts symTable thenExpr
+
+    elseStmts <- case elseExpr of
+        Block _ exprs _ -> concat <$> mapM (convertExprToStmts symTable) exprs
+        _ -> convertExprToStmts symTable elseExpr
+
+    -- Generate labels
+    let elseLabel = "if_else"
+    let endLabel = "if_end"
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+
+    -- Generate full sequence
+    return (IRStmtExpr (IRCall "if" [condExpr]), meta)
+
+convertExpr symTable expr@(BinOp op e1 e2) = do
+    -- Convert the operation using existing convertToIRExprWithSymbols
+    irExpr <- convertToIRExprWithSymbols symTable expr
+    -- Return as an expression statement
+    return (IRStmtExpr irExpr, mkMetadata IRTypeInt32 (S.singleton PureEffect))
+
 convertExpr _ (Call "print" _) =
     Left $ IRInvalidFunction "print requires exactly one argument"
 
-convertExpr _ e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
+convertExpr _ e = do
+  traceM $ "Encoutnered unsupported expression inside convertExpr: " ++ show e
+  Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 
 -- Helper to evaluate binary operations at compile time
 evalBinOp :: Op -> IRLiteral -> IRLiteral -> Either IRConversionError IRLiteral
@@ -831,19 +946,31 @@ convertToIRExprWithSymbols symTable (Call fname args)
       traceM $ "Converted args: " ++ show convertedArgs
       Right $ IRCall fname convertedArgs
 convertToIRExprWithSymbols symTable (Block _ blockExprs _) = do
+    traceM $ "\n=== convertToIRExprWithSymbols: Block ==="
     -- Handle last expression in block as result
     case blockExprs of
         [] -> Left $ IRError "Empty block"
         exprs -> convertToIRExprWithSymbols symTable (last exprs)
 convertToIRExprWithSymbols symTable (BinOp op e1 e2) = do
-    traceM $ "Converting binary operation: " ++ show op
+    traceM $ "\n=== convertToIRExprWithSymbols: BinOp ==="
+    traceM $ "Converting operator: " ++ show op
+    traceM $ "Left operand: " ++ show e1
+    traceM $ "Right operand: " ++ show e2
+
     left <- convertToIRExprWithSymbols symTable e1
+    traceM $ "Converted left: " ++ show left
+
     right <- convertToIRExprWithSymbols symTable e2
-    case op of
-      Lt -> Right $ IRCall "Lt" [left, right]
-      Gt -> Right $ IRCall "Gt" [left, right]
-      Eq -> Right $ IRCall "Eq" [left, right]
-      _ -> Right $ IRCall (opToString op) [left, right]
+    traceM $ "Converted right: " ++ show right
+
+    let result = case op of
+          Lt -> IRCall "Lt" [left, right]
+          Gt -> IRCall "Gt" [left, right]
+          Eq -> IRCall "Eq" [left, right]
+          _ -> IRCall (opToString op) [left, right]
+
+    traceM $ "Final result: " ++ show result
+    Right result
 convertToIRExprWithSymbols symTable (FieldAccess expr field) = do
     traceM $ "\n=== convertToIRExprWithSymbols: FieldAccess ==="
     traceM $ "Base expression: " ++ show expr
@@ -854,6 +981,7 @@ convertToIRExprWithSymbols symTable (FieldAccess expr field) = do
     traceM $ "Generated field access: " ++ show result
     Right result
 convertToIRExprWithSymbols symTable (StructLit name fields)  = do
+    traceM $ "\n=== convertToIRExprWithSymbols: StructLit ==="
     -- Get the struct ID from the symbol table
     let dummyId = StructId 0  -- TODO: Look up proper ID from symbol table
     -- Convert each field expression
@@ -864,7 +992,13 @@ convertToIRExprWithSymbols symTable (StructLit name fields)  = do
     Right $ IRCall "struct_lit" (IRLit (IRStringLit name) :
         concatMap (\(fname, expr) ->
             [IRLit (IRStringLit fname), expr]) convertedFields)
-convertToIRExprWithSymbols _ e = Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
+convertToIRExprWithSymbols symTable expr@(If _ _ _) = do
+    traceM "Skipping If expression in convertToIRExprWithSymbols - already handled by statements"
+    -- Return a dummy expression since this case shouldn't be reached
+    Right $ IRLit (IRInt32Lit 0)
+convertToIRExprWithSymbols _ e = do
+  traceM $ "Encoutnered unsupported expression inside convertToIRExprWithSymbols: " ++ show e
+  Left $ IRUnsupportedExpr $ "Unsupported expression: " ++ show e
 
 -- | Test if a name represents a struct constructor
 isFnameStructConstructor :: String -> Bool

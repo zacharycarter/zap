@@ -457,4 +457,18 @@ migratedTests =
         , expectedOutput = "42\n"
         , expectedExitCode = ExitSuccess
         }
+      , TestCase
+        { testName = "factorial_recursion"
+        , sourceCode = T.unlines
+            [ "fn factorial(n: i32): i32 ="
+            , "  if n == 0:"
+            , "    1"
+            , "  else:"
+            , "    n * factorial(n - 1)"
+            , ""
+            , "print factorial(5)"  -- Should print 120
+            ]
+        , expectedOutput = "120\n"
+        , expectedExitCode = ExitSuccess
+        }
   ]

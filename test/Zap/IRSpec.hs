@@ -72,6 +72,66 @@ spec = do
               _ -> expectationFailure "Expected implicit return"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
+      it "converts if expressions" $ do
+        let ast = Program [TLExpr (If
+                  (BinOp Eq (Var "x") (Lit (IntLit "0" (Just Int64))))
+                  (Block "then" [Lit (IntLit "1" (Just Int64))] Nothing)
+                  (Block "else" [Lit (IntLit "2" (Just Int64))] Nothing))]
+        let st = makeTestSymbolTable ast
+        case convertToIR' ast st of
+            Right (IRProgram [(mainFn, _)]) -> do
+                -- Should generate labels and conditional jumps
+                let IRBlock _ stmts = fnBody mainFn
+                case stmts of
+                    [(IRJumpIfZero _ label1, _),        -- Skip then branch if false
+                     (thenStmt, _),                     -- Then branch
+                     (IRGoto label2, _),                -- Skip else branch
+                     (IRLabel elseLabel, _),            -- Else branch label
+                     (elseStmt, _),
+                     (IRLabel endLabel, _),             -- End label
+                     _] -> do
+                        label1 `shouldBe` elseLabel     -- Jump to else if condition false
+                        endLabel `shouldBe` label2      -- Both branches continue here
+                    _ -> expectationFailure $ "Expected if/then/else structure, got: " ++ show stmts
+            Left err -> expectationFailure $ show err
+
+      it "converts recursive function with if expression" $ do
+        let func = IRFuncDecl
+              { fnName = "factorial"
+              , fnParams = [("n", IRTypeInt32)]
+              , fnRetType = IRTypeInt32
+              , fnBody = IRBlock "entry"
+                  [(IRReturn (Just (IRCall "factorial" [IRLit (IRInt32Lit 5)])), testMeta)]
+              }
+        let prog = IRProgram [(func, testMeta)]
+
+        case generateConstraints prog of
+          Right constraints -> do
+            constraints `shouldContain` [TEq IRTypeInt32 IRTypeInt32]  -- Return type matches
+          Left err -> expectationFailure $ show err
+
+      it "converts factorial function if/else with returns" $ do
+        let ast = DFunc "factorial" [Param "n" (TypeNum Int32)] (TypeNum Int32)
+                  (Block "function_body"
+                    [If (BinOp Eq (Var "n") (Lit (IntLit "0" (Just Int32))))
+                        (Block "if_then" [Lit (IntLit "1" (Just Int32))] Nothing)
+                        (Block "if_else"
+                            [BinOp Mul (Var "n")
+                                (Call "factorial"
+                                    [BinOp Sub (Var "n") (Lit (IntLit "1" (Just Int32)))])]
+                            Nothing)]
+                    Nothing)
+
+        case convertFuncDecl emptySymbolTable ast of
+            Right (irFunc, _) -> do
+                let IRBlock _ stmts = fnBody irFunc
+                -- Verify expected control flow structure
+                length stmts `shouldSatisfy` (>= 5)  -- Should have jumps, returns and labels
+                case stmts of
+                    ((IRJumpIfZero _ label1, _):_) -> label1 `shouldBe` "if_else"  -- Added metadata pattern
+                    _ -> expectationFailure "Expected conditional jump"
+            Left err -> expectationFailure $ show err
+
     describe "Error Handling" $ do
       it "reports error for unsupported expressions" $ do
         let ast = Program [TLExpr (Call "unknown" [])]

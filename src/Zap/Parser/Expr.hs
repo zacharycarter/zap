@@ -20,6 +20,7 @@ module Zap.Parser.Expr
   , isPrint
   , isStringLit
   , isValidName
+  , isOperator
   ) where
 
 import Control.Monad (when)
@@ -49,7 +50,7 @@ isValidName (TWord name) = do
         [] -> '_'
         hd : _ -> hd
   traceShow ("Validating name: " ++ name) $
-    not (name `elem` ["break", "result", "block", "let", "var", "fn", "print", "if", "while"]) &&
+    not (name `elem` ["break", "result", "block", "let", "var", "fn", "print", "if", "else", "while"]) &&
     not (null name) &&
     (isAlpha nameHd)
 isValidName _ = False
@@ -115,21 +116,30 @@ parseExpression = parseExpressionWithType Nothing
 
 parseExpressionWithType :: Maybe Type -> Parser Expr
 parseExpressionWithType expectedType = do
-  traceM "Parsing complete expression"
-  st <- get
-  case stateTokens st of
+    traceM "Parsing complete expression"
+    st <- get
+    case stateTokens st of
         (tok:_)
-          | locToken tok == TWord "if" -> parseIf expectedType
-          | locToken tok == TWord "while" -> parseWhileExpr expectedType
-        _ -> parseAssign expectedType >>= remainingExpression expectedType
+            | locToken tok == TWord "if" -> parseIf expectedType  -- Already exists
+            | locToken tok == TWord "while" -> parseWhileExpr expectedType  -- Already exists
+            -- New cases handled at top level
+            | locToken tok == TWord "else" ->
+                throwError $ UnexpectedToken tok "'if' before 'else'"  -- Better error
+            | otherwise -> parseAssign expectedType >>= remainingExpression expectedType
+        _ -> throwError $ EndOfInput "expression"
 
 parseIf :: Maybe Type -> Parser Expr
 parseIf expectedType = do
+    traceM "\n=== parseIf ==="
     traceM "Parsing if statement"
+    st <- get
+    traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
+
     _ <- matchToken isIf "if"
     condition <- parseExpressionWithType expectedType
     _ <- matchToken isColon ":"
 
+    traceM "Parsing then branch"
     -- Parse then branch with proper indentation
     st <- get
     let curIndent = stateIndent st
@@ -138,19 +148,42 @@ parseIf expectedType = do
 
     thenStmts <- parseBlockExprs expectedType BasicBlock newIndent
 
-    -- Convert statements to block
+    traceM $ "Then branch parsed: " ++ show thenStmts
+    traceM "Looking for else branch"
+
     let thenBlock = Block "if_then" (fst thenStmts) (snd thenStmts)
 
-    -- Reset indentation
+    -- Reset indentation for else check
     modify $ \s -> s { stateIndent = curIndent }
+    st' <- get
+    traceM $ "Current tokens after then: " ++ show (take 3 $ stateTokens st')
 
-    -- Since this is a simple if without else, pass Nothing for else branch
-    return $ If condition thenBlock (Lit (BooleanLit False))
+    -- Look for else branch at original indent level
+    elseBlock <- do
+      case stateTokens st' of
+        (tok:_) | isElse (locToken tok) -> do
+            traceM "Found else branch"
+            _ <- matchToken (\t -> t == TWord "else") "else"
+            _ <- matchToken isColon ":"
+
+            -- Parse else branch with proper indentation
+            modify $ \s -> s { stateIndent = newIndent }
+            elseStmts <- parseBlockExprs expectedType BasicBlock newIndent
+            modify $ \s -> s { stateIndent = curIndent }
+            return $ Block "if_else" (fst elseStmts) (snd elseStmts)
+
+        _ -> return $ Lit (BooleanLit False)
+
+    return $ If condition thenBlock elseBlock
 
 -- Helper for if keyword
 isIf :: Token -> Bool
 isIf (TWord "if") = True
 isIf _ = False
+
+isElse :: Token -> Bool
+isElse (TWord "else") = True
+isElse _ = False
 
 remainingExpression :: Maybe Type -> Expr -> Parser Expr
 remainingExpression expectedType left = do
@@ -949,6 +982,9 @@ parseBlockExprs expectedType bt bi = do
                         traceM $ "Token column " ++ show tokCol ++ " < base indent " ++ show bi
                         return ([], Nothing)
                     else case locToken tok of
+                        TWord "else" -> do   -- Stop parsing block when we hit else
+                            traceM "Found else token, ending block"
+                            return ([Lit (IntLit "1" (Just Int64))], Nothing)
                         TWord "print" -> do
                             traceM "Found print statement in block - handling specially"
                             printExpr <- parsePrintStatement
