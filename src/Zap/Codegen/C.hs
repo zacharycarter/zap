@@ -35,8 +35,11 @@ generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
 generateCWithState (IRProgram funcs) = do
     lift $ traceM "\n=== Starting C Code Generation ==="
 
-    -- Generate struct definitions (no state needed)
+    -- Generate struct definitions (keep existing implementation)
     let structDefs = generateStructDefinitions funcs
+
+    -- Add new: Generate function declarations
+    let declarations = map generateFunctionDeclaration $ filter (not . isMainFunc . fst) funcs
 
     lift $ traceM $ "\nFunctions to generate: " ++ show (map (fnName . fst) funcs)
     -- Generate each function with state
@@ -47,11 +50,25 @@ generateCWithState (IRProgram funcs) = do
           , "#include <stdint.h>"
           , ""
           , structDefs
+          , ""
+          , T.unlines declarations  -- Add function declarations
+          , ""
           , T.unlines functionDefs
           ]
 
     lift $ traceM $ "\n=== Final Generated Program ===\n" ++ T.unpack program
     return program
+  where
+    isMainFunc (IRFuncDecl {fnName = "main"}) = True
+    isMainFunc _ = False
+
+-- Helper for generating function declarations
+generateFunctionDeclaration :: (IRFuncDecl, IRMetadata) -> T.Text
+generateFunctionDeclaration (func, _) =
+    let typeStr = irTypeToC (fnRetType func)
+        params = T.intercalate ", " $ map (\(name, typ) ->
+                  T.concat [irTypeToC typ, " ", T.pack name]) (fnParams func)
+    in T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]
 
 -- Helper to generate struct definitions
 generateStructDefinitions :: [(IRFuncDecl, IRMetadata)] -> T.Text
@@ -310,9 +327,13 @@ generateStmtWithState (stmt, _) = case stmt of
               _ -> irTypeToC irType
         return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
 
+    IRStmtExpr (IRLit (IRBoolLit False)) ->
+        -- Don't generate return for break's false literal
+        return ""
+
     IRStmtExpr expr -> do
         exprCode <- generateExprWithState expr
-        return $ T.concat ["    ", exprCode, ";"]
+        return $ T.concat ["    return ", exprCode, ";"]
 
     IRReturn Nothing ->
         return "    return 0;"
@@ -337,6 +358,14 @@ generateStmtWithState (stmt, _) = case stmt of
 
     IRLabel label ->
         return $ T.concat [T.pack label, ":"]
+
+    IRGoto label | "while_" `T.isPrefixOf` T.pack label -> do
+        -- Preserve while loop gotos
+        return $ T.concat ["    goto ", T.pack label, ";"]
+
+    IRGoto "if_end" ->
+        -- Skip redundant goto if_end when we have a break
+        return ""
 
     IRGoto label ->
         return $ T.concat ["    goto ", T.pack label, ";"]
@@ -417,6 +446,26 @@ generateExprWithState expr = do
             (value, fmt) <- generatePrintExprWithState expr
             traceM $ "Generated print: value=" ++ T.unpack value ++ ", fmt=" ++ T.unpack fmt
             return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
+
+        IRCall fname args
+            | fname `elem` ["Add", "Sub", "Mul", "Div", "Lt", "Gt", "Eq"] -> do
+                -- Keep existing operator handling
+                left <- generateExprWithState (head args)
+                right <- generateExprWithState (args !! 1)
+                let cOp = case fname of
+                      "Add" -> "+"
+                      "Sub" -> "-"
+                      "Mul" -> "*"
+                      "Div" -> "/"
+                      "Lt" -> "<"
+                      "Gt" -> ">"
+                      "Eq" -> "=="
+                return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
+
+            | otherwise -> do
+                -- New case: Handle regular function calls
+                argExprs <- mapM generateExprWithState args
+                return $ T.concat [T.pack fname, "(", T.intercalate ", " argExprs, ")"]
 
         IRCall op [e1, e2] -> do
             traceM $ "\n=== generateExpr: binary op ==="
