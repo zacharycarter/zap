@@ -48,7 +48,6 @@ ghc-options:
 - -Wredundant-constraints
 - -fno-warn-name-shadowing
 - -fno-warn-incomplete-uni-patterns
-- -fno-warn-type-defaults
 
 library:
   source-dirs: src

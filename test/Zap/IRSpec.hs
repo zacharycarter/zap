@@ -1,5 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
-module Zap.IRSpec (spec) where
+module Zap.IRSpec (spec
+  , mkTestStructs
+  , testStruct
+  ) where
 
 import Test.Hspec
 import qualified Data.Map as M
@@ -34,7 +37,7 @@ testStruct name fields =
     in typ
 
 makeTestSymbolTable :: Program -> SymbolTable
-makeTestSymbolTable prog@(Program tops) =
+makeTestSymbolTable prog@(Program _) =
     case parseSymTable prog of
         Just st -> st
         Nothing -> emptySymbolTable
@@ -70,6 +73,7 @@ spec = do
                 metaType meta `shouldBe` IRTypeVoid
                 metaEffects meta `shouldBe` S.singleton PureEffect
               _ -> expectationFailure "Expected implicit return"
+          Right _ -> expectationFailure $ "Should've received IRProgram type"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       it "converts if expressions" $ do
@@ -84,15 +88,16 @@ spec = do
                 let IRBlock _ stmts = fnBody mainFn
                 case stmts of
                     [(IRJumpIfZero _ label1, _),        -- Skip then branch if false
-                     (thenStmt, _),                     -- Then branch
+                     (_thenStmt, _),                     -- Then branch
                      (IRGoto label2, _),                -- Skip else branch
                      (IRLabel elseLabel, _),            -- Else branch label
-                     (elseStmt, _),
+                     (_elseStmt, _),
                      (IRLabel endLabel, _),             -- End label
                      _] -> do
                         label1 `shouldBe` elseLabel     -- Jump to else if condition false
                         endLabel `shouldBe` label2      -- Both branches continue here
                     _ -> expectationFailure $ "Expected if/then/else structure, got: " ++ show stmts
+            Right _ -> expectationFailure $ "Should've received IRProgram type"
             Left err -> expectationFailure $ show err
 
       it "converts recursive function with if expression" $ do
@@ -182,9 +187,9 @@ spec = do
 
             -- Test statement metadata directly from the function body
             let IRBlock _ stmts = fnBody mainFn
-            case head stmts of
+            case stmts !! 0 of
               (_, stmtMeta) -> metaEffects stmtMeta `shouldBe` S.singleton IOEffect
-
+          Right _ -> expectationFailure $ "Should've received IRProgram type"
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
     describe "Type Inference" $ do
@@ -239,9 +244,11 @@ spec = do
           case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
-                  case head stmts of
+                  case stmts !! 0 of
                       (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+              Right _ -> expectationFailure $ "Should've received IRProgram"
+              Left err -> expectationFailure $ show err
 
       it "converts print with binary operation to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
@@ -249,18 +256,22 @@ spec = do
           case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
-                  case head stmts of
+                  case stmts !! 0 of
                       (IRProcCall "print" [IRLit (IRInt32Lit 3)], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+              Right _ -> expectationFailure $ "Should've received IRProgram"
+              Left err -> expectationFailure $ show err
     it "converts print to procedure call" $ do
       let ast = Program [TLExpr (Call "print" [Lit (StringLit "test")])]
       let st = makeTestSymbolTable ast
       case convertToIR' ast st of
         Right (IRProgram [(mainFn, _)]) -> do
           let IRBlock _ stmts = fnBody mainFn
-          case head stmts of
+          case stmts !! 0 of
             (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
             _ -> expectationFailure "Expected procedure call"
+        Right _ -> expectationFailure $ "Should've received IRProgram"
+        Left err -> expectationFailure $ show err
 
     describe "Print statement conversion" $ do
       it "converts string literal print to procedure call" $ do
@@ -269,9 +280,11 @@ spec = do
           case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
-                  case head stmts of
+                  case stmts !! 0 of
                       (IRProcCall "print" [IRLit (IRStringLit "test")], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
+              Right _ -> expectationFailure $ "Should've received IRProgram"
+              Left err -> expectationFailure $ show err
 
       it "converts print with binary operation to procedure call" $ do
           let ast = Program [TLExpr (Call "print" [BinOp Add (Lit (IntLit "1" (Just Int32))) (Lit (IntLit "2" (Just Int32)))])]
@@ -279,10 +292,11 @@ spec = do
           case convertToIR' ast st of
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
-                  case head stmts of
+                  case stmts !! 0 of
                       (IRProcCall "print" [IRLit (IRInt32Lit 3)], _) -> return ()
                       other -> expectationFailure $ "Expected procedure call, got: " ++ show other
-
+              Right _ -> expectationFailure $ "Should've received IRProgram"
+              Left err -> expectationFailure $ show err
 
     describe "Type Checking" $ do
       it "detects type errors in function calls" $ do
@@ -378,8 +392,8 @@ spec = do
     describe "Type coercion rules" $ do
       it "follows strict numeric type hierarchy" $ do
           let irInt32 = IRLit (IRInt32Lit 1)
-          let irInt64 = IRLit (IRInt64Lit 1)
-          let irFloat32 = IRLit (IRFloat32Lit 1.0)
+          let _irInt64 = IRLit (IRInt64Lit 1)
+          let _irFloat32 = IRLit (IRFloat32Lit 1.0)
           let irFloat64 = IRLit (IRFloat64Lit 1.0)
 
           let prog = IRProgram [(IRFuncDecl
@@ -397,6 +411,8 @@ spec = do
                       Right subst -> do
                           let resultType = applySubst subst (metaType testMeta)
                           resultType `shouldBe` IRTypeFloat64  -- Higher precision wins
+                      Left err -> expectationFailure $ "Constraint solving failed: " ++ show err
+              Left err -> expectationFailure $ show err
 
       it "preserves type precision in same-type operations" $ do
         -- Test Int32 precision preservation
@@ -446,7 +462,7 @@ spec = do
     describe "Struct type handling" $ do
       it "converts struct definitions to IR" $ do
         let pointFields = [("x", TypeNum Float32), ("y", TypeNum Float32)]
-        let (pointType, symTable) = mkTestStruct "Point" pointFields
+        let (pointType, _symTable) = mkTestStruct "Point" pointFields
 
         let ast = Program
               [ TLType "Point" pointType
@@ -471,10 +487,11 @@ spec = do
               case funcs of
                 [(mainFn, _)] -> do
                   let IRBlock _ stmts = fnBody mainFn
-                  case head stmts of
-                    (IRVarDecl (IRVarDeclData "x" _ (IRLit lit)), meta) -> do
+                  case stmts !! 0 of
+                    (IRVarDecl (IRVarDeclData "x" _ (IRLit _lit)), meta) -> do
                       metaLiteralType meta `shouldBe` Just (LitInt Int32)
                     _ -> expectationFailure "Expected variable declaration"
+                _ -> expectationFailure "IR conversion failed: "
             Left err -> expectationFailure $ "IR conversion failed: " ++ show err
 
         it "preserves float literal type information" $ do
@@ -486,6 +503,7 @@ spec = do
                 IRBlock _ ((IRVarDecl (IRVarDeclData _ _ _), meta):_) ->
                   metaLiteralType meta `shouldBe` Just (LitFloat Float32)
                 _ -> expectationFailure "Expected variable declaration"
+            Right _ -> expectationFailure "Conversion expected IRProgram"
             Left err -> expectationFailure $ show err
 
         it "preserves string literal type information" $ do
@@ -497,6 +515,8 @@ spec = do
                 IRBlock _ ((IRVarDecl (IRVarDeclData _ _ _), meta):_) ->
                   metaLiteralType meta `shouldBe` Just LitString
                 _ -> expectationFailure "Expected variable declaration"
+            Right _ -> expectationFailure "Conversion expected IRProgram"
+            Left err -> expectationFailure $ show err
 
         it "preserves numeric types" $ do
             let ast = Program [TLExpr (Call "print" [Lit (FloatLit "3.14" (Just Float32))])]
@@ -505,6 +525,7 @@ spec = do
                 Right (IRProgram [(mainFn, _)]) -> do
                     let IRBlock _ ((IRProcCall "print" [IRLit lit], _):_) = fnBody mainFn
                     lit `shouldBe` IRFloat32Lit 3.14
+                Right _ -> expectationFailure "Conversion expected IRProgram"
                 Left err -> expectationFailure $ show err
 
       describe "Variable declarations" $ do
@@ -518,7 +539,7 @@ spec = do
               Right (IRProgram [(mainFn, _)]) -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case stmts of
-                      [(declStmt, declMeta), (printStmt, printMeta), _] -> do
+                      [(declStmt, declMeta), (printStmt, _printMeta), _] -> do
                           -- Check variable declaration
                           case declStmt of
                               IRVarDecl (IRVarDeclData name irType expr) -> do
@@ -534,6 +555,7 @@ spec = do
                                   return ()
                               _ -> expectationFailure "Expected print statement"
                       _ -> expectationFailure $ "Expected exactly two statements, got: " ++ show stmts
+              Right _ -> expectationFailure "Conversion expected IRProgram"
               Left err -> expectationFailure $ show err
 
     describe "Generic type handling" $ do
@@ -545,9 +567,10 @@ spec = do
         case convertToIR' input st of
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
-            case head stmts of
+            case stmts !! 0 of
               (IRVarDecl (IRVarDeclData "x" (IRTypeStruct "Box_i32" _) _), _) -> return ()
               other -> expectationFailure $ "Expected concrete Box instantiation, got: " ++ show other
+          Right _ -> expectationFailure "Conversion expected IRProgram"
           Left err -> expectationFailure $ show err
 
       it "propagates concrete type information through variable declarations" $ do
@@ -560,8 +583,8 @@ spec = do
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
-              [ (IRVarDecl (IRVarDeclData "x" (IRTypeStruct "Box_i32" _) declInit), declMeta),
-                (IRProcCall "print" [IRCall "field_access" [IRVar "x", IRLit (IRStringLit "value")]], printMeta),
+              [ (IRVarDecl (IRVarDeclData "x" (IRTypeStruct "Box_i32" _) declInit), _declMeta),
+                (IRProcCall "print" [IRCall "field_access" [IRVar "x", IRLit (IRStringLit "value")]], _printMeta),
                 (IRReturn Nothing, _) ] -> do
                   case declInit of
                     IRCall "struct_lit" [IRLit (IRStringLit "Box_i32"), _] -> return ()
@@ -569,6 +592,7 @@ spec = do
                       "Expected struct_lit with concrete type, got: " ++ show other
               other -> expectationFailure $
                 "Expected variable declaration, print and return statements, got: " ++ show other
+          Right _ -> expectationFailure "Conversion expected IRProgram"
           Left err -> expectationFailure $ show err
 
       it "preserves base struct name when no type parameter given" $ do
@@ -583,7 +607,7 @@ spec = do
 
       it "uses specialized name with explicit type parameter" $ do
         -- First register the base struct
-        let (baseId, symTable) = registerStruct "Box"
+        let (_baseId, symTable) = registerStruct "Box"
                                   [("value", TypeNum Int32)]
                                   emptySymbolTable
         let ast = Call "Box[i32]"

@@ -935,7 +935,7 @@ convertToLiteral expr = case expr of
             Just Int32 -> Right $ IRInt32Lit (read val)
             Just Int64 -> Right $ IRInt64Lit (read val)
             _ ->
-              if read val > (2^31 - 1)
+              if (read val :: Integer) > (2^(31 :: Int) - 1)
                  then Right $ IRInt64Lit (read val)
                  else Right $ IRInt32Lit (read val)
         FloatLit val mtype ->
@@ -980,7 +980,7 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
         Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
         Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
         _ ->
-          if read val > (2^31 - 1)
+          if (read val :: Integer) > (2^(31 :: Int) - 1)
              then Right $ IRLit $ IRInt64Lit (read val)
              else Right $ IRLit $ IRInt32Lit (read val)
     FloatLit val mtype ->

@@ -3,8 +3,6 @@ module Zap.Analysis.SemanticSpec (spec) where
 
 import Test.Hspec
 import qualified Data.Text as T
-import qualified Data.Map.Strict as M
-import Debug.Trace
 
 import Zap.AST
 import Zap.Analysis.Semantic

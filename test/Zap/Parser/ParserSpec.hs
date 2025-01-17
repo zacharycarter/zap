@@ -78,7 +78,7 @@ spec = do
     it "parses nested blocks" $ do
       let input = "block outer:\n  block inner:\n    \"Hello\""
       case extractParseResult $ parseProgram input of
-        Right [TLExpr (Block blockLabel blockExprs blockResult)] -> do
+        Right [TLExpr (Block blockLabel blockExprs _blockResult)] -> do
           blockLabel `shouldBe` "outer"
           case blockExprs of
             (Block innerBlockLabel innerBlockExprs _:_) -> do
@@ -207,7 +207,7 @@ spec = do
     it "parses struct definition with fields" $ do
       expectParseWithSymbols "type Point = struct\n  x: i32\n  y: i32" $ \(tops, st) -> do
           case tops of
-              [TLType name typ@(TypeStruct sid _)] -> do
+              [TLType name (TypeStruct sid _)] -> do
                   name `shouldBe` "Point"
                   case lookupStruct sid st of
                       Just def -> do
@@ -225,13 +225,13 @@ spec = do
           lookupVarType "x" symTable `shouldBe` Just (TypeNum Int32)
 
     it "registers struct in symbol table during parse" $ do
-      let input = T.unlines [ "type Point = struct"
+      let _input = T.unlines [ "type Point = struct"
                             , "  x: i32"
                             , "  y: i32"
                             ]
       expectParseWithSymbols "type Point = struct\n  x: i32\n  y: i32" $ \(tops, symTable) ->
         case tops of
-          [TLType name typ@(TypeStruct sid _)] -> do
+          [TLType name (TypeStruct sid _)] -> do
             name `shouldBe` "Point"
             -- Check the struct is properly registered
             lookupStruct sid symTable `shouldNotBe` Nothing
@@ -243,7 +243,7 @@ spec = do
                            ]
       expectParseWithSymbols input $ \(tops, st) -> do
           case tops of
-              [TLType name typ@(TypeStruct sid _)] -> do
+              [TLType name (TypeStruct sid _)] -> do
                   name `shouldBe` "Box"
                   case lookupStruct sid st of
                       Just def -> do
@@ -259,7 +259,7 @@ spec = do
                            ]
       expectParseWithSymbols input $ \(tops, st) -> do
           case tops of
-              [TLType name typ@(TypeStruct sid _)] -> do
+              [TLType name (TypeStruct sid _)] -> do
                   name `shouldBe` "Box"
                   case lookupStruct sid st of
                       Just def -> do
@@ -290,7 +290,7 @@ spec = do
                            , "  value: T"
                            , "let b = Box[i32](42)"
                            ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      expectParseWithSymbols input $ \(_tops, st) -> do
         -- Verify base generic struct exists
         case M.lookup "Box" (structNames st) of
           Nothing -> expectationFailure "Base struct not found"
@@ -321,7 +321,7 @@ spec = do
       expectParseWithSymbols input $ \(tops, st) -> do
         -- First verify the struct definition
         case tops of
-          [TLType name typ@(TypeStruct sid _), _, _] -> do
+          [TLType name (TypeStruct sid _), _, _] -> do
             name `shouldBe` "Box"
             case lookupStruct sid st of
               Just def -> do
@@ -361,7 +361,7 @@ spec = do
             , "let p1 = Pair[i64, i32](42'i64, 17'i32)"
             , "let p2 = Pair[i32, i64](17'i32, 42'i64)"  -- Same types, different order
             ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      expectParseWithSymbols input $ \(_tops, st) -> do
         -- Verify both specialized versions exist with correct fields
         let p1Name = "Pair_i64_i32"
         let p2Name = "Pair_i32_i64"
@@ -396,7 +396,7 @@ spec = do
             , ""
             , "print x.inner.data"  -- Should access inner Box's data
             ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      expectParseWithSymbols input $ \(_tops, st) -> do
         -- Verify base structs exist
         case M.lookup "Box" (structNames st) of
           Nothing -> expectationFailure "Base Box struct not found"
@@ -464,7 +464,7 @@ spec = do
                     structParams def `shouldBe` ["S"]
                     structFields def `shouldBe` [("data", TypeParam "S")]
                   Nothing -> expectationFailure "Box struct not found"
-
+              _ -> expectationFailure "Expected TypeStruct type"
             -- Verify Nested struct
             case second of
               TLType _ (TypeStruct sid2 _) -> do
@@ -476,4 +476,5 @@ spec = do
                       , ("second", TypeParam "S")
                       ]
                   Nothing -> expectationFailure "Nested struct not found"
+              _ -> expectationFailure "Expected TypeStruct type"
           _ -> expectationFailure $ "Expected two type declarations, got: " ++ show tops
