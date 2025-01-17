@@ -651,7 +651,8 @@ parseCallArgs = do
                 parseMoreArgs [firstArg]
         _ -> return [] --TODO: State shouldn't be empty
   where
-    isConstructorName name = not (null name) && isUpper (head name)
+    isConstructorName (n:_) = isUpper n
+    isConstructorName [] = False
     parseMoreArgs acc = do
         st <- get
         case stateTokens st of
@@ -1402,8 +1403,7 @@ parseTypeToken tok = case locToken tok of
     TWord "f32" -> return $ TypeNum Float32
     TWord "f64" -> return $ TypeNum Float64
     -- NEW: Handle type parameters as valid types
-    TWord name | length name == 1 && isUpper (head name) ->
-        return $ TypeParam name
+    TWord [c] | isUpper c -> return $ TypeParam [c]
     _ -> throwError $ UnexpectedToken tok "valid type"
 
 parseVarDecl :: Parser Expr

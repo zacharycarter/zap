@@ -348,12 +348,12 @@ parseType = do
 
                 -- Original cases for basic types and type parameters
                 _ -> case typeName of
-                    "i32" -> return $ TypeNum Int32
-                    "i64" -> return $ TypeNum Int64
-                    "f32" -> return $ TypeNum Float32
-                    "f64" -> return $ TypeNum Float64
+                    -- "i32" -> return $ TypeNum Int32
+                    -- "i64" -> return $ TypeNum Int64
+                    -- "f32" -> return $ TypeNum Float32
+                    -- "f64" -> return $ TypeNum Float64
                     -- Single uppercase letter is a type parameter
-                    _ | length typeName == 1 && isUpper (head typeName) ->
+                    _ | length typeName == 1 && isUpper (typeName !! 0) ->
                         return $ TypeParam typeName
                     _ -> throwError $ UnexpectedToken tok "type name"
         _ -> throwError $ UnexpectedToken tok "type name"

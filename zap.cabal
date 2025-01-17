@@ -40,7 +40,7 @@ library
       Paths_zap
   hs-source-dirs:
       src
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults -fno-warn-overlapping-patterns -fno-warn-x-partial
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults
   build-depends:
       array >=0.5 && <1
     , base >=4.7 && <5
@@ -67,7 +67,7 @@ executable zap-exe
       Paths_zap
   hs-source-dirs:
       app
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults -fno-warn-overlapping-patterns -fno-warn-x-partial -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       array >=0.5 && <1
     , base >=4.7 && <5
@@ -105,7 +105,7 @@ test-suite zap-test
       Paths_zap
   hs-source-dirs:
       test
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults -fno-warn-overlapping-patterns -fno-warn-x-partial -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -fno-warn-name-shadowing -fno-warn-incomplete-uni-patterns -fno-warn-type-defaults -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       array >=0.5 && <1
     , base >=4.7 && <5

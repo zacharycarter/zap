@@ -258,7 +258,7 @@ generateSpecializedVersions st (DFunc name typeParams params retType body) = do
              [Param n (substituteTypeParamWithSymbols tp concreteType t st) |
               Param n t <- params,
               tp <- typeParams]
-             (substituteTypeParamWithSymbols (head typeParams) concreteType retType st)
+             (substituteTypeParamWithSymbols (typeParams !! 0) concreteType retType st)
              body
       ) specialized
   where
@@ -704,14 +704,13 @@ convertTop symTable (TLExpr (If cond thenExpr elseExpr)) ctx = do
          ++ [ (IRLabel endLabel, meta) ]
 
     return result
-
-convertTop _ (TLExpr (If _ _ (Lit (BooleanLit False)))) _ = do
-    -- Omitted for brevity (unchanged)
-    -- ...
-    -- ...
-    -- This remains the same as your existing code
-    Left $ IRUnsupportedExpr "If cond then expr else false unimplemented in snippet"
-
+-- This case is unreachable
+-- convertTop _ (TLExpr (If _ _ (Lit (BooleanLit False)))) _ = do
+--     -- Omitted for brevity (unchanged)
+--     -- ...
+--     -- ...
+--     -- This remains the same as your existing code
+--     Left $ IRUnsupportedExpr "If cond then expr else false unimplemented in snippet"
 convertTop symTable (TLExpr (While cond body)) prevCtx = do
     -- Unchanged from your code
     let nextNum = case prevCtx of
@@ -1145,8 +1144,8 @@ convertToIRExprWithSymbols _ e = do
 --------------------------------------------------------------------------------
 
 isFnameStructConstructor :: String -> Bool
-isFnameStructConstructor nm =
-    not (null nm) && C.isUpper (head nm)
+isFnameStructConstructor (c:_) = C.isUpper c
+isFnameStructConstructor [] = False
 
 opToString :: Op -> String
 opToString Add = "Add"

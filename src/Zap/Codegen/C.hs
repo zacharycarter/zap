@@ -311,9 +311,10 @@ generateFunctionWithState (func, _) = do
 
           -- Determine return type (extended)
           let typeStr = case fnRetType func of
-                IRTypeVar _ -> case specializedType of
-                    Just concreteType -> irTypeToC concreteType
-                    Nothing -> "void"  -- Generic functions use void
+                -- Cannot reach here
+                -- IRTypeVar _ -> case specializedType of 
+                --     Just concreteType -> irTypeToC concreteType
+                --     Nothing -> "void"  -- Generic functions use void
                 IRTypeInt32 -> "int32_t"
                 IRTypeVoid -> "void"
                 _ -> "int"  -- Default to int for now
@@ -416,10 +417,10 @@ generateStmtWithState (stmt, _) = case stmt of
         -- This case remains unchanged as it already tracks variable types correctly
         modify $ \s -> s { cgVarTypes = M.insert name irType (cgVarTypes s) }
         exprCode <- generateExprWithState initExpr
-        let typeStr = case irType of
-              IRTypeStruct sname _ -> T.concat ["struct ", T.pack sname]
-              _ -> irTypeToC irType
-        return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
+        -- let typeStr = case irType of
+        --       IRTypeStruct sname _ -> T.concat ["struct ", T.pack sname]
+        --       _ -> irTypeToC irType
+        return $ T.concat ["    ", irTypeToC irType, " ", T.pack name, " = ", exprCode, ";"]
 
     IRStmtExpr (IRLit (IRBoolLit False)) -> do
         traceM $ "\n=== generateStmtWithState: IRStmtExpr | IRBoolLit False ==="
@@ -604,50 +605,53 @@ generateExprWithState expr = do
         IRCall fname args
             | fname `elem` ["Add", "Sub", "Mul", "Div", "Lt", "Gt", "Eq"] -> do
                 -- Keep existing operator handling
-                left <- generateExprWithState (head args)
-                right <- generateExprWithState (args !! 1)
-                let cOp = case fname of
-                      "Add" -> "+"
-                      "Sub" -> "-"
-                      "Mul" -> "*"
-                      "Div" -> "/"
-                      "Lt" -> "<"
-                      "Gt" -> ">"
-                      "Eq" -> "=="
-                      _ -> "+"  -- Impossible to reach.
-                return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
+                if length args < 2 then error $ "Args cannot be empty"
+                else do
+                        left <- generateExprWithState (args !! 0)
+                        right <- generateExprWithState (args !! 1)
+                        let cOp = case fname of
+                              "Add" -> "+"
+                              "Sub" -> "-"
+                              "Mul" -> "*"
+                              "Div" -> "/"
+                              "Lt" -> "<"
+                              "Gt" -> ">"
+                              "Eq" -> "=="
+                              _ -> "+"  -- Impossible to reach.
+                        return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
 
             | otherwise -> do
                 -- New case: Handle regular function calls
                 argExprs <- mapM generateExprWithState args
                 return $ T.concat [T.pack fname, "(", T.intercalate ", " argExprs, ")"]
 
-        IRCall op [e1, e2] -> do
-            traceM $ "\n=== generateExpr: binary op ==="
-            traceM $ "Operator: " ++ op
-            traceM $ "Left expr: " ++ show e1
-            traceM $ "Right expr: " ++ show e2
-            -- Map operator strings to C operators
-            left <- generateExprWithState e1
-            right <- generateExprWithState e2
-            let cOp = case op of
-                  "Lt" -> "<"
-                  "Gt" -> ">"
-                  "Eq" -> "=="
-                  "NotEq" -> "!="
-                  "Add" -> "+"
-                  "Sub" -> "-"
-                  "Mul" -> "*"
-                  "Div" -> "/"
-                  "Point" -> error $ "Found struct constructor in binary op path" -- Added debug case
-                  _ -> error $ "Unsupported operator: " ++ op
-            return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
+        -- This case will not be reached due to above case
+        -- IRCall op [e1, e2] -> do
+        --     traceM $ "\n=== generateExpr: binary op ==="
+        --     traceM $ "Operator: " ++ op
+        --     traceM $ "Left expr: " ++ show e1
+        --     traceM $ "Right expr: " ++ show e2
+        --     -- Map operator strings to C operators
+        --     left <- generateExprWithState e1
+        --     right <- generateExprWithState e2
+        --     let cOp = case op of
+        --           "Lt" -> "<"
+        --           "Gt" -> ">"
+        --           "Eq" -> "=="
+        --           "NotEq" -> "!="
+        --           "Add" -> "+"
+        --           "Sub" -> "-"
+        --           "Mul" -> "*"
+        --           "Div" -> "/"
+        --           "Point" -> error $ "Found struct constructor in binary op path" -- Added debug case
+        --           _ -> error $ "Unsupported operator: " ++ op
+        --     return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
 
         IRLit lit -> return $ generateLiteral lit
 
         IRVar name -> return $ T.pack name
 
-        expr -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported expression: " ++ show expr
+        -- _ -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported expression: " ++ show expr
 
 -- Helper to determine format specifier
 generatePrintExprWithState :: IRExpr -> StateT CGState (Either CGenError) (T.Text, T.Text)
