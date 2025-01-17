@@ -83,7 +83,7 @@ compile' opts source = do
   -- Create Program with symbol table
   astResult <- if targetStage opts >= Parsing
     then case (parsedAST parseResult, symbolTable parseResult) of
-      (Just topLevels, Just symTable) -> do
+      (Just topLevels, Just _) -> do
         let prog = Program topLevels
         return $ parseResult { program = Just prog }
       _ -> return parseResult

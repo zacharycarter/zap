@@ -21,6 +21,8 @@ module Zap.Parser.Expr
   , isStringLit
   , isValidName
   , isOperator
+  , createNumericLiteral 
+  , parseParamType 
   ) where
 
 import Control.Monad (when)
@@ -430,7 +432,7 @@ parseFieldOrCallChain expr = do
                       case M.lookup name (structNames (stateSymTable st)) of
                           Just sid -> case lookupStruct sid (stateSymTable st) of
                               Just baseDef -> do
-                                  let (specializedId, newSymTable) =
+                                  let (_, newSymTable) =
                                         registerSpecializedStruct specializedName baseDef paramTypes (stateSymTable st)
                                   modify $ \s -> s { stateSymTable = newSymTable }
                               Nothing -> return ()
@@ -821,14 +823,13 @@ parseSingleBindingLine = do
             -- Register annotated type if present
             case annotatedType of
                 Just typ -> do
-                    st <- get
                     modify $ \s -> s { stateSymTable =
                         registerVarType varName typ (stateSymTable s) }
                 Nothing -> return ()
 
             -- Register type if we can determine it
             case value of
-                Call structName args -> do  -- Struct instantiation
+                Call structName _ -> do  -- Struct instantiation
                     st <- get
                     case M.lookup structName (structNames $ stateSymTable st) of
                         Just sid ->
@@ -1426,7 +1427,7 @@ parseVarDecl = do
             -- Register variable type if annotation was present
             case annotatedType of
                 Just typ -> do
-                    st <- get
+                    _ <- get
                     modify $ \s -> s { stateSymTable =
                         registerVarType name typ (stateSymTable s) }
                 Nothing -> return ()

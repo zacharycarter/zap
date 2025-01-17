@@ -335,7 +335,7 @@ parseType = do
                 (next:_) | locToken next == TLeftBracket -> do
                     traceM $ "Parsing generic type reference: " ++ typeName
                     -- Parse the type parameter
-                    params <- parseTypeParams
+                    _ <- parseTypeParams
                     -- Look up base struct in symbol table
                     case M.lookup typeName (structNames $ stateSymTable st) of
                         Just sid -> do

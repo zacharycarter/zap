@@ -12,7 +12,6 @@ import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
 import Data.List (isInfixOf, isPrefixOf, nub)
-import Data.Maybe (fromJust)
 import qualified Data.Map.Strict as M
 import Debug.Trace
 
@@ -56,12 +55,12 @@ initialEnvWithSymbols symTable =
     )
 
 analyze :: Program -> Either SemanticError Program
-analyze prog@(Program tops) = case parseSymTable prog of
+analyze prog@(Program _) = case parseSymTable prog of
     Just symTable -> analyzeWithSymbols prog symTable
     Nothing -> Left $ UndefinedStruct "Failed to get symbol table"
 
 analyzeWithSymbols :: Program -> SymbolTable -> Either SemanticError Program
-analyzeWithSymbols prog@(Program tops) symTable =
+analyzeWithSymbols (Program tops) symTable =
     runExcept $ evalStateT (do
         mapM_ collectTypeDeclarations tops
         mapM_ collectDeclarations tops
@@ -86,7 +85,7 @@ parseSymTable :: Program -> Maybe SymbolTable
 parseSymTable (Program tops) = Just $ foldr collectStructs emptySymbolTable tops
   where
     collectStructs :: TopLevel -> SymbolTable -> SymbolTable
-    collectStructs (TLType name (TypeStruct sid structName)) st =
+    collectStructs (TLType name _) st =
         -- Add to existing symbol table
         let (_, newSt) = registerStruct name [] st
         in newSt
@@ -213,7 +212,7 @@ checkExpr = \case
                               (funcRetType specialized)
                         let newFuns = M.insert name specializedSig funs
 
-                        modify $ \s -> (vars, newFuns, structs, blocks, newSymbols)
+                        modify $ \_ -> (vars, newFuns, structs, blocks, newSymbols)
 
                         -- Check args after registering
                         when (length (funcParams specialized) /= length args) $
@@ -254,7 +253,7 @@ checkExpr = \case
         checkExpr val
         (vars, funs, structs, blocks, symTable) <- get
         let varType = case val of
-              Call structName args ->
+              Call structName _ ->
                 case M.lookup structName (structNames symTable) of
                   Just sid -> TypeStruct sid structName
                   Nothing -> TypeAny
@@ -268,7 +267,7 @@ checkExpr = \case
         traceM $ "Base expression: " ++ show expr
 
         checkExpr expr  -- First validate the base expression
-        (vars, funs, structs, blocks, symTable) <- get
+        (vars, _, _, _, symTable) <- get
 
         baseType <- getBaseType expr vars symTable
 

@@ -253,7 +253,7 @@ registerSpecializedStruct specializationName baseDef paramTypes st =
 
 -- Helper to instantiate a function definition with concrete types
 specializeFunctionDef :: FunctionDef -> [Type] -> SymbolTable -> Either String FunctionDef
-specializeFunctionDef def typeArgs st
+specializeFunctionDef def typeArgs _
     | length (funcTypeParams def) /= length typeArgs =
         Left $ "Wrong number of type arguments for " ++ funcName def
     | otherwise = do

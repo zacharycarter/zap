@@ -13,6 +13,7 @@ module Zap.IR
   , Effect(..)
   , IRConversionError(..)
   , convertFuncDecl
+  , convertStructType 
   , convertToIR'
   , convertToIRExpr
   , convertToIRExprWithSymbols
@@ -24,14 +25,14 @@ module Zap.IR
   , generateConstraints
   , solveConstraints
   , applySubst
+  , promoteTypes
   ) where
 
 import qualified Data.Char as C
 import qualified Data.Text as T
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad (foldM, unless, when)
-import Control.Monad.Except
+import Control.Monad (foldM, when)
 import Debug.Trace
 
 import Zap.AST as A
@@ -242,7 +243,7 @@ generateSpecializedVersions st (DFunc name typeParams params retType body) = do
 
     traceM $ "Found specialized versions of " ++ name ++ ": " ++ show specialized
 
-    M.elems $ M.mapWithKey (\specName def ->
+    M.elems $ M.mapWithKey (\specName _ ->
         -- Create specialized declaration with concrete types
         let concreteType = case dropWhile (/= '_') specName of
               "_i32" -> TypeNum Int32
@@ -288,7 +289,7 @@ convertFuncDecl
   :: SymbolTable
   -> Decl
   -> Either IRConversionError (IRFuncDecl, IRMetadata)
-convertFuncDecl symTable (DFunc name typeParams params retType (Block label bodyExprs blockResult)) = do
+convertFuncDecl symTable (DFunc name typeParams params retType (Block _ bodyExprs _)) = do
     traceM $ "\n=== Converting function: " ++ name
     traceM $ "Parameters: " ++ show params
     traceM $ "Return type: " ++ show retType
@@ -356,7 +357,7 @@ convertFuncDecl symTable (DFunc name typeParams params retType (Block label body
          , funcMeta
          )
 
-convertFuncDecl _ (DFunc name _ _ _ body) =
+convertFuncDecl _ (DFunc _ _ _ _ body) =
   Left $ IRUnsupportedExpr $
     "Function body must be a block: " ++ show body
 
@@ -522,7 +523,7 @@ convertBlockOrLiteralReturn
   -> Expr
   -> Maybe LoopContext
   -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertBlockOrLiteralReturn symTable (Block _ [e] Nothing) ctx = do
+convertBlockOrLiteralReturn symTable (Block _ [e] Nothing) _ = do
     traceM "Single-expression block => IRReturn"
     converted <- convertToIRExprWithSymbols symTable e
     let metaType = typeFromExpr e (Just symTable)
@@ -563,7 +564,7 @@ validateStructTypes (FieldAccess baseExpr fieldName) symTable = do
           case lookupStruct sid symTable of
             Just def ->
               case lookup fieldName (structFields def) of
-                Just fieldType -> Right ()
+                Just _ -> Right ()
                 Nothing -> Left $ IRError $
                     "Field " ++ fieldName ++ " not found"
             Nothing -> Left $ IRError "Invalid struct type"
@@ -621,7 +622,7 @@ typeFromExpr (FieldAccess baseExpr fieldName) (Just st) =
     case baseExpr of
       Var varName ->
         case lookupVarType varName st of
-          Just (TypeStruct sid structName) ->
+          Just (TypeStruct sid _) ->
             case lookupStruct sid st of
               Just def ->
                 case lookup fieldName (structFields def) of
@@ -676,7 +677,7 @@ convertTop
   -> TopLevel
   -> Maybe LoopContext
   -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
+convertTop symTable (TLExpr (If cond thenExpr elseExpr)) ctx = do
     -- Same approach as before for top-level if
     condExpr  <- convertToIRExprWithSymbols symTable cond
     thenStmts <- convertBlock symTable thenExpr ctx
@@ -697,7 +698,7 @@ convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
 
     return result
 
-convertTop symTable (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
+convertTop _ (TLExpr (If _ _ (Lit (BooleanLit False)))) _ = do
     -- Omitted for brevity (unchanged)
     -- ...
     -- ...
@@ -729,7 +730,7 @@ convertTop symTable (TLExpr (While cond body)) prevCtx = do
         ((IRGoto l,_):rest) | l == lbl -> reverse rest
         _ -> ss
 
-convertTop symTable (TLExpr (VarDecl name value)) ctx = do
+convertTop symTable (TLExpr (VarDecl name value)) _ = do
     -- Unchanged from your code
     traceM $ "Converting top-level variable declaration: " ++ name
     convertedExpr <- convertToIRExprWithSymbols symTable value
@@ -782,7 +783,7 @@ convertTop symTable (TLExpr (AssignOp name op expr)) _ = do
     let meta = mkMetadata IRTypeVoid (S.singleton WriteEffect)
     pure [(IRAssignOp name op convertedExpr, meta)]
 
-convertTop symTable (TLExpr e) ctx =
+convertTop symTable (TLExpr e) _ =
     case e of
       Let {} -> convertExprToStmts symTable e
       _      -> (:[]) <$> convertExpr symTable e
@@ -857,7 +858,7 @@ convertExpr symTable (Lit lit) = do
             mkLiteralMetadata IRTypeInt32 (S.singleton PureEffect) LitBoolean
     pure (IRStmtExpr irExpr, meta)
 
-convertExpr symTable e@(If _ _ _) = do
+convertExpr _ (If _ _ _) = do
     traceM "Skipping If in convertExpr—already handled by statement-based logic"
     let dummy = IRStmtExpr (IRLit (IRInt32Lit 0))
     let dMeta = mkMetadata IRTypeVoid (S.singleton PureEffect)
@@ -886,8 +887,8 @@ evalBinOp Add (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x + y)
 evalBinOp Add (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x + y)
 evalBinOp Sub (IRInt32Lit x) (IRInt32Lit y)   = Right $ IRInt32Lit (x - y)
 evalBinOp Sub (IRInt64Lit x) (IRInt64Lit y)   = Right $ IRInt64Lit (x - y)
-evalBinOp Sub (IRInt64Lit x) (IRInt32Lit y)   = Right $ IRInt64Lit (x - fromIntegral y)
-evalBinOp Sub (IRInt32Lit x) (IRInt64Lit y)   = Right $ IRInt64Lit (fromIntegral x - y)
+evalBinOp Sub (IRInt64Lit x) (IRInt32Lit y)   = Right $ IRInt64Lit (x - y)
+evalBinOp Sub (IRInt32Lit x) (IRInt64Lit y)   = Right $ IRInt64Lit (x - y)
 evalBinOp Sub (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x - y)
 evalBinOp Sub (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x - y)
 evalBinOp Mul (IRInt32Lit x) (IRInt32Lit y)   = Right $ IRInt32Lit (x * y)
@@ -1024,7 +1025,7 @@ convertToIRExprWithSymbols symTable (Call fname args)
             Just baseId ->
               case lookupStruct baseId symTable of
                 Just baseDef -> do
-                  let (_, newSymTable) =
+                  let _ =
                         registerSpecializedStruct concreteTypeName
                             baseDef [paramType] symTable
                   Right $ IRCall "struct_lit"
@@ -1060,12 +1061,12 @@ convertToIRExprWithSymbols symTable (Call fname args)
                           traceM $ "Specializing generic type: "
                                 ++ fname ++ " -> " ++ specializedName
                           case M.lookup specializedName (structNames symTable) of
-                            Just specSid ->
+                            Just _ ->
                               Right $ IRCall "struct_lit"
                                 (IRLit (IRStringLit specializedName)
                                   : convertedArgs)
                             Nothing -> do
-                              let (_, newSymTable) =
+                              let _ =
                                    registerSpecializedStruct specializedName
                                      def [paramType] symTable
                               traceM $ "Created specialized struct: "
@@ -1114,7 +1115,6 @@ convertToIRExprWithSymbols symTable (FieldAccess expr field) = do
 
 convertToIRExprWithSymbols symTable (StructLit name fields) = do
     traceM $ "\n=== convertToIRExprWithSymbols: StructLit ==="
-    let dummyId = StructId 0
     convFields <- mapM (\(f,e) -> do
                        i <- convertToIRExprWithSymbols symTable e
                        pure (f,i)) fields
@@ -1184,7 +1184,7 @@ genStmtConstraints (stmt, _) = case stmt of
 genExprConstraints :: IRExpr -> Either TypeError [TypeConstraint]
 genExprConstraints (IRCall name args) = do
     case (name, args) of
-        ("field_access", [expr, IRLit (IRStringLit field)]) -> do
+        ("field_access", [expr, _]) -> do
             exprType <- exprType expr
             case exprType of
                 IRTypeStruct sname sid ->
@@ -1220,10 +1220,12 @@ genExprConstraints (IRCall name args) = do
             return $ map (\t -> TEq t IRTypeInt32) argTypes
   where
     -- Helper to determine numeric type based on literal
+    {-
     exprNumType :: IRExpr -> IRType
     exprNumType (IRLit (IRFloat32Lit _)) = IRTypeFloat32
     exprNumType (IRLit (IRFloat64Lit _)) = IRTypeFloat64
     exprNumType _ = IRTypeInt32
+    -}
 
 isNumericType :: IRType -> Bool
 isNumericType = \case
@@ -1325,7 +1327,7 @@ unify t1 t2 =
 
 coerceTypes :: IRType -> IRType -> Either TypeError IRType
 coerceTypes t1 t2 = case (getNumericPrecision t1, getNumericPrecision t2) of
-    (Just p1, Just p2) -> Right $ highestPrecisionType t1 t2
+    (Just _, Just _) -> Right $ highestPrecisionType t1 t2
     _ -> Left $ UnificationError t1 t2
   where
     highestPrecisionType :: IRType -> IRType -> IRType

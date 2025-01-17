@@ -1,6 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Zap.Codegen.C
   ( generateC
+  , initialCGState 
+  , isLabelDeclared 
+  , isNegatedCondition 
+  , unnegateCondition 
   , CGenError(..)
   ) where
 
@@ -10,7 +14,6 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import Control.Monad (forM_, when)
 import Control.Monad.State
-import Control.Monad.Except
 import qualified Data.Map.Strict as M
 import Debug.Trace
 
@@ -170,7 +173,7 @@ collectStructTypes funcs =
             traceM $ "Statement: " ++ show stmt
             traceM $ "Symbol table: " ++ show symTable
             case stmt of
-                IRVarDecl _ (IRTypeStruct name sid) init ->
+                IRVarDecl _ (IRTypeStruct name sid) _ ->
                     case symTable >>= lookupStruct sid of
                         Just def ->
                             -- Register base constructor function
@@ -184,7 +187,7 @@ collectStructTypes funcs =
             [ (depName, getStructFields symTable depSid)
             | (_, fieldType) <- fields  -- First bind all fields
             , case fieldType of  -- Then match struct types
-                IRTypeStruct depName depSid   -- Get struct name and ID
+                IRTypeStruct depName _ -- Get struct name and ID
                     | depName /= name ->  -- Avoid recursion
                         True  -- Include this struct
                     | otherwise ->
@@ -718,4 +721,5 @@ generatePrintExprWithState expr = do
             exprCode <- generateExprWithState expr
             return (exprCode, "%d")
 
+rstrip :: [Char] -> T.Text
 rstrip = T.pack . reverse . dropWhile isSpace . reverse

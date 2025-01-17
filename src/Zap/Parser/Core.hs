@@ -78,7 +78,7 @@ checkBlockIndent :: BlockType -> Int -> Parser ()
 checkBlockIndent bt bi = do
     st <- get
     case stateTokens st of
-        (tok:rest) -> do
+        (tok:_) -> do
             let tokCol = locCol tok
             traceM $ "=== checkBlockIndent ==="
             traceM $ "Block type: " ++ show bt
