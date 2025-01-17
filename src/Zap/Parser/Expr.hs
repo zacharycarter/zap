@@ -440,6 +440,7 @@ parseFieldOrCallChain expr = do
 
                       -- Continue with constructor call
                       parseMaybeCall specializedName
+                  _ -> throwError $ UnexpectedToken undefined "Expected Var Expression"
             TDot -> do
                 _ <- matchToken (== TDot) "dot"
                 fieldTok <- matchToken isValidName "field name"
@@ -643,10 +644,12 @@ parseCallArgs = do
                                                          Just def -> case structFields def of
                                                            (_, TypeNum t):_ -> Just (TypeNum t)
                                                            _ -> Nothing
+                                                         _ -> Nothing
                                                        Nothing -> Nothing
                       _ -> Nothing
                 firstArg <- parseExpressionWithType expectedType
                 parseMoreArgs [firstArg]
+        _ -> return [] --TODO: State shouldn't be empty
   where
     isConstructorName name = not (null name) && isUpper (head name)
     parseMoreArgs acc = do
@@ -667,6 +670,7 @@ parseCallArgsWithType expectedType = do
             | otherwise -> do
                 firstArg <- parseExpressionWithType expectedType
                 parseMoreArgs expectedType [firstArg]
+        _ -> return [] --TODO: Shouldn't reach here
   where
     parseMoreArgs :: Maybe Type -> [Expr] -> Parser [Expr]
     parseMoreArgs expectedType acc = do
@@ -739,6 +743,7 @@ parseBasicExprImpl = do
                         case typ of
                           Int64 -> return $ Lit (IntLit n (Just Int64))
                           Float64 -> return $ Lit (FloatLit n (Just Float64))
+                          _ -> return $ Lit (IntLit n (Just Int64)) -- Impossible to reach case
             TVec vecTypeStr -> do
                 traceM $ "Parsing vector constructor: " ++ vecTypeStr
                 _ <- matchToken isVecConstructor "vector constructor"

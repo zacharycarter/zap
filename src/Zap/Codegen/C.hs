@@ -173,7 +173,7 @@ collectStructTypes funcs =
             traceM $ "Statement: " ++ show stmt
             traceM $ "Symbol table: " ++ show symTable
             case stmt of
-                IRVarDecl _ (IRTypeStruct name sid) _ ->
+                IRVarDecl (IRVarDeclData _ (IRTypeStruct name sid) _) ->
                     case symTable >>= lookupStruct sid of
                         Just def ->
                             -- Register base constructor function
@@ -195,7 +195,7 @@ collectStructTypes funcs =
                 _ -> False  -- Skip non-struct fields
             , let IRTypeStruct depName depSid = fieldType  -- Bind the matched values
             ]  -- The result tuple uses the bound depName and depSid
-
+        
         getStructFields :: Maybe SymbolTable -> StructId -> [(String, IRType)]
         getStructFields (Just st) sid = case lookupStruct sid st of
             Just def -> map (convertFieldType (Just st)) (structFields def)
@@ -225,6 +225,7 @@ collectStructTypes funcs =
             case symTable >>= lookupConcreteType param of
                 Just concrete -> (name, concrete)
                 Nothing -> (name, IRTypeInt32)  -- Default, but log warning
+        _ -> error "convertFieldType: Unhandled Type case" -- TODO: This needs to be completed.
 
 -- Helper to find specialized version of a struct
 lookupSpecializedStruct :: Maybe SymbolTable -> String -> Maybe (String, StructId)
@@ -399,7 +400,7 @@ generateBlockWithState (IRBlock _ stmts) = do
 
 generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateStmtWithState (stmt, _) = case stmt of
-    IRVarDecl name irType@(IRTypeStruct structName _) initExpr -> do
+    IRVarDecl (IRVarDeclData name irType@(IRTypeStruct structName _) initExpr) -> do
         traceM $ "\n=== generateStmtWithState: IRVarDecl | IRTypeStruct ==="
         -- Track both the temporary struct type for initialization and the variable type
         modify $ \s -> s { cgVarTypes = M.insert "current_struct_type" irType $
@@ -410,7 +411,7 @@ generateStmtWithState (stmt, _) = case stmt of
         modify $ \s -> s { cgVarTypes = M.delete "current_struct_type" (cgVarTypes s) }
         return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
 
-    IRVarDecl name irType initExpr -> do
+    IRVarDecl (IRVarDeclData name irType initExpr) -> do
         traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
         -- This case remains unchanged as it already tracks variable types correctly
         modify $ \s -> s { cgVarTypes = M.insert name irType (cgVarTypes s) }
@@ -613,6 +614,7 @@ generateExprWithState expr = do
                       "Lt" -> "<"
                       "Gt" -> ">"
                       "Eq" -> "=="
+                      _ -> "+"  -- Impossible to reach.
                 return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
 
             | otherwise -> do

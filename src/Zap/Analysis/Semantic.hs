@@ -307,7 +307,8 @@ checkExpr = \case
         (vars, _, _, _, _) <- get
         unless (M.member name vars) $
             throwError $ UndefinedVariable name
-
+    
+    _ -> return () -- TODO: Checks for structLit, ArrayLit & Index are yet to be added
   where
     getBaseType :: Expr -> VarEnv -> SymbolTable -> SemCheck Type
     getBaseType expr vars symTable = do

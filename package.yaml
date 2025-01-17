@@ -47,6 +47,10 @@ ghc-options:
 - -Wpartial-fields
 - -Wredundant-constraints
 - -fno-warn-name-shadowing
+- -fno-warn-incomplete-uni-patterns
+- -fno-warn-type-defaults
+- -fno-warn-overlapping-patterns
+- -fno-warn-x-partial
 
 library:
   source-dirs: src

@@ -12,6 +12,7 @@ module Zap.IR
   , IRMetadata(..)
   , Effect(..)
   , IRConversionError(..)
+  , IRVarDeclData (..)
   , convertFuncDecl
   , convertStructType 
   , convertToIR'
@@ -82,11 +83,7 @@ data IRBlock = IRBlock
 data IRStmt
   = IRStmtExpr IRExpr
   | IRReturn (Maybe IRExpr)
-  | IRVarDecl
-      { varDeclName :: String
-      , varDeclType :: IRType
-      , varDeclInit :: IRExpr
-      }
+  | IRVarDecl IRVarDeclData 
   | IRAssign String IRExpr
   | IRAssignOp String Op IRExpr
   | IRLabel String
@@ -95,6 +92,12 @@ data IRStmt
   | IRJumpIfZero IRExpr String
   | IRProcCall String [IRExpr]
   deriving (Show, Eq)
+
+data IRVarDeclData = IRVarDeclData
+  { varDeclName :: String
+  , varDeclType :: IRType
+  , varDeclInit :: IRExpr
+  } deriving (Show, Eq)
 
 data IRExpr
   = IRCall String [IRExpr]
@@ -361,6 +364,10 @@ convertFuncDecl _ (DFunc _ _ _ _ body) =
   Left $ IRUnsupportedExpr $
     "Function body must be a block: " ++ show body
 
+convertFuncDecl _ (DStruct structName _) =
+  Left $ IRUnsupportedExpr $
+    "Got struct instead of function: " ++ show structName 
+
 --------------------------------------------------------------------------------
 --                     Convert Expressions to IR Stmts
 --------------------------------------------------------------------------------
@@ -417,7 +424,7 @@ convertExprToStmts symTable expr = do
               traceM $ "Created metadata: " ++ show meta
               traceM $ "Assigned type: " ++ show irType
 
-              let stmt = IRVarDecl name irType convertedExpr
+              let stmt = IRVarDecl (IRVarDeclData name irType convertedExpr)
               traceM $ "Created statement: " ++ show stmt
               return [(stmt, meta)]
 
@@ -740,12 +747,12 @@ convertTop symTable (TLExpr (VarDecl name value)) _ = do
               case mtype of
                 Just Int32 -> IRTypeInt32
                 Just Int64 -> IRTypeInt64
-                Nothing    -> IRTypeInt32
+                _          -> IRTypeInt32
             Lit (FloatLit _ mtype) ->
               case mtype of
                 Just Float32 -> IRTypeFloat32
                 Just Float64 -> IRTypeFloat64
-                Nothing      -> IRTypeFloat32
+                _            -> IRTypeFloat32
             Lit (StringLit _) -> IRTypeString
             _ -> IRTypeVoid
     let meta =
@@ -765,7 +772,7 @@ convertTop symTable (TLExpr (VarDecl name value)) _ = do
             Lit (StringLit _) ->
               mkLiteralMetadata IRTypeString (S.singleton WriteEffect) LitString
             _ -> mkMetadata IRTypeVoid (S.singleton WriteEffect)
-    pure [(IRVarDecl name irType convertedExpr, meta)]
+    pure [(IRVarDecl (IRVarDeclData name irType convertedExpr), meta)]
 
 convertTop _ (TLExpr (Break _)) Nothing =
     Left $ IRError "Break outside loop"
@@ -788,6 +795,8 @@ convertTop symTable (TLExpr e) _ =
       Let {} -> convertExprToStmts symTable e
       _      -> (:[]) <$> convertExpr symTable e
 
+convertTop _ _ _ = 
+    Left $ IRUnsupportedExpr "TLDecl and TLType not supported"
 --------------------------------------------------------------------------------
 --            convertBlock (unchanged except minor details)
 --------------------------------------------------------------------------------
@@ -926,7 +935,7 @@ convertToLiteral expr = case expr of
           case mtype of
             Just Int32 -> Right $ IRInt32Lit (read val)
             Just Int64 -> Right $ IRInt64Lit (read val)
-            Nothing ->
+            _ ->
               if read val > (2^31 - 1)
                  then Right $ IRInt64Lit (read val)
                  else Right $ IRInt32Lit (read val)
@@ -934,7 +943,7 @@ convertToLiteral expr = case expr of
           case mtype of
             Just Float32 -> Right $ IRFloat32Lit (read val)
             Just Float64 -> Right $ IRFloat64Lit (read val)
-            Nothing      -> Right $ IRFloat32Lit (read val)
+            _            -> Right $ IRFloat32Lit (read val)
         StringLit s   -> Right $ IRStringLit s
         BooleanLit _  ->
           Left $ IRUnsupportedLiteral "Boolean literals not yet supported"
@@ -971,7 +980,7 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
       case mtype of
         Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
         Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
-        Nothing ->
+        _ ->
           if read val > (2^31 - 1)
              then Right $ IRLit $ IRInt64Lit (read val)
              else Right $ IRLit $ IRInt32Lit (read val)
@@ -979,7 +988,7 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
       case mtype of
         Just Float32 -> Right $ IRLit $ IRFloat32Lit (read val)
         Just Float64 -> Right $ IRLit $ IRFloat64Lit (read val)
-        Nothing      -> Right $ IRLit $ IRFloat32Lit (read val)
+        _            -> Right $ IRLit $ IRFloat32Lit (read val)
     StringLit val -> Right $ IRLit $ IRStringLit val
     BooleanLit val -> Right $ IRLit $ IRBoolLit val
 
@@ -1180,6 +1189,7 @@ genStmtConstraints (stmt, _) = case stmt of
       -- Add constraint that return value matches function return type
       return $ TEq IRTypeInt32 IRTypeInt32 : exprConstraints  -- Add return type constraint here
     Nothing -> return []
+  _ -> return []
 
 genExprConstraints :: IRExpr -> Either TypeError [TypeConstraint]
 genExprConstraints (IRCall name args) = do
@@ -1218,6 +1228,7 @@ genExprConstraints (IRCall name args) = do
             -- For other operators, collect type constraints without checking
             argTypes <- mapM exprType args
             return $ map (\t -> TEq t IRTypeInt32) argTypes
+genExprConstraints _ = return []
   where
     -- Helper to determine numeric type based on literal
     {-
@@ -1260,6 +1271,7 @@ literalType (IRFloat32Lit _) = IRTypeFloat32
 literalType (IRFloat64Lit _) = IRTypeFloat64
 literalType (IRStringLit _) = IRTypeString
 literalType (IRVarRef _) = IRTypeInt32
+literalType (IRBoolLit _) = IRTypeInt32 -- Hack, IRType currently does not support Bool
 
 -- | Solve type constraints using Robinson's unification algorithm
 solveConstraints :: [TypeConstraint] -> Either TypeError TypeSubst

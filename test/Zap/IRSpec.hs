@@ -472,7 +472,7 @@ spec = do
                 [(mainFn, _)] -> do
                   let IRBlock _ stmts = fnBody mainFn
                   case head stmts of
-                    (IRVarDecl "x" _ (IRLit lit), meta) -> do
+                    (IRVarDecl (IRVarDeclData "x" _ (IRLit lit)), meta) -> do
                       metaLiteralType meta `shouldBe` Just (LitInt Int32)
                     _ -> expectationFailure "Expected variable declaration"
             Left err -> expectationFailure $ "IR conversion failed: " ++ show err
@@ -483,7 +483,7 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
-                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                IRBlock _ ((IRVarDecl (IRVarDeclData _ _ _), meta):_) ->
                   metaLiteralType meta `shouldBe` Just (LitFloat Float32)
                 _ -> expectationFailure "Expected variable declaration"
             Left err -> expectationFailure $ show err
@@ -494,7 +494,7 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
-                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                IRBlock _ ((IRVarDecl (IRVarDeclData _ _ _), meta):_) ->
                   metaLiteralType meta `shouldBe` Just LitString
                 _ -> expectationFailure "Expected variable declaration"
 
@@ -521,7 +521,7 @@ spec = do
                       [(declStmt, declMeta), (printStmt, printMeta), _] -> do
                           -- Check variable declaration
                           case declStmt of
-                              IRVarDecl name irType expr -> do
+                              IRVarDecl (IRVarDeclData name irType expr) -> do
                                   name `shouldBe` "x"
                                   irType `shouldBe` IRTypeInt32
                                   expr `shouldBe` IRLit (IRInt32Lit 5)
@@ -546,7 +546,7 @@ spec = do
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case head stmts of
-              (IRVarDecl "x" (IRTypeStruct "Box_i32" _) _, _) -> return ()
+              (IRVarDecl (IRVarDeclData "x" (IRTypeStruct "Box_i32" _) _), _) -> return ()
               other -> expectationFailure $ "Expected concrete Box instantiation, got: " ++ show other
           Left err -> expectationFailure $ show err
 
@@ -560,7 +560,7 @@ spec = do
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
-              [ (IRVarDecl "x" (IRTypeStruct "Box_i32" _) declInit, declMeta),
+              [ (IRVarDecl (IRVarDeclData "x" (IRTypeStruct "Box_i32" _) declInit), declMeta),
                 (IRProcCall "print" [IRCall "field_access" [IRVar "x", IRLit (IRStringLit "value")]], printMeta),
                 (IRReturn Nothing, _) ] -> do
                   case declInit of

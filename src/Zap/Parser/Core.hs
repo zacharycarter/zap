@@ -100,6 +100,7 @@ checkBlockIndent bt bi = do
                     FunctionBlock -> do
                         when (tokCol > 1 && tokCol < bi) $
                             throwError $ IndentationError $ IndentationErrorDetails bi tokCol GreaterEq
+                    _ -> return () --TODO: Need a check on TypeBlock.
         [] -> return ()
 
 -- | Get the next token if it matches
@@ -137,3 +138,4 @@ validateIndent ctx col = do
         throwError $ IndentationError $ IndentationErrorDetails (baseIndent ctx) col Greater
 
     TopLevel -> return () -- No indentation rules at top level
+    _ -> return () --TODO: Need validation on TypeBlock.

@@ -18,7 +18,7 @@ spec = do
           let program = IRProgram
                 [ ( IRFuncDecl "main" [] IRTypeVoid
                     (IRBlock "entry"
-                      [ (IRVarDecl "x" IRTypeInt32 (IRLit (IRInt32Lit 5)), testMeta)
+                      [ (IRVarDecl (IRVarDeclData "x" IRTypeInt32 (IRLit (IRInt32Lit 5))), testMeta)
                       , (IRAssign "x" (IRLit (IRInt32Lit 3)), testMeta)
                       ])
                   , testMeta)
@@ -47,12 +47,12 @@ spec = do
           let symTable = snd $ registerStruct "Point"
                                 [("x", TypeNum Int32), ("y", TypeNum Int32)]
                                 emptySymbolTable
-          let pointDecl = IRVarDecl "p"
+          let pointDecl = IRVarDecl (IRVarDeclData "p"
                 (IRTypeStruct "Point" (StructId 0))
                 (IRCall "struct_lit"
                   [IRLit (IRStringLit "Point"),
                    IRLit (IRInt32Lit 10),
-                   IRLit (IRInt32Lit 20)])
+                   IRLit (IRInt32Lit 20)]))
           let testMetaWithStruct = testMeta { metaSymTable = Just symTable }
           let program = IRProgram
                 [(IRFuncDecl "main" [] IRTypeVoid
@@ -69,12 +69,12 @@ spec = do
           let symTable = snd $ registerStruct "Point"
                                 [("x", TypeNum Int32), ("y", TypeNum Int32)]
                                 emptySymbolTable
-          let pointDecl = IRVarDecl "p"
+          let pointDecl = IRVarDecl (IRVarDeclData "p"
                 (IRTypeStruct "Point" (StructId 0))
                 (IRCall "struct_lit"
                   [IRLit (IRStringLit "Point"),
                    IRLit (IRInt32Lit 10),
-                   IRLit (IRInt32Lit 20)])
+                   IRLit (IRInt32Lit 20)]))
           let testMetaWithStruct = testMeta { metaSymTable = Just symTable }
           let program = IRProgram
                 [(IRFuncDecl "main" [] IRTypeVoid
