@@ -105,7 +105,7 @@ data Expr
   = Var String
   | Let String Expr
   | Block String [Expr] (Maybe Expr)
-  | Break (Maybe String)
+  | Break (Maybe String) (Maybe Expr)
   | Result Expr
   | BinOp Op Expr Expr
   | If Expr Expr Expr

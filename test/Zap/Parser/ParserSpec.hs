@@ -156,7 +156,7 @@ spec = do
                 [Param "x" (TypeNum Int32), Param "y" (TypeNum Int32)]
                 (TypeNum Int32)
                 (Block
-                  "function_body"
+                  "sum_squares"
                   [
                     VarDecl "sum" (BinOp Mul (Var "x") (Var "x"))
                   , Assign "sum" (BinOp Add (Var "sum") (BinOp Mul (Var "y") (Var "y")))

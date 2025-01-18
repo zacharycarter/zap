@@ -268,6 +268,7 @@ createWordToken word col line = Located token col line
       "let"  -> TWord "let"
       "type" -> TType
       "struct" -> TStruct
+      "div" -> TOperator "div"
       _      -> TWord word
 
 -- Check for spaces

@@ -88,6 +88,37 @@ spec = do
               T.isInfixOf "int32_t y;" code `shouldBe` True
             Left err -> expectationFailure $ show err
 
+      it "generates clean if/else for factorial" $ do
+        let program = IRProgram
+              [ ( IRFuncDecl
+                    { fnName = "factorial"
+                    , fnParams = [("n", IRTypeInt32)]
+                    , fnRetType = IRTypeInt32
+                    , fnBody = IRBlock "entry"
+                        [ (IRJumpIfZero (IRCall "Eq" [IRVar "n", IRLit (IRInt32Lit 0)]) "if_else", testMeta)
+                        , (IRReturn (Just (IRLit (IRInt32Lit 1))), testMeta)
+                        , (IRLabel "if_else", testMeta)
+                        , (IRReturn (Just (IRCall "Mul"
+                            [ IRVar "n"
+                            , IRCall "factorial" [
+                                IRCall "Sub" [IRVar "n", IRLit (IRInt32Lit 1)]
+                              ]
+                            ])), testMeta)
+                        ]
+                    }
+                  , testMeta)
+              ]
+
+        case generateC program of
+            Right code -> do
+                -- We should see if/else structure
+                T.isInfixOf (T.pack "if") code `shouldBe` True
+                T.isInfixOf (T.pack "else") code `shouldBe` True
+                -- But no gotos or labels
+                T.isInfixOf (T.pack "goto") code `shouldBe` False
+                T.isInfixOf (T.pack "if_else:") code `shouldBe` False
+            Left err -> expectationFailure $ show err
+
     describe "Label generation" $ do
       it "only generates used labels in control flow" $ do
         let input = IRProgram

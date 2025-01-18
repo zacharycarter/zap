@@ -472,6 +472,20 @@ migratedTests =
         , expectedExitCode = ExitSuccess
         }
       , TestCase
+        { testName = "early_exit"
+        , sourceCode = T.unlines
+            [ "fn divOrZero(a, b: i32): i32 ="
+            , "  if b == 0:"
+            , "    break divOrZero 0"
+            , "  a div b"
+            , ""
+            , "print divOrZero(4, 2)"  -- Should print 2
+            , "print divOrZero(4, 0)"  -- Should print 0
+            ]
+        , expectedOutput = "2\n0\n"
+        , expectedExitCode = ExitSuccess
+        }
+      , TestCase
         { testName = "simple_generic_function"
         , sourceCode = T.unlines
             [ "fn id[T](x: T): T ="

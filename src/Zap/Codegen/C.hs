@@ -21,13 +21,15 @@ data CGState = CGState
   { cgVarTypes :: M.Map String IRType
   , cgUsedLabels :: S.Set String
   , cgDeclaredLabels :: S.Set String
-  }
+  , cgPendingReturn :: Bool
+  } deriving (Show)
 
 initialCGState :: CGState
 initialCGState = CGState
   { cgVarTypes = M.empty
   , cgUsedLabels = S.empty
   , cgDeclaredLabels = S.empty
+  , cgPendingReturn = False
   }
 
 data CGenError
@@ -36,11 +38,11 @@ data CGenError
   deriving (Show, Eq)
 
 generateC :: IRProgram -> Either CGenError T.Text
-generateC prog = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty)
+generateC prog = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty False)
 
 generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
 generateCWithState (IRProgram funcs) = do
-    lift $ traceM "\n=== Starting C Code Generation ==="
+    lift $ traceM $ "\n=== Starting C Code Generation for IR: " ++ show funcs ++ " ==="
 
     -- Generate struct definitions (keep existing implementation)
     let structDefs = generateStructDefinitions funcs
@@ -177,7 +179,7 @@ collectStructTypes funcs =
                             [(name, map (convertFieldType symTable) (structFields def))]
                         Nothing -> []
                 _ -> []
-               
+
         getDependentStructs :: Maybe SymbolTable -> (String, [(String, IRType)]) -> [(String, [(String, IRType)])]
         getDependentStructs symTable (name, fields) =
             -- Extract each struct field type and get its definition
@@ -390,26 +392,111 @@ generateFunctionWithState (func, _) = do
 
 generateBlockWithState :: IRBlock -> StateT CGState (Either CGenError) T.Text
 generateBlockWithState (IRBlock _ stmts) = do
-  -- Convert statements with state tracking
-  generatedStmts <- mapM generateStmtWithState stmts
-  return $ T.unlines generatedStmts
+    lift $ traceM "\n=== generateBlockWithState ==="
+    lift $ traceM $ "Input statements: " ++ show stmts
+
+    case stmts of
+        -- Match the full while loop pattern including contents
+        ((IRLabel label, _):rest) | "while_" `T.isPrefixOf` T.pack label -> do
+            let (loopBody, endStmts) = span (\(stmt,_) -> case stmt of
+                    IRLabel l -> not ("_end" `T.isSuffixOf` T.pack label)
+                    _ -> True) rest
+
+            -- Generate while loop condition
+            case loopBody of
+                ((IRJumpIfZero cond target,_):bodyStmts) | "_end" `T.isSuffixOf` T.pack target -> do
+                    -- First generate loop condition
+                    condCode <- generateExprWithState cond
+
+                    -- Then generate body statements
+                    bodyCode <- generateStmtsUntilReturn bodyStmts
+                    remainingCode <- generateStmtsUntilReturn endStmts
+
+                    return $ T.unlines $ filter (not . T.null) $
+                        [ T.pack "    do {"
+                        , T.concat ["        if (", condCode, ") break;"]
+                        ] ++ map ("        " `T.append`) bodyCode ++
+                        [ T.pack "    } while(1);"
+                        ] ++ remainingCode
+
+                _ -> do -- Fall through to normal statement handling
+                    stmts <- generateStmtsUntilReturn stmts
+                    return $ T.unlines $ filter (not . T.null) stmts
+
+        _ -> case isIfElsePattern stmts of
+            Just (cond, thenStmts, elseStmts, remaining) -> do
+                condCode <- generateExprWithState cond
+                thenCode <- generateStmtsUntilReturn thenStmts
+                elseCode <- generateStmtsUntilReturn elseStmts
+
+                let ifBlock = T.unlines
+                      [ T.concat ["    if (", condCode, ") {"]
+                      , T.unlines $ map ("        " `T.append`) thenCode
+                      , "    } else {"
+                      , T.unlines $ map ("        " `T.append`) elseCode
+                      , "    }"
+                      ]
+
+                restCode <- mapM generateStmtWithState remaining
+                return $ T.unlines $ filter (not . T.null) $ ifBlock : map T.strip restCode
+
+            Nothing -> do
+                stmts <- generateStmtsUntilReturn stmts
+                return $ T.unlines $ filter (not . T.null) stmts
+
+-- Helper to generate statements but stop at first return
+generateStmtsUntilReturn :: [(IRStmt, IRMetadata)] -> StateT CGState (Either CGenError) [T.Text]
+generateStmtsUntilReturn [] = return []
+generateStmtsUntilReturn ((stmt, meta):rest) = do
+    traceM $ "\n=== generateStmtsUntilReturn: " ++ show ((stmt, meta):rest) ++ " ==="
+    code <- generateStmtWithState (stmt, meta)
+    traceM $ "Generated statement: " ++ show code
+    case stmt of
+        IRReturn _ -> do
+          traceM $ "Stopping at return statement"
+          return [code]  -- Stop at return
+        IRStmtExpr _ -> do
+            traceM $ "Found expression statement"
+            st <- get
+            if cgPendingReturn st  -- Fixed pattern guard issue
+                then do
+                  traceM $ "Pending return set to true in state. Stopping."
+                  return [code]  -- Stop after break->return
+                else do
+                    traceM $ "No pending return found in state. Continuing."
+                    restCode <- generateStmtsUntilReturn rest
+                    return $ if T.null code then restCode else code : restCode
+        stmt -> do
+            traceM $ "Found statement: " ++ show stmt
+            restCode <- generateStmtsUntilReturn rest
+            return $ if T.null code then restCode else code : restCode
+
+-- Helper to check if statements contain a return
+hasReturn :: [(IRStmt, IRMetadata)] -> Bool
+hasReturn = any isReturnStmt
+  where
+    isReturnStmt (IRReturn _, _) = True
+    isReturnStmt (IRGoto label, _) | not ("while_" `T.isPrefixOf` T.pack label)
+                                   && not ("if_" `T.isPrefixOf` T.pack label) = True
+    isReturnStmt _ = False
 
 generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
-generateStmtWithState (stmt, _) = case stmt of
+generateStmtWithState (stmt, _) = do
+  traceM $ "\n=== generateStmtWithState: " ++ show stmt ++ " ==="
+  case stmt of
+    -- Struct handling (unchanged)
     IRVarDecl name irType@(IRTypeStruct structName _) initExpr -> do
         traceM $ "\n=== generateStmtWithState: IRVarDecl | IRTypeStruct ==="
-        -- Track both the temporary struct type for initialization and the variable type
         modify $ \s -> s { cgVarTypes = M.insert "current_struct_type" irType $
                                      M.insert name irType $
                                      cgVarTypes s }
         exprCode <- generateExprWithState initExpr
-        -- Only remove the temporary struct type, keep the variable type
         modify $ \s -> s { cgVarTypes = M.delete "current_struct_type" (cgVarTypes s) }
         return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
 
+    -- Regular variable declarations (unchanged)
     IRVarDecl name irType initExpr -> do
         traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
-        -- This case remains unchanged as it already tracks variable types correctly
         modify $ \s -> s { cgVarTypes = M.insert name irType (cgVarTypes s) }
         exprCode <- generateExprWithState initExpr
         let typeStr = case irType of
@@ -417,17 +504,7 @@ generateStmtWithState (stmt, _) = case stmt of
               _ -> irTypeToC irType
         return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
 
-    IRStmtExpr (IRLit (IRBoolLit False)) -> do
-        traceM $ "\n=== generateStmtWithState: IRStmtExpr | IRBoolLit False ==="
-        -- Don't generate return for break's false literal
-        return ""
-
-    IRStmtExpr expr -> do
-        traceM $ "\n=== generateStmtWithState: IRStmtExpr ==="
-        exprCode <- generateExprWithState expr
-        -- return $ T.concat ["    return ", exprCode, ";"]
-        return $ T.concat ["    return ", exprCode, ";"]
-
+    -- Return statements
     IRReturn Nothing -> do
         traceM $ "\n=== generateStmtWithState: IRReturn Nothing ==="
         return "    return 0;"
@@ -437,6 +514,7 @@ generateStmtWithState (stmt, _) = case stmt of
         exprCode <- generateExprWithState expr
         return $ T.concat ["    return ", exprCode, ";"]
 
+    -- Assignment statements (unchanged)
     IRAssign name expr -> do
         traceM $ "\n=== generateStmtWithState: IRAssign ==="
         exprCode <- generateExprWithState expr
@@ -453,11 +531,10 @@ generateStmtWithState (stmt, _) = case stmt of
               _ -> error $ "Unsupported compound assignment operator: " ++ show op
         return $ T.concat ["    ", T.pack name, " ", T.pack opStr, " ", exprCode, ";"]
 
+    -- While loop labels
     IRLabel label | "while_" `T.isPrefixOf` T.pack label -> do
         traceM $ "\n=== generateStmtWithState: IRLabel | \"while_\" ==="
         markLabelDeclared label
-        trackLabel label  -- Mark while labels as used when declared
-        traceM $ "Tracking label usage in IRLabel | \"while_\": " ++ label
         return $ T.concat [T.pack label, ":"]
 
     IRLabel label -> do
@@ -468,16 +545,21 @@ generateStmtWithState (stmt, _) = case stmt of
             then return $ T.concat [T.pack label, ":"]
             else return "" -- Skip unused labels
 
+    -- While loop gotos
     IRGoto label | "while_" `T.isPrefixOf` T.pack label -> do
         traceM $ "\n=== generateStmtWithState: IRGoto | \"while_\" ==="
-        -- Preserve while loop gotos
+        traceM $ "Label: " ++ label
+        st <- get
+        traceM $ "Current state: " ++ show st
         trackLabel label
-        traceM $ "Tracking label usage in IRGoto | \"while_\": " ++ label
         return $ T.concat ["    goto ", T.pack label, ";"]
 
-    IRGoto "if_end" -> do
-        traceM $ "\n=== generateStmtWithState: IRGoto \"if_end\" ==="
-        -- Skip redundant goto if_end when we have a break
+    -- Function-level breaks become returns
+    IRGoto label | not ("while_" `T.isPrefixOf` T.pack label)
+                   && not ("if_" `T.isPrefixOf` T.pack label) -> do
+        traceM $ "\n=== generateStmtWithState: IRGoto (function return) ==="
+        -- Mark that we want the next expression to be a return
+        modify $ \s -> s { cgPendingReturn = True }
         return ""
 
     IRGoto label -> do
@@ -486,12 +568,28 @@ generateStmtWithState (stmt, _) = case stmt of
         traceM $ "Tracking label usage in IRGoto: " ++ label
         return $ T.concat ["    goto ", T.pack label, ";"]
 
-    IRJumpIfTrue cond label -> do
-        traceM $ "\n=== generateStmtWithState: IRJumpIfTrue ==="
-        trackLabel label  -- Add this line
-        traceM $ "Tracking label usage in IRJumpIfTrue: " ++ label
+    -- Expression statements
+    IRStmtExpr expr -> do
+        traceM $ "\n=== generateStmtWithState: IRStmtExpr ==="
+        traceM $ "Converting StmtExpr: " ++ show expr
+        exprCode <- generateExprWithState expr
+        -- Check if this should be a return
+        st <- get
+        if cgPendingReturn st
+            then do
+                -- Reset pending return state
+                modify $ \s -> s { cgPendingReturn = False }
+                return $ T.concat ["    return ", exprCode, ";"]
+            else
+                -- Always return expression values in function context
+                return $ T.concat ["    return ", exprCode, ";"]
+
+    -- Conditional jumps for while loops
+    IRJumpIfZero cond label | "while_" `T.isPrefixOf` T.pack label -> do
+        traceM $ "\n=== generateStmtWithState: IRJumpIfZero ==="
+        trackLabel label
         condCode <- generateExprWithState cond
-        return $ T.concat ["    if (", condCode, ") goto ", T.pack label, ";"]
+        return $ T.concat ["    if (!(", condCode, ")) goto ", T.pack label, ";"]
 
     IRJumpIfZero cond label -> do
         traceM $ "\n=== generateStmtWithState: IRJumpIfZero ==="
@@ -502,7 +600,7 @@ generateStmtWithState (stmt, _) = case stmt of
                  "Used labels after update: " ++ show (cgUsedLabels st)
         condCode <- generateExprWithState cond
         return $ T.concat ["    if (!(", condCode, ")) goto ", T.pack label, ";"]
-
+    -- Print statements (unchanged)
     IRProcCall "print" [expr] -> do
         traceM $ "\n=== generateStmtWithState: IRProcCall \"print\" ==="
         (value, fmt) <- generatePrintExprWithState expr
@@ -510,7 +608,11 @@ generateStmtWithState (stmt, _) = case stmt of
 
     IRProcCall name _ -> do
         traceM $ "\n=== generateStmtWithState: IRProcCall ==="
+        traceM $ "Converting proc call: " ++ name
         lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported procedure: " ++ name
+
+    -- Skip all other labels/gotos/jumps as they're handled by if/else generation
+    _ -> return ""
 
 -- Label tracking helpers
 trackLabel :: String -> StateT CGState (Either CGenError) ()
@@ -548,11 +650,11 @@ unnegateCondition cond =
 
 -- Helper for generating literal values
 generateLiteral :: IRLiteral -> T.Text
-generateLiteral (IRBoolLit b) = T.pack $ if b then "1" else "0"
 generateLiteral (IRInt32Lit n) = T.pack $ show n
-generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"  -- Use C long suffix
-generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")  -- Use C float suffix
+generateLiteral (IRInt64Lit n) = T.pack $ show n ++ "L"
+generateLiteral (IRFloat32Lit n) = T.pack (show n ++ "f")
 generateLiteral (IRFloat64Lit n) = T.pack $ show n
+generateLiteral (IRBoolLit b) = T.pack $ if b then "1" else "0"
 generateLiteral (IRVarRef name) = T.pack name
 generateLiteral (IRStringLit s) = T.concat ["\"", T.pack s, "\""]
 
@@ -596,6 +698,10 @@ generateExprWithState expr = do
             (value, fmt) <- generatePrintExprWithState expr
             traceM $ "Generated print: value=" ++ T.unpack value ++ ", fmt=" ++ T.unpack fmt
             return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
+
+        IRCall "Not" conds -> do
+            condExprs <- mapM generateExprWithState conds
+            return $ T.intercalate " && " condExprs
 
         IRCall fname args
             | fname `elem` ["Add", "Sub", "Mul", "Div", "Lt", "Gt", "Eq"] -> do
@@ -718,4 +824,82 @@ generatePrintExprWithState expr = do
             exprCode <- generateExprWithState expr
             return (exprCode, "%d")
 
+isIfElsePattern :: [(IRStmt, IRMetadata)] -> Maybe
+  ( IRExpr  -- condition
+  , [(IRStmt, IRMetadata)]  -- then statements
+  , [(IRStmt, IRMetadata)]  -- else statements
+  , [(IRStmt, IRMetadata)]  -- remaining statements
+  )
+isIfElsePattern ((IRJumpIfZero (IRCall "Not" [cond]) label, meta):rest) = do
+    traceM "\n=== isIfElsePattern ===\n"
+    traceM $ "Found Not-wrapped condition"
+    traceM $ "Cond: " ++ show cond
+    traceM $ "Label: " ++ show label
+    traceM $ "Rest: " ++ show rest
+
+    -- Split at the else label
+    let (beforeElse, afterElse) = break (\(stmt,_) -> case stmt of
+            IRLabel l -> l == label
+            _ -> False) rest
+
+    -- Handle early returns in the then branch
+    let thenBody = beforeElse
+    let elseBody = case afterElse of
+            (_:rest) -> -- Skip the else label
+                takeWhile (\(stmt,_) -> case stmt of
+                    IRLabel _ -> False
+                    IRGoto _ -> False
+                    _ -> True) rest
+            _ -> []
+
+    Just (cond, thenBody, elseBody, [])
+isIfElsePattern ((IRJumpIfZero cond label, meta):rest) = do
+    traceM "\n=== isIfElsePattern ==="
+    traceM $ "Cond: " ++ show cond
+    traceM $ "Label: " ++ show label
+    traceM $ "Rest: " ++ show rest
+
+    -- Split at the else label
+    let (beforeElse, afterElse) = break (\(stmt,_) -> case stmt of
+            IRLabel l -> l == label
+            _ -> False) rest
+
+    traceM $ "Before else: " ++ show beforeElse
+    traceM $ "After else: " ++ show afterElse
+
+    -- Handle early returns in the then branch
+    let thenBody = beforeElse  -- Include return statement in then branch
+
+    -- Keep expressions after the label but before another label/goto
+    let elseBody = case afterElse of
+            (_:rest) -> -- Skip the else label
+                takeWhile (\(stmt,_) -> case stmt of
+                    IRLabel _ -> False
+                    IRGoto _ -> False
+                    _ -> True) rest
+            _ -> []
+
+    traceM $ "Then body: " ++ show thenBody
+    traceM $ "Else body: " ++ show elseBody
+
+    Just (cond, thenBody, elseBody, [])
+isIfElsePattern s = do
+  traceM "\n=== isIfElsePattern - unrecognized ==="
+  traceM $ "Stmt: " ++ show s
+  Nothing
+
+-- Helper to check if a label is a function label
+isFunctionLabel :: String -> Bool
+isFunctionLabel label =
+    -- A break target is always the function name
+    not $ any (`T.isPrefixOf` (T.pack label)) ["if_", "while_", "else_", "end"]
+
+isPendingReturn :: CGState -> Bool
+isPendingReturn = cgPendingReturn
+
+isBreakOrGoto :: IRStmt -> Bool
+isBreakOrGoto (IRGoto _) = True
+isBreakOrGoto _ = False
+
+rstrip :: String -> T.Text
 rstrip = T.pack . reverse . dropWhile isSpace . reverse

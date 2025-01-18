@@ -172,7 +172,7 @@ parseIf expectedType = do
             modify $ \s -> s { stateIndent = curIndent }
             return $ Block "if_else" (fst elseStmts) (snd elseStmts)
 
-        _ -> return $ Lit (BooleanLit False)
+        _ -> return $ Block "if_else" [] Nothing
 
     return $ If condition thenBlock elseBlock
 
@@ -320,6 +320,10 @@ parseMultiplicative expectedType = do
             remainingMultiplicative expectedType (BinOp Mul left right)
           TOperator "/" -> do
             _ <- matchToken isOperator "/"
+            right <- parseUnary expectedType
+            remainingMultiplicative expectedType (BinOp Div left right)
+          TOperator "div" -> do
+            _ <- matchToken (\t -> t == TOperator "div") "div"
             right <- parseUnary expectedType
             remainingMultiplicative expectedType (BinOp Div left right)
           _ -> return left
@@ -838,7 +842,7 @@ parseSingleBindingLine = do
 
                 Let _ _ -> return ()       -- Let expressions
                 Block _ _ _ -> return ()   -- Block expressions
-                Break _ -> return ()       -- Break statements
+                Break _ _ -> return ()       -- Break statements
                 Result _ -> return ()      -- Result expressions
                 BinOp _ _ _ -> return ()   -- Binary operations
                 If _ _ _ -> return ()      -- If expressions
@@ -1189,20 +1193,38 @@ parseBlockExprs expectedType bt bi = do
 
 parseBreakImpl :: Parser Expr
 parseBreakImpl = do
-    st <- get
-    traceM $ "parseBreak at indent " ++ show (stateIndent st)
+    traceM $ "\n=== parseFuncDecl ==="
     checkIndent GreaterEq
     _ <- matchToken isBreak "break"
 
-    -- Look ahead for potential label
-    st' <- get
-    case stateTokens st' of
-        (tok:_) | isValidName (locToken tok) -> do
-            labelTok <- matchToken isValidName "block label"
-            case locToken labelTok of
-                TWord label -> return $ Break (Just label)
-                _ -> error "Matched non-word token as break label"
-        _ -> return $ Break Nothing  -- No label provided
+    -- Parse optional label
+    label <- do
+        st <- get
+        traceM $ "Parsing label at indent: " ++ show (stateIndent st)
+        case stateTokens st of
+            (tok:_) | isValidName (locToken tok) -> do
+                labelTok <- matchToken isValidName "block label"
+                case locToken labelTok of
+                    TWord l -> do
+                      traceM $ "Parsed label: " ++ show l
+                      return $ Just l
+                    _ -> error "Matched non-word token as break label"
+            _ -> return Nothing
+
+    -- Parse optional value after label
+    value <- case label of
+        Just _ -> do
+            st <- get
+            traceM $ "Parsing value indent: " ++ show (stateIndent st)
+            case stateTokens st of
+                (tok:_) | isValidName (locToken tok) -> do
+                    expr <- parseExpression
+                    traceM $ "Parsed value: " ++ show expr
+                    return $ Just expr
+                _ -> return Nothing
+        Nothing -> return Nothing
+
+    return $ Break label value
 
 parseResultImpl :: Parser Expr
 parseResultImpl = do
@@ -1302,6 +1324,9 @@ parseFuncDecl = do
     traceM "Parsing function declaration"
     _ <- matchToken (\t -> t == TWord "fn") "fn"
     nameTok <- matchToken isValidName "function name"
+    let funcName = case locToken nameTok of
+            TWord name -> name
+            _ -> error "Expected function name"
 
     typeParams <- parseTypeParams
     traceM $ "Parsed type parameters: " ++ show typeParams
@@ -1338,7 +1363,7 @@ parseFuncDecl = do
                     | locLine next > locLine tok + 1 && locCol next < indent -> do
                         traceM $ "Found line gap and dedent - ending function body"
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                        let body = Block "function_body" [expr] Nothing
+                        let body = Block funcName [expr] Nothing  -- Changed from "function_body"
                         case locToken nameTok of
                             TWord name -> return $ DFunc name typeParams params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"
@@ -1346,7 +1371,7 @@ parseFuncDecl = do
                         -- Continue parsing block contents normally
                         (rest, result) <- parseBlockContents ctx
                         modify $ \s -> s { stateIndent = 0 }  -- Reset indent for top level
-                        let body = Block "function_body" (expr:rest) result
+                        let body = Block funcName (expr:rest) result  -- Changed from "function_body"
                         case locToken nameTok of
                             TWord name -> return $ DFunc name typeParams params retType body
                             _ -> throwError $ UnexpectedToken nameTok "function name"

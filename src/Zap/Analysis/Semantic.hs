@@ -280,7 +280,7 @@ checkExpr = \case
                 Nothing -> throwError $ UndefinedStruct name
             _ -> throwError $ InvalidStruct "Field access requires struct type"
 
-    Break _ -> return ()  -- Break statements are checked elsewhere
+    Break _ _ -> return ()  -- Break statements are checked elsewhere
 
     Result expr -> checkExpr expr
 

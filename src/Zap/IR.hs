@@ -320,7 +320,7 @@ convertFuncDecl symTable (DFunc name typeParams params retType (Block label body
 
     -- Rest of the existing conversion logic
     traceM $ "Converting body expressions: " ++ show bodyExprs
-    convertedStmts <- concat <$> mapM (convertExprToStmts symTable) bodyExprs
+    convertedStmts <- concat <$> mapM (convertExprToStmts symTable Nothing) bodyExprs
     traceM $ "converted statements: " ++ show convertedStmts
 
     let alreadyEndsInReturn =
@@ -366,16 +366,20 @@ convertFuncDecl _ (DFunc name _ _ _ body) =
 
 convertExprToStmts
   :: SymbolTable
+  -> Maybe LoopContext
   -> Expr
   -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertExprToStmts symTable expr = do
+convertExprToStmts symTable ctx expr = do
     traceM $ "=== Converting expression to statements: " ++ show expr
     traceM $ "Expression: " ++ show expr
     case expr of
       If cond thenExpr elseExpr -> do
           traceM "Converting if/else expression to statements"
+          traceM $ "Cond: " ++ show cond
+          traceM $ "Then expr: " ++ show thenExpr
+          traceM $ "Else expr: " ++ show elseExpr
           -- We delegate to our new function
-          convertIfFullyReturning symTable cond thenExpr elseExpr
+          convertIfFullyReturning symTable ctx cond thenExpr elseExpr
 
       Let name val -> do
         traceM $ "Converting Let binding for: " ++ name
@@ -449,6 +453,32 @@ convertExprToStmts symTable expr = do
           let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
           return [(IRReturn (Just (IRVar name)), meta)]
 
+      Break (Just label) mexpr -> do
+          traceM $ "\n=== convertExprToStmts: Break ==="
+          traceM $ "Label: " ++ show label
+          traceM $ "Value: " ++ show mexpr
+          traceM $ "Context: " ++ show ctx
+          case mexpr of
+            Just expr -> do
+              traceM $ "Break has value expression: " ++ show expr
+              convertedExpr <- convertToIRExprWithSymbols symTable expr
+              let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+              traceM $ "Converted break value to IR: " ++ show convertedExpr
+              return [ (IRReturn (Just convertedExpr), meta) ]
+            Nothing -> do
+              traceM $ "Break has no value expression"
+              let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+              return [(IRGoto label, meta)]
+
+      Break Nothing Nothing -> do
+          traceM $ "\n=== convertExprToStmts: Unlabeled Break ==="
+          case ctx of
+            Just loopCtx -> do
+              traceM $ "Current loop context: " ++ show loopCtx
+              let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+              return [(IRGoto (loopEndLabel loopCtx), meta)]
+            _ -> Left $ IRError "Invalid break syntax"
+
       _ -> do
           traceM $ "No pattern matched in convertExprToStmts, falling through to: " ++ show expr
           converted <- convertToIRExprWithSymbols symTable expr
@@ -463,55 +493,117 @@ convertExprToStmts symTable expr = do
 -- | If both then/else blocks end in IRReturn, skip the final label
 convertIfFullyReturning
   :: SymbolTable
+  -> Maybe LoopContext
   -> Expr    -- condition
   -> Expr    -- thenExpr
   -> Expr    -- elseExpr
   -> Either IRConversionError [(IRStmt, IRMetadata)]
-convertIfFullyReturning symTable cond thenExpr elseExpr = do
-    -- Convert condition
-    condExpr  <- convertToIRExprWithSymbols symTable cond
+convertIfFullyReturning symTable ctx cond thenExpr elseExpr = do
+    traceM $ "\n=== convertIfFullyReturning ==="
+    traceM $ "Converting if/else expression"
+    traceM $ "Condition: " ++ show cond
+    traceM $ "Then expr: " ++ show thenExpr
+    traceM $ "Else expr: " ++ show elseExpr
 
-    -- Convert then and else
-    thenStmts <- convertBlockOrLiteralReturn symTable thenExpr Nothing
-    elseStmts <- convertBlockOrLiteralReturn symTable elseExpr Nothing
+    condExpr <- convertToIRExprWithSymbols symTable cond
+    traceM $ "Converted condition: " ++ show condExpr
 
-    let elseLabel = "if_else"
-    let endLabel  = "if_end"
-    let metaVoid  = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    thenStmts <- convertBlockOrLiteralReturn symTable thenExpr ctx
+    traceM $ "Converted then statements: " ++ show thenStmts
 
-    let jumpIfZero = (IRJumpIfZero condExpr elseLabel, metaVoid)
-    let gotoEnd    = (IRGoto endLabel,               metaVoid)
-    let labelElse  = (IRLabel elseLabel,             metaVoid)
-    let labelEnd   = (IRLabel endLabel,              metaVoid)
+    elseStmts <- convertBlockOrLiteralReturn symTable elseExpr ctx
+    traceM $ "Converted else statements: " ++ show elseStmts
 
-    -- Check if both branches end in IRReturn
-    let bothReturn = endsInReturn thenStmts && endsInReturn elseStmts
-    traceM $ "Final statements from if/else conversion: then endsInReturn="
-             ++ show (endsInReturn thenStmts)
-             ++ ", else endsInReturn="
-             ++ show (endsInReturn elseStmts)
+    let metaVoid = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    let metaInt = mkMetadata IRTypeInt32 (S.singleton PureEffect)
 
-    if bothReturn
-       then do
-         -- No need for end label or Goto if both sides return
-         let result =
-               jumpIfZero
-               : thenStmts
-              ++ [labelElse]
-              ++ elseStmts
-         traceM $ "converted statements (both return): " ++ show result
-         return result
-       else do
-         -- Standard approach: add goto + end label
-         let result =
-               jumpIfZero
-               : thenStmts
-              ++ [gotoEnd, labelElse]
-              ++ elseStmts
-              ++ [labelEnd]
-         traceM $ "converted statements (fallback approach): " ++ show result
-         return result
--- END NEW
+    -- Look for break with value in then branch
+    let (breakValue, remainingThen) = splitAtFunctionBreak thenStmts
+    traceM $ "\n=== Break Analysis ==="
+    traceM $ "Analyzing statements for function breaks: " ++ show thenStmts
+    traceM $ "Found break value: " ++ show breakValue
+    traceM $ "Remaining then statements: " ++ show remainingThen
+
+    case (ctx, breakValue) of
+        -- Loop break case (unchanged)
+        (Just loopCtx, Nothing) | any (\(stmt, _) ->
+          case stmt of
+            IRGoto label -> label == loopEndLabel loopCtx
+            _ -> False) thenStmts -> do
+            traceM "\n=== Converting Loop Break ==="
+            let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+            let labelElse = (IRLabel "if_else", metaVoid)
+            return $ jumpIfZero : thenStmts ++ [labelElse] ++ elseStmts
+
+        -- Function return break case (unchanged)
+        (_, Just returnValue) -> do
+            traceM $ "\n=== Converting Break to Return ==="
+            traceM $ "Return value: " ++ show returnValue
+            traceM $ "Remaining statements: " ++ show remainingThen
+
+            let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+            let labelElse = (IRLabel "if_else", metaVoid)
+
+            let thenReturn = [(IRReturn (Just returnValue), metaInt)]
+
+            elseReturn <- case remainingThen of
+                ((IRStmtExpr expr, _):_) -> return [(IRReturn (Just expr), metaInt)]
+                _ -> return [(IRReturn Nothing, metaInt)]
+
+            let finalStmts = jumpIfZero : thenReturn ++ [labelElse] ++ elseReturn
+            traceM $ "Final statements with break->return conversion: " ++ show finalStmts
+            return finalStmts
+
+        -- Regular if/else - now checks for returns
+        _ -> do
+            traceM $ "\n=== Checking for returns in both branches ==="
+            traceM $ "Then branch ends in return: " ++ show (endsInReturn thenStmts)
+            traceM $ "Else branch ends in return: " ++ show (endsInReturn elseStmts)
+
+            if endsInReturn thenStmts && endsInReturn elseStmts
+                then do
+                    traceM $ "Both branches end in return - optimizing control flow"
+                    let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+                    let labelElse = (IRLabel "if_else", metaVoid)
+                    let finalStmts = jumpIfZero : thenStmts ++ [labelElse] ++ elseStmts
+                    traceM $ "Optimized if/else with returns: " ++ show finalStmts
+                    return finalStmts
+                else do
+                    traceM $ "\n=== Regular If/Else Control Flow ==="
+                    let endLabel = "if_end"
+                    let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+                    let gotoEnd = (IRGoto endLabel, metaVoid)
+                    let labelElse = (IRLabel "if_else", metaVoid)
+                    let labelEnd = (IRLabel endLabel, metaVoid)
+                    let finalStmts = jumpIfZero : thenStmts ++ [gotoEnd, labelElse] ++ elseStmts ++ [labelEnd]
+                    traceM $ "Final regular if/else statements: " ++ show finalStmts
+                    return finalStmts
+
+-- Helper to find function break and its value - pure function
+splitAtFunctionBreak :: [(IRStmt, IRMetadata)] -> (Maybe IRExpr, [(IRStmt, IRMetadata)])
+splitAtFunctionBreak stmts = do
+    let (before, rest) = break isFuncBreak stmts
+    case rest of
+        ((IRGoto label, _):next:remaining)
+          | isFunctionLabel label -> case next of
+            (IRStmtExpr val, _) -> (Just val, before ++ remaining)
+            _ -> (Nothing, before ++ remaining)
+        _ -> (Nothing, stmts)
+  where
+    isFuncBreak (IRGoto label, _) = isFunctionLabel label
+    isFuncBreak _ = False
+
+-- Helper to identify function breaks - pure function
+isFunctionBreak :: IRStmt -> Bool
+isFunctionBreak (IRGoto label) = isFunctionLabel label
+isFunctionBreak _ = False
+
+
+-- Helper to check if a label is a function label
+isFunctionLabel :: String -> Bool
+isFunctionLabel label =
+    -- A break target is always the function name
+    not $ any (`T.isPrefixOf` (T.pack label)) ["if_", "while_", "else_", "end"]
 
 --------------------------------------------------------------------------------
 --             Single-Expression Block => IRReturn
@@ -677,32 +769,42 @@ convertTop
   -> Maybe LoopContext
   -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
-    -- Same approach as before for top-level if
-    condExpr  <- convertToIRExprWithSymbols symTable cond
-    thenStmts <- convertBlock symTable thenExpr ctx
-    elseStmts <- convertBlock symTable elseExpr ctx
+    traceM $ "\n=== convertTop: If expression ==="
+    traceM $ "Condition: " ++ show cond
+    traceM $ "Context: " ++ show ctx
+    traceM $ "Then expr: " ++ show thenExpr
+    traceM $ "Else expr: " ++ show elseExpr
 
-    let elseLabel = "if_else"
-    let endLabel  = "if_end"
-    let meta      = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    condExpr <- convertToIRExprWithSymbols symTable cond
 
-    let result =
-          (IRJumpIfZero condExpr elseLabel, meta)
-          : thenStmts
-         ++ [ (IRGoto endLabel, meta)
-            , (IRLabel elseLabel, meta)
-            ]
-         ++ elseStmts
-         ++ [ (IRLabel endLabel, meta) ]
+    case (thenExpr, ctx) of
+        -- Special case: break inside if in a loop
+        (Block _ [Break Nothing Nothing] Nothing, Just loopCtx) -> do
+            let elseLabel = "if_else"
+            let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+            elseStmts <- convertBlock symTable elseExpr ctx
+            -- Jump to break when condition is true
+            return $ [ (IRJumpIfZero (IRCall "Not" [condExpr]) elseLabel, meta)
+                    , (IRGoto (loopEndLabel loopCtx), meta)
+                    , (IRLabel elseLabel, meta)
+                    ] ++ elseStmts
 
-    return result
+        -- Regular if/else case remains unchanged
+        _ -> do
+            thenStmts <- convertBlock symTable thenExpr ctx
+            elseStmts <- convertBlock symTable elseExpr ctx
 
-convertTop symTable (TLExpr (If cond thenExpr (Lit (BooleanLit False)))) ctx = do
-    -- Omitted for brevity (unchanged)
-    -- ...
-    -- ...
-    -- This remains the same as your existing code
-    Left $ IRUnsupportedExpr "If cond then expr else false unimplemented in snippet"
+            let elseLabel = "if_else"
+            let endLabel = "if_end"
+            let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+
+            return $ (IRJumpIfZero condExpr elseLabel, meta)
+                    : thenStmts
+                    ++ [ (IRGoto endLabel, meta)
+                       , (IRLabel elseLabel, meta)
+                       ]
+                    ++ elseStmts
+                    ++ [ (IRLabel endLabel, meta) ]
 
 convertTop symTable (TLExpr (While cond body)) prevCtx = do
     -- Unchanged from your code
@@ -766,11 +868,23 @@ convertTop symTable (TLExpr (VarDecl name value)) ctx = do
             _ -> mkMetadata IRTypeVoid (S.singleton WriteEffect)
     pure [(IRVarDecl name irType convertedExpr, meta)]
 
-convertTop _ (TLExpr (Break _)) Nothing =
-    Left $ IRError "Break outside loop"
-convertTop _ (TLExpr (Break _)) (Just ctx) = do
-    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
-    pure [(IRGoto (loopEndLabel ctx), meta)]
+convertTop symTable (TLExpr (Break label mexpr)) ctx = case label of
+    -- Handle labeled break - treat as return from the labeled block
+    Just lbl -> do
+        case mexpr of
+            Just expr -> do
+                convertedExpr <- convertToIRExprWithSymbols symTable expr
+                let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+                return [(IRReturn (Just convertedExpr), meta)]
+            Nothing ->
+                return [(IRGoto lbl, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+
+    -- Handle unlabeled break - must be in a loop context
+    Nothing -> case ctx of
+        Just loopCtx -> do
+            let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+            pure [(IRGoto (loopEndLabel loopCtx), meta)]
+        Nothing -> Left $ IRError "Unlabeled break must be inside a loop"
 
 convertTop symTable (TLExpr (Assign name expr)) _ = do
     convertedExpr <- convertToIRExprWithSymbols symTable expr
@@ -784,7 +898,7 @@ convertTop symTable (TLExpr (AssignOp name op expr)) _ = do
 
 convertTop symTable (TLExpr e) ctx =
     case e of
-      Let {} -> convertExprToStmts symTable e
+      Let {} -> convertExprToStmts symTable ctx e
       _      -> (:[]) <$> convertExpr symTable e
 
 --------------------------------------------------------------------------------
