@@ -154,6 +154,48 @@ spec = do
               other -> expectationFailure $
                 "Expected if/else structure with returns; got IR statements:\n  " ++ show other
 
+      it "converts breaks to appropriate IR constructs" $ do
+        -- Test function-level break turns into IRReturn
+        let funcBreak = Break (Just "myFunc") (Just (Lit (IntLit "42" (Just Int32))))
+        let ast1 = Program [TLExpr funcBreak]
+        let st = makeTestSymbolTable ast1
+        case convertToIR' ast1 st of
+          Right (IRProgram [(mainFn, _)]) -> do
+            let IRBlock _ stmts = fnBody mainFn
+            case stmts of
+              [(IRReturn (Just (IRLit (IRInt32Lit 42))), meta)] -> return ()
+              other -> expectationFailure $
+                "Expected single IRReturn, got: " ++ show other
+
+        -- Test loop break stops loop control flow
+        let loopBreak = Program
+              [TLExpr (While
+                (BinOp Lt (Var "x") (Lit (IntLit "10" (Just Int32))))
+                (Block "loop_body"
+                  [Break (Just "while_0_end") Nothing] -- Break to loop's end label
+                  Nothing))]
+        let st2 = makeTestSymbolTable loopBreak
+        case convertToIR' loopBreak st2 of
+          Right (IRProgram [(mainFn, _)]) -> do
+            let IRBlock _ stmts = fnBody mainFn
+            -- We expect these statements in order:
+            -- 1. Label start
+            -- 2. Conditional jump to end
+            -- 3. Goto end (break)
+            -- 4. Label end
+            case stmts of
+              [ (IRLabel start, _)
+                , (IRJumpIfZero _ end1, _)
+                , (IRGoto end2, _)
+                , (IRLabel end3, _)
+                , (IRReturn Nothing, _)] | start == "while_0_start" &&
+                    end1 == "while_0_end" &&
+                    end2 == "while_0_end" &&
+                    end3 == "while_0_end" -> return ()
+              other -> expectationFailure $
+                "Expected loop with break pattern, got: " ++ show other
+          Left err -> expectationFailure $ show err
+
     describe "Error Handling" $ do
       it "reports error for unsupported expressions" $ do
         let ast = Program [TLExpr (Call "unknown" [])]
@@ -595,6 +637,17 @@ spec = do
             "Expected specialized struct_lit call, got: " ++ show other
 
       where
+        -- Helper to match statement patterns ignoring metadata
+        matchesPattern :: [(IRStmt, IRMetadata)] -> [(IRStmt, IRMetadata)] -> Bool
+        matchesPattern actual expected =
+          length actual == length expected &&
+          and (zipWith matchStmt actual expected)
+          where
+            matchStmt (IRLabel l1, _) (IRLabel l2, _) = l1 == l2
+            matchStmt (IRGoto l1, _) (IRGoto l2, _) = l1 == l2
+            matchStmt (IRJumpIfZero _ l1, _) (IRJumpIfZero _ l2, _) = l1 == l2
+            matchStmt _ _ = False
+
         testMeta = IRMetadata
           { metaType = IRTypeVar (TypeVar 0)  -- Use type variable instead of concrete type
           , metaEffects = S.singleton PureEffect

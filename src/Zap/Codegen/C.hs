@@ -317,6 +317,13 @@ generateFunctionWithState (func, _) = do
                 _ -> "int"  -- Default to int for now
           traceM $ "Type str: " ++ show typeStr
 
+          -- Add implicit return for main if needed
+          let needsImplicitReturn = fnName func == "main" && not (any isReturnStmt (irBlockStmts $ fnBody func))
+
+          let finalBody = if needsImplicitReturn then body <> "    return 0;\n" else body
+
+          traceM $ "Final function body: " ++ show finalBody
+
           -- Generate function signature (unchanged)
           let signature = case fnName func of
                 "main" -> T.pack "int main(void)"
@@ -324,13 +331,19 @@ generateFunctionWithState (func, _) = do
 
           traceM $ "Signature: " ++ show signature
 
+
           -- Return function text (unchanged)
-          let result = T.unlines $ map rstrip $ map T.unpack $ [ signature <> T.pack " {", body, "}"]
+          let result = T.unlines $ map rstrip $ map T.unpack $ [ signature <> T.pack " {", finalBody, "}"]
 
           traceM $ "Final generated function: " ++ show result
 
           return $ result
         where
+          -- Helper to check if statement is a return
+          isReturnStmt :: (IRStmt, IRMetadata) -> Bool
+          isReturnStmt (IRReturn _, _) = True
+          isReturnStmt _ = False
+
           -- Helper to generate parameter list (modified to handle specialization)
           generateParams :: Maybe IRType -> [(String, IRType)] -> T.Text
           generateParams _ [] = T.pack "void"
@@ -349,46 +362,6 @@ generateFunctionWithState (func, _) = do
           paramTypeToC IRTypeInt32 = "int32_t"
           paramTypeToC IRTypeVoid = "void"
           paramTypeToC _ = "int"  -- Default to int for now
-
--- generateFunctionWithState :: (IRFuncDecl, IRMetadata) -> StateT CGState (Either CGenError) T.Text
--- generateFunctionWithState (func, _) = do
---     traceM $ "\n=== generateFunctionWithState: " ++ show func ++ " ==="
---     -- Convert body with state tracking
---     body <- generateBlockWithState (fnBody func)
-
---     -- Determine return type (unchanged)
---     let typeStr = case fnRetType func of
---           IRTypeInt32 -> "int32_t"
---           IRTypeVoid -> "void"
---           _ -> "int"  -- Default to int for now
-
---     -- Generate function signature (unchanged)
---     let signature = case fnName func of
---           "main" -> T.pack "int main(void)"
---           _ -> T.concat [T.pack typeStr, " ", T.pack (fnName func), "(", generateParams (fnParams func), ")"]
-
---     -- Return function text (unchanged but lift the string creation)
---     return $ T.unlines $ map rstrip $ map T.unpack $
---       [ signature <> T.pack " {"
---       , body
---       , "}"
---       ]
-
---   where
---     -- Helper to generate parameter list
---     generateParams :: [(String, IRType)] -> T.Text
---     generateParams [] = T.pack "void"
---     generateParams params = T.intercalate ", " $ map formatParam params
-
---     -- Helper to format individual parameters
---     formatParam :: (String, IRType) -> T.Text
---     formatParam (name, typ) = T.concat [paramTypeToC typ, " ", T.pack name]
-
---     -- Helper to convert IR types to C types
---     paramTypeToC :: IRType -> T.Text
---     paramTypeToC IRTypeInt32 = "int32_t"
---     paramTypeToC IRTypeVoid = "void"
---     paramTypeToC _ = "int"  -- Default to int for now
 
 generateBlockWithState :: IRBlock -> StateT CGState (Either CGenError) T.Text
 generateBlockWithState (IRBlock _ stmts) = do
@@ -470,15 +443,6 @@ generateStmtsUntilReturn ((stmt, meta):rest) = do
             traceM $ "Found statement: " ++ show stmt
             restCode <- generateStmtsUntilReturn rest
             return $ if T.null code then restCode else code : restCode
-
--- Helper to check if statements contain a return
-hasReturn :: [(IRStmt, IRMetadata)] -> Bool
-hasReturn = any isReturnStmt
-  where
-    isReturnStmt (IRReturn _, _) = True
-    isReturnStmt (IRGoto label, _) | not ("while_" `T.isPrefixOf` T.pack label)
-                                   && not ("if_" `T.isPrefixOf` T.pack label) = True
-    isReturnStmt _ = False
 
 generateStmtWithState :: (IRStmt, IRMetadata) -> StateT CGState (Either CGenError) T.Text
 generateStmtWithState (stmt, _) = do

@@ -30,7 +30,7 @@ import qualified Data.Char as C
 import qualified Data.Text as T
 import qualified Data.Map as M
 import qualified Data.Set as S
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, forM_, unless, when)
 import Control.Monad.Except
 import Debug.Trace
 
@@ -525,59 +525,56 @@ convertIfFullyReturning symTable ctx cond thenExpr elseExpr = do
     traceM $ "Remaining then statements: " ++ show remainingThen
 
     case (ctx, breakValue) of
-        -- Loop break case (unchanged)
+        -- Keep existing loop break case
         (Just loopCtx, Nothing) | any (\(stmt, _) ->
           case stmt of
             IRGoto label -> label == loopEndLabel loopCtx
             _ -> False) thenStmts -> do
             traceM "\n=== Converting Loop Break ==="
+            let loopStartLabel = "while_" ++ show (loopNumber loopCtx) ++ "_start"
+            let jumpIfZero = (IRJumpIfZero condExpr loopStartLabel, metaVoid)
+            return $ jumpIfZero : thenStmts
+
+        -- Keep existing function return break case unchanged
+        (_, Just returnValue) -> do
+            traceM $ "\n=== Converting Break to Return ==="
+            let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+            let labelElse = (IRLabel "if_else", metaVoid)
+            let thenReturn = [(IRReturn (Just returnValue), metaInt)]
+            elseReturn <- case remainingThen of
+                ((IRStmtExpr expr, _):_) -> return [(IRReturn (Just expr), metaInt)]
+                _ -> return [(IRReturn Nothing, metaInt)]
+            return $ jumpIfZero : thenReturn ++ [labelElse] ++ elseReturn
+
+        -- Optimize if both branches are simple expressions
+        _ | all isSimpleStmt thenStmts && all isSimpleStmt elseStmts -> do
+            traceM "Simple expression branches - optimizing control flow"
             let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
             let labelElse = (IRLabel "if_else", metaVoid)
             return $ jumpIfZero : thenStmts ++ [labelElse] ++ elseStmts
 
-        -- Function return break case (unchanged)
-        (_, Just returnValue) -> do
-            traceM $ "\n=== Converting Break to Return ==="
-            traceM $ "Return value: " ++ show returnValue
-            traceM $ "Remaining statements: " ++ show remainingThen
-
+        -- Optimize if both then and else statements end in return
+        _ | endsInReturn thenStmts && endsInReturn elseStmts -> do
+            traceM "Both branches end in return - optimizing control flow"
             let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
             let labelElse = (IRLabel "if_else", metaVoid)
+            return $ jumpIfZero : thenStmts ++ [labelElse] ++ elseStmts
 
-            let thenReturn = [(IRReturn (Just returnValue), metaInt)]
-
-            elseReturn <- case remainingThen of
-                ((IRStmtExpr expr, _):_) -> return [(IRReturn (Just expr), metaInt)]
-                _ -> return [(IRReturn Nothing, metaInt)]
-
-            let finalStmts = jumpIfZero : thenReturn ++ [labelElse] ++ elseReturn
-            traceM $ "Final statements with break->return conversion: " ++ show finalStmts
-            return finalStmts
-
-        -- Regular if/else - now checks for returns
+        -- Keep existing fallback case for complex if/else
         _ -> do
-            traceM $ "\n=== Checking for returns in both branches ==="
-            traceM $ "Then branch ends in return: " ++ show (endsInReturn thenStmts)
-            traceM $ "Else branch ends in return: " ++ show (endsInReturn elseStmts)
+            traceM $ "\n=== Regular If/Else Control Flow ==="
+            let endLabel = "if_end"
+            let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
+            let gotoEnd = (IRGoto endLabel, metaVoid)
+            let labelElse = (IRLabel "if_else", metaVoid)
+            let labelEnd = (IRLabel endLabel, metaVoid)
+            return $ jumpIfZero : thenStmts ++ [gotoEnd, labelElse] ++ elseStmts ++ [labelEnd]
 
-            if endsInReturn thenStmts && endsInReturn elseStmts
-                then do
-                    traceM $ "Both branches end in return - optimizing control flow"
-                    let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
-                    let labelElse = (IRLabel "if_else", metaVoid)
-                    let finalStmts = jumpIfZero : thenStmts ++ [labelElse] ++ elseStmts
-                    traceM $ "Optimized if/else with returns: " ++ show finalStmts
-                    return finalStmts
-                else do
-                    traceM $ "\n=== Regular If/Else Control Flow ==="
-                    let endLabel = "if_end"
-                    let jumpIfZero = (IRJumpIfZero condExpr "if_else", metaVoid)
-                    let gotoEnd = (IRGoto endLabel, metaVoid)
-                    let labelElse = (IRLabel "if_else", metaVoid)
-                    let labelEnd = (IRLabel endLabel, metaVoid)
-                    let finalStmts = jumpIfZero : thenStmts ++ [gotoEnd, labelElse] ++ elseStmts ++ [labelEnd]
-                    traceM $ "Final regular if/else statements: " ++ show finalStmts
-                    return finalStmts
+  where
+    isSimpleStmt :: (IRStmt, IRMetadata) -> Bool
+    isSimpleStmt (IRStmtExpr (IRLit _), _) = True
+    isSimpleStmt (IRStmtExpr (IRVar _), _) = True
+    isSimpleStmt _ = False
 
 -- Helper to find function break and its value - pure function
 splitAtFunctionBreak :: [(IRStmt, IRMetadata)] -> (Maybe IRExpr, [(IRStmt, IRMetadata)])
@@ -737,37 +734,63 @@ convertType (TypeParam _)       = IRTypeVar (TypeVar 0)
 convertType _                   = IRTypeVoid
 
 --------------------------------------------------------------------------------
---           Convert Toplevels (unchanged, except for fallback)
+--           Convert Toplevels
 --------------------------------------------------------------------------------
-
-convertTops
-  :: SymbolTable
-  -> [TopLevel]
-  -> Maybe LoopContext
-  -> Either IRConversionError (IRBlock, IRMetadata)
+convertTops :: SymbolTable -> [TopLevel] -> Maybe LoopContext
+           -> Either IRConversionError (IRBlock, IRMetadata)
 convertTops symTable tops ctx = do
-    traceM $ "\n=== convertTops ==="
+    traceM "\n=== convertTops: START ==="
     traceM $ "Current ctx: " ++ show ctx
     traceM $ "Tops levels before conversion: " ++ show tops
     stmts <- concat <$> mapM (\t -> convertTop symTable t ctx) tops
-    traceM $ "Converted top-level statements: " ++ show stmts
+    traceM $ "Full converted statements: " ++ show stmts
 
     let lastMeta = if null stmts
           then mkMetadata IRTypeVoid (S.singleton PureEffect)
           else snd (last stmts)
-    let returnStmt = (IRReturn Nothing, mkMetadata IRTypeVoid (S.singleton PureEffect))
-    return (IRBlock "main.entry" (stmts ++ [returnStmt]), lastMeta)
 
+    traceM $ "Last meta: " ++ show lastMeta
+    -- traceM $ "Examining last statement for flow: " ++ case stmts of
+    --     [] -> "NO STATEMENTS"
+    --     _ -> show (last stmts)
+
+    -- let hasTerminatingFlow = any isFlowTerminator stmts
+    -- traceM $ "Statements ending in flow terminator: " ++ show (filter isFlowTerminator stmts)
+    -- traceM $ "Individual flow termination checks:"
+    -- forM_ stmts $ \stmt ->
+    --     traceM $ "  " ++ show (fst stmt) ++ " -> " ++ show (isFlowTerminator stmt)
+
+    -- traceM $ "hasTerminatingFlow= " ++ show hasTerminatingFlow
+
+    let alreadyEndsInReturn =
+          case reverse stmts of
+            ((IRReturn _, _):_) -> True
+            _                   -> False
+
+    traceM $ "alreadyEndsInReturn" ++ show alreadyEndsInReturn
+
+    let returnStmt = (IRReturn Nothing, mkMetadata IRTypeVoid (S.singleton PureEffect))
+    let finalStmts = stmts ++ [returnStmt | not alreadyEndsInReturn]
+
+    traceM $ "Final statement list: " ++ show finalStmts
+    traceM "=== convertTops: END ==="
+
+    return (IRBlock "main.entry" finalStmts, lastMeta)
+  -- where
+  --   isFlowTerminator :: (IRStmt, IRMetadata) -> Bool
+  --   isFlowTerminator (stmt, meta) = case stmt of
+  --       IRReturn _ -> True
+  --       -- IRGoto label | "_end" `T.isSuffixOf` T.pack label -> True
+  --       -- Simple expression statements in if/else blocks are complete
+  --       IRStmtExpr expr -> case expr of
+  --           IRLit _ -> True  -- Literal values indicate completed control flow
+  --           _ -> False
+  --       _ -> False
 
 --------------------------------------------------------------------------------
 --           Convert a Single Toplevel Expression
 --------------------------------------------------------------------------------
 
-convertTop
-  :: SymbolTable
-  -> TopLevel
-  -> Maybe LoopContext
-  -> Either IRConversionError [(IRStmt, IRMetadata)]
 convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
     traceM $ "\n=== convertTop: If expression ==="
     traceM $ "Condition: " ++ show cond
@@ -778,25 +801,22 @@ convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
     condExpr <- convertToIRExprWithSymbols symTable cond
 
     case (thenExpr, ctx) of
-        -- Special case: break inside if in a loop
+        -- Keep existing break case unchanged
         (Block _ [Break Nothing Nothing] Nothing, Just loopCtx) -> do
-            let elseLabel = "if_else"
+            let loopStartLabel = "while_" ++ show (loopNumber loopCtx) ++ "_start"
             let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
-            elseStmts <- convertBlock symTable elseExpr ctx
-            -- Jump to break when condition is true
-            return $ [ (IRJumpIfZero (IRCall "Not" [condExpr]) elseLabel, meta)
+            return $ [ (IRJumpIfZero (IRCall "Not" [condExpr]) loopStartLabel, meta)
                     , (IRGoto (loopEndLabel loopCtx), meta)
-                    , (IRLabel elseLabel, meta)
-                    ] ++ elseStmts
+                    ]
 
-        -- Regular if/else case remains unchanged
+        -- Add new case for simple block expressions
         _ -> do
             thenStmts <- convertBlock symTable thenExpr ctx
             elseStmts <- convertBlock symTable elseExpr ctx
 
+            let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
             let elseLabel = "if_else"
             let endLabel = "if_end"
-            let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
 
             return $ (IRJumpIfZero condExpr elseLabel, meta)
                     : thenStmts
@@ -806,30 +826,66 @@ convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
                     ++ elseStmts
                     ++ [ (IRLabel endLabel, meta) ]
 
+  where
+    isSimpleBlock (Block _ [Lit _] Nothing) = True
+    isSimpleBlock _ = False
+
 convertTop symTable (TLExpr (While cond body)) prevCtx = do
-    -- Unchanged from your code
+    traceM "\n=== Converting While Loop ==="
     let nextNum = case prevCtx of
           Just c -> loopNumber c + 1
           Nothing -> 0
     let startLabel = "while_" ++ show nextNum ++ "_start"
     let endLabel   = "while_" ++ show nextNum ++ "_end"
     let ctx        = LoopContext nextNum endLabel
-    condExpr       <- convertToIRExprWithSymbols symTable cond
-    bodyStmts      <- convertBlock symTable body (Just ctx)
-    let cleanBody  = removeTrailingGoto startLabel bodyStmts
-    let meta       = mkMetadata IRTypeVoid (S.singleton PureEffect)
-    pure $ [ (IRLabel startLabel, meta)
-           , (IRJumpIfZero condExpr endLabel, meta)
-           ]
-           ++ cleanBody
-           ++ [ (IRGoto startLabel, meta)
-              , (IRLabel endLabel, meta)
-              ]
+    traceM $ "Labels: start=" ++ startLabel ++ " end=" ++ endLabel
+
+    condExpr <- convertToIRExprWithSymbols symTable cond
+    traceM $ "Condition: " ++ show condExpr
+
+    bodyStmts <- convertBlock symTable body (Just ctx)
+    traceM $ "Raw body statements: " ++ show bodyStmts
+
+    let cleanBody = removeTrailingGoto startLabel bodyStmts
+    traceM $ "Clean body before appending: " ++ show cleanBody
+
+    let endsWithBreak = case cleanBody of
+          [] -> False
+          stmts -> case fst (last stmts) of
+            IRGoto label -> "_end" `T.isSuffixOf` T.pack label
+            _ -> False
+
+    traceM $ "Body ends with break: " ++ show endsWithBreak
+
+    let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
+    let result = [ (IRLabel startLabel, meta)
+                 , (IRJumpIfZero condExpr endLabel, meta)
+                 ] ++ cleanBody ++
+                 -- Only add back-edge if we don't break
+                 (if not endsWithBreak
+                   then [(IRGoto startLabel, meta)]
+                   else []) ++
+                 [ (IRLabel endLabel, meta)
+                 ]
+
+    traceM $ "Final IR with conditional back-edge: " ++ show result
+    pure result
   where
-    removeTrailingGoto lbl ss =
-      case reverse ss of
-        ((IRGoto l,_):rest) | l == lbl -> reverse rest
-        _ -> ss
+    removeTrailingGoto :: String -> [(IRStmt, IRMetadata)] -> [(IRStmt, IRMetadata)]
+    removeTrailingGoto startLabel stmts =
+        -- Find the first break statement (goto to end label)
+        let (beforeBreak, afterBreak) = break isLoopBreak stmts
+        in case afterBreak of
+            -- Keep statements before break and the break itself only
+            (breakStmt@(IRGoto label, _):rest) | isEndLabel label ->
+                beforeBreak ++ [breakStmt]  -- Drop everything after break
+            -- No break found - keep trailing goto to start
+            [] -> stmts
+      where
+        isLoopBreak (IRGoto label, _) = isEndLabel label
+        isLoopBreak _ = False
+
+        isEndLabel label = "_end" `T.isSuffixOf` T.pack label
 
 convertTop symTable (TLExpr (VarDecl name value)) ctx = do
     -- Unchanged from your code
