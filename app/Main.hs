@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+
 module Main (main) where
 
 import qualified Data.Text.IO as TIO
 import System.Environment
 import System.Exit
-
 import Zap.Compiler
 
 main :: IO ()

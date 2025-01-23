@@ -1,22 +1,23 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-module Zap.Integration.Runner
-  ( runTest'
-  , runTests
-  , compileCCode
-  , runCompiledProgram
-  ) where
 
-import Control.Monad (forM)
-import System.IO
-import System.Process
-import System.Exit
-import System.Directory
+module Zap.Integration.Runner
+  ( runTest',
+    runTests,
+    compileCCode,
+    runCompiledProgram,
+  )
+where
+
 import Control.Exception (bracket, catch)
-import Text.Printf
+import Control.Monad (forM)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
-
+import System.Directory
+import System.Exit
+import System.IO
+import System.Process
+import Text.Printf
 import Zap.Compiler
 import Zap.Integration.Types
 
@@ -56,15 +57,15 @@ runTests tests = do
 
 -- | Run single integration test with new hybrid IR and report results
 runTest' :: TestCase -> IO TestResult
-runTest' test = do  -- Keep the test parameter
+runTest' test = do
+  -- Keep the test parameter
   -- First compile Zap code to C
   let cr = compile' defaultCompileOptions (sourceCode test)
-  case (cr, expectedExitCode test) of  -- Add test parameter here
-    -- For expected failures, we're done
+  case (cr, expectedExitCode test) of -- Add test parameter here
+  -- For expected failures, we're done
     (Left _, ExitFailure _) -> return TestSuccess
     (Right _, ExitFailure _) -> return $ TestFailure "Compilation succeeded when failure was expected"
     (Left err, ExitSuccess) -> return $ TestFailure $ "Compilation failed unexpectedly: " ++ show err
-
     -- For expected successes, continue with C compilation
     (Right result, ExitSuccess) -> case generatedCode result of
       Nothing -> return $ TestFailure "No code generated when success was expected"
@@ -81,13 +82,17 @@ runTest' test = do  -- Keep the test parameter
 
             -- Check results (add test parameter references)
             if exitCode /= expectedExitCode test
-              then return $ RuntimeFailure exitCode (T.unpack output)  -- Convert Text to String
-              else if output == expectedOutput test
-                then return TestSuccess
-                else return $ TestFailure $
-                  "Output mismatch:\nExpected: " ++
-                  T.unpack (expectedOutput test) ++  -- Add test parameter
-                  "\nActual: " ++ T.unpack output
+              then return $ RuntimeFailure exitCode (T.unpack output) -- Convert Text to String
+              else
+                if output == expectedOutput test
+                  then return TestSuccess
+                  else
+                    return $
+                      TestFailure $
+                        "Output mismatch:\nExpected: "
+                          ++ T.unpack (expectedOutput test)
+                          ++ "\nActual: " -- Add test parameter
+                          ++ T.unpack output
 
 -- | Write C code to a temp file and compile it
 compileCCode :: T.Text -> IO (Either String FilePath)
@@ -100,15 +105,23 @@ compileCCode code = withTempFile "test" ".c" $ \sourcePath sourceHandle -> do
   let op = sourcePath ++ ".out"
 
   -- Run gcc with all warnings enabled
-  (exitCode, out, err) <- readProcessWithExitCode "gcc"
-    ["-Wall", sourcePath, "-o", op] ""
+  (exitCode, out, err) <-
+    readProcessWithExitCode
+      "gcc"
+      ["-Wall", sourcePath, "-o", op]
+      ""
 
   case exitCode of
     ExitSuccess -> return $ Right op
-    ExitFailure n -> return $ Left $
-      "gcc failed with exit code " ++ show n ++
-      "\nstdout: " ++ out ++
-      "\nstderr: " ++ err
+    ExitFailure n ->
+      return $
+        Left $
+          "gcc failed with exit code "
+            ++ show n
+            ++ "\nstdout: "
+            ++ out
+            ++ "\nstderr: "
+            ++ err
 
 -- | Run a compiled program and capture its output
 runCompiledProgram :: FilePath -> IO (ExitCode, T.Text)
@@ -122,7 +135,8 @@ withTempFile prefix suffix action = do
   systemTempDir <- getTemporaryDirectory
   bracket
     (openTempFile systemTempDir (prefix ++ suffix))
-    (\(path, handle) -> do
-      hClose handle  -- Close handle if not already closed
-      removeFile path `catch` \(_ :: IOError) -> return ())
+    ( \(path, handle) -> do
+        hClose handle -- Close handle if not already closed
+        removeFile path `catch` \(_ :: IOError) -> return ()
+    )
     (uncurry action)

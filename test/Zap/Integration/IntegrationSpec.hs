@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
+
 module Zap.Integration.IntegrationSpec (spec) where
 
-import Test.Hspec
-import System.Exit
 import Control.Monad (forM_)
-
+import System.Exit
+import Test.Hspec
 import Zap.Integration.Basic
 import Zap.Integration.Runner
 import Zap.Integration.Types
@@ -25,11 +25,12 @@ spec = do
 
     describe "Error handling" $ do
       it "handles syntax errors gracefully" $ do
-        let badTest = TestCase
-              { testName = "syntax_error"
-              , sourceCode = "print" -- Missing string literal
-              , expectedOutput = ""
-              , expectedExitCode = ExitFailure 1
-              }
+        let badTest =
+              TestCase
+                { testName = "syntax_error",
+                  sourceCode = "print", -- Missing string literal
+                  expectedOutput = "",
+                  expectedExitCode = ExitFailure 1
+                }
         result <- runTest' badTest
         result `shouldBe` TestSuccess
