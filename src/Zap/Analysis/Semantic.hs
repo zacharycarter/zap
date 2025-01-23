@@ -624,8 +624,8 @@ collectConstraints = \case
     -- Save old function name
     oldFn <- gets envCurrentFunction
     -- Set current function
-    modify $ \s -> s { envCurrentFunction = Just name }
-   
+    modify $ \s -> s {envCurrentFunction = Just name}
+
     -- Check for duplicate definition
     defined <- isDefined name
     when defined $
@@ -643,7 +643,7 @@ collectConstraints = \case
           "Return type of function " ++ name
       )
 
-    modify $ \s -> s { envCurrentFunction = oldFn }
+    modify $ \s -> s {envCurrentFunction = oldFn}
     return $ TLDecl $ DFunc name typeParams params retType body'
   other -> return other -- Pass through type declarations
 
@@ -839,7 +839,7 @@ inferExpr e = do
           traceM $ "Then break type: " ++ show thenBreak
 
           -- Reset break type for else branch
-          modify $ \env -> env { envBreakType = oldBreak }
+          modify $ \env -> env {envBreakType = oldBreak}
 
           -- Infer else branch
           (elseType, else') <- inferExpr elseExpr
@@ -850,8 +850,8 @@ inferExpr e = do
           -- NEW: Get enclosing function return type
           st <- gets envSymbols
           let fnRetType = case M.lookup "divOrZero" (funcDefs st) of
-                            Just def -> Just $ funcRetType def
-                            Nothing -> Nothing
+                Just def -> Just $ funcRetType def
+                Nothing -> Nothing
           traceM $ "Enclosing function type: " ++ show fnRetType
 
           -- Use break type OR function return type for result
@@ -864,11 +864,15 @@ inferExpr e = do
           traceM $ "Selected result type: " ++ show resultType
 
           -- Restore original break state
-          modify $ \env -> env { envBreakType = oldBreak }
+          modify $ \env -> env {envBreakType = oldBreak}
 
           -- Add constraint using result type
-          addConstraint (Constraint elseType resultType
-            "Then and else branches must have same type")
+          addConstraint
+            ( Constraint
+                elseType
+                resultType
+                "Then and else branches must have same type"
+            )
 
           return (resultType, If cond' then' else')
         else do
@@ -884,8 +888,8 @@ inferExpr e = do
       -- Get enclosing function type
       st <- gets envSymbols
       let fnType = case M.lookup name (funcDefs st) of
-                     Just def -> Just $ funcRetType def
-                     Nothing -> Nothing
+            Just def -> Just $ funcRetType def
+            Nothing -> Nothing
       traceM $ "Enclosing function type: " ++ show fnType
 
       -- Save current break type
@@ -903,8 +907,8 @@ inferExpr e = do
         (Just result, _, _) -> do
           (resultType, result') <- inferExpr result
           return resultType
-        (Nothing, t:ts, _) -> do
-          return $ last (t:ts)
+        (Nothing, t : ts, _) -> do
+          return $ last (t : ts)
         (Nothing, [], Just bt) -> do
           -- Empty block with break - use break type
           return bt
@@ -917,7 +921,7 @@ inferExpr e = do
             Nothing -> return TypeVoid
 
       -- Restore previous break type before returning
-      modify $ \env -> env { envBreakType = oldBreakType }
+      modify $ \env -> env {envBreakType = oldBreakType}
 
       traceM $ "Inferred block type: " ++ show blockType
       return (blockType, Block name exprs' mresult)
@@ -932,14 +936,18 @@ inferExpr e = do
         _ -> throwError $ InvalidBreak label
 
       -- Store break type in environment before processing expression
-      modify $ \env -> env { envBreakType = Just fnRetType }
+      modify $ \env -> env {envBreakType = Just fnRetType}
 
       -- Rest remains the same
       case mexpr of
         Just expr -> do
           (exprType, expr') <- inferExpr expr
-          addConstraint (Constraint exprType fnRetType
-            ("Break expression in " ++ label))
+          addConstraint
+            ( Constraint
+                exprType
+                fnRetType
+                ("Break expression in " ++ label)
+            )
           return (fnRetType, Break (Just label) (Just expr'))
         Nothing -> return (fnRetType, Break (Just label) Nothing)
     Break Nothing Nothing -> do

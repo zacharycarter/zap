@@ -360,10 +360,11 @@ parseTerm expectedType = do
               traceM $ "No type suffix found, using expected type: " ++ show expectedType
               -- If we have an expected type, use it for the literal
               let inferredType = case expectedType of
-                    Just (TypeNum t) -> t  -- Use the expected numeric type
-                    _ -> if '.' `elem` n
-                         then Float64
-                         else Int32  -- Default to Int32 when no expected type
+                    Just (TypeNum t) -> t -- Use the expected numeric type
+                    _ ->
+                      if '.' `elem` n
+                        then Float64
+                        else Int32 -- Default to Int32 when no expected type
               traceM $ "Inferred type: " ++ show inferredType
               buildNumericLiteral inferredType n
           where

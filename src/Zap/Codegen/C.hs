@@ -57,7 +57,7 @@ generateCWithState (IRProgram funcs) = do
 
   let symTable = case metaSymTable mainMeta of
         Just s -> s
-        Nothing -> emptySymbolTable  -- Default to empty table instead of error
+        Nothing -> emptySymbolTable -- Default to empty table instead of error
   lift $ traceM $ "Symbol table: " ++ show symTable
 
   -- Get struct definitions from last function's metadata (where we store symbol table)
@@ -149,14 +149,15 @@ generateFunctionDeclaration st (func, meta) = do
       _ = trace ("Function: " ++ show func) ()
       typeStr = irTypeToC (fnRetType func) st
       _ = trace ("Return type: " ++ T.unpack typeStr) ()
-      params = T.intercalate ", " $
-        map
-          (\(name, irType) -> do
-             let paramType = irTypeToC irType st
-             let _ = trace ("Parameter " ++ name ++ " type: " ++ T.unpack paramType) ()
-             T.concat [paramType, " ", T.pack name]
-          )
-          (fnParams func)
+      params =
+        T.intercalate ", " $
+          map
+            ( \(name, irType) -> do
+                let paramType = irTypeToC irType st
+                let _ = trace ("Parameter " ++ name ++ " type: " ++ T.unpack paramType) ()
+                T.concat [paramType, " ", T.pack name]
+            )
+            (fnParams func)
       _ = trace ("Final declaration: " ++ T.unpack (T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]))
   T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]
 
@@ -210,17 +211,19 @@ collectStructTypes funcs = do
                     let fields =
                           [ (fname, IRTypeStruct refName sid) -- KEY CHANGE: Preserve the reference name
                             | (fname, TypeStruct sid refName) <- structFields def
-                          ] ++
-                          [ (fname, convertType ftype)
-                            | (fname, ftype) <- structFields def,
-                              not $ isStructType ftype
                           ]
+                            ++ [ (fname, convertType ftype)
+                                 | (fname, ftype) <- structFields def,
+                                   not $ isStructType ftype
+                               ]
                 ]
           traceM $ "Extracted structs: " ++ show structs
 
           -- Build dependency graph
-          let deps = [(name, [n | (_, IRTypeStruct n _) <- fields])
-                     | (name, fields) <- structs]
+          let deps =
+                [ (name, [n | (_, IRTypeStruct n _) <- fields])
+                  | (name, fields) <- structs
+                ]
           traceM $ "Dependencies: " ++ show deps
 
           -- Get ordered names through topological sort
@@ -229,9 +232,8 @@ collectStructTypes funcs = do
 
           -- Create sorted struct list
           let sortedStructs =
-                [s | name <- ordered,
-                    s@(n,_) <- structs,
-                    n == name]
+                [ s | name <- ordered, s@(n, _) <- structs, n == name
+                ]
           traceM $ "Sorted structs: " ++ show sortedStructs
 
           -- Ensure uniqueness while preserving order
@@ -255,16 +257,16 @@ collectStructTypes funcs = do
     topologicalSort deps =
       let vertices = map fst deps
           edges = [(from, to) | (from, tos) <- deps, to <- tos]
-      in reverse $ dfs S.empty vertices edges
+       in reverse $ dfs S.empty vertices edges
       where
         dfs visited [] _ = []
-        dfs visited (v:vs) edges
+        dfs visited (v : vs) edges
           | v `S.member` visited = dfs visited vs edges
           | otherwise =
               let visited' = S.insert v visited
                   deps = [u | (_, u) <- edges, u == v]
                   rest = dfs visited' (deps ++ vs) edges
-              in v : rest
+               in v : rest
 
     -- Type conversion helper
     convertType :: Type -> IRType
@@ -288,15 +290,18 @@ irTypeToC irType st = do
         IRTypeStruct name sid -> do
           let structName = case (M.lookup name (structNames st), lookupStruct sid st) of
                 -- Generic struct - find all specializations
-                (Just _, Just def) | not (null (structParams def)) ->
-                  -- Look for any specialized version by finding matching prefix
-                  let prefix = T.pack (name ++ "_")
-                      specialized = filter (\(n,_) -> prefix `T.isPrefixOf` n)
-                                         (M.toList $ M.mapKeys T.pack $ structNames st)
-                  in case specialized of
-                    (specializedName,_):_ -> T.unpack specializedName
-                    [] -> name
-                (Just _, _) -> name  -- Concrete struct
+                (Just _, Just def)
+                  | not (null (structParams def)) ->
+                      -- Look for any specialized version by finding matching prefix
+                      let prefix = T.pack (name ++ "_")
+                          specialized =
+                            filter
+                              (\(n, _) -> prefix `T.isPrefixOf` n)
+                              (M.toList $ M.mapKeys T.pack $ structNames st)
+                       in case specialized of
+                            (specializedName, _) : _ -> T.unpack specializedName
+                            [] -> name
+                (Just _, _) -> name -- Concrete struct
                 (Nothing, _) -> getSpecializedStructName name sid st
           let _ = trace ("Found struct name: " ++ structName) ()
           T.concat ["struct ", T.pack structName]
@@ -305,16 +310,16 @@ irTypeToC irType st = do
           -- Look at the funcDefs to find a specialized version
           let funcNames = M.keys (funcDefs st)
           -- Match any specialized version by looking for _suffix pattern
-          let suffixes = ["i32", "i64", "f32", "f64"]  -- From typeToSuffix
-          let specialized = [name | name <- funcNames,
-                          suffix <- suffixes,
-                          T.isSuffixOf (T.pack ("_" ++ suffix)) (T.pack name)]
+          let suffixes = ["i32", "i64", "f32", "f64"] -- From typeToSuffix
+          let specialized =
+                [ name | name <- funcNames, suffix <- suffixes, T.isSuffixOf (T.pack ("_" ++ suffix)) (T.pack name)
+                ]
           let _ = trace ("Found specialized functions: " ++ show specialized) ()
 
           case specialized of
-            (specName:_) -> case M.lookup specName (funcDefs st) of
+            (specName : _) -> case M.lookup specName (funcDefs st) of
               Just specDef -> case funcParams specDef of
-                (Param _ paramType):_ -> convertType paramType
+                (Param _ paramType) : _ -> convertType paramType
                 _ -> "void"
               Nothing -> "void"
             [] -> "void"
@@ -345,16 +350,19 @@ generateFunctionWithState st (func, _) = do
       let paramTypes = map snd params
       let paramDecls =
             zipWith
-              (\name typ -> T.concat [
-                case typ of
-                  -- Use specialized type name for struct parameters
-                  IRTypeStruct structName _ ->
-                    let specializedName = if "Box" == structName
-                                        then "Box_i32"  -- Use concrete type
-                                        else structName
-                    in T.concat ["struct ", T.pack specializedName, " ", T.pack name]
-                  _ -> T.concat [irTypeToC typ st, " ", T.pack name]
-              ])
+              ( \name typ ->
+                  T.concat
+                    [ case typ of
+                        -- Use specialized type name for struct parameters
+                        IRTypeStruct structName _ ->
+                          let specializedName =
+                                if "Box" == structName
+                                  then "Box_i32" -- Use concrete type
+                                  else structName
+                           in T.concat ["struct ", T.pack specializedName, " ", T.pack name]
+                        _ -> T.concat [irTypeToC typ st, " ", T.pack name]
+                    ]
+              )
               paramNames
               paramTypes
       let structInit =
