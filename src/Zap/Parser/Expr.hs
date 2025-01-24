@@ -142,8 +142,7 @@ parseIf expectedType = do
 
   traceM "Parsing then branch"
   -- Parse then branch with proper indentation
-  st' <- get
-  let curIndent = stateIndent st'
+  let curIndent = stateIndent st
   let newIndent = curIndent + 2
   modify $ \s -> s {stateIndent = newIndent}
 
@@ -156,8 +155,8 @@ parseIf expectedType = do
 
   -- Reset indentation for else check
   modify $ \s -> s {stateIndent = curIndent}
-  st'' <- get
-  traceM $ "Current tokens after then: " ++ show (take 3 $ stateTokens st'')
+  st' <- get
+  traceM $ "Current tokens after then: " ++ show (take 3 $ stateTokens st')
 
   -- Look for else branch at original indent level
   elseBlock <- do
@@ -654,7 +653,7 @@ parseCallArgs = do
   where
     isConstructorName :: String -> Bool
     isConstructorName "" = False
-    isConstructorName (c : _) = isUpper c
+    isConstructorName (c:_) = isUpper c
 
     parseMoreArgs acc = do
       st <- get
@@ -1435,7 +1434,7 @@ parseTypeToken tok = case locToken tok of
   TWord "i64" -> return $ TypeNum Int64
   TWord "f32" -> return $ TypeNum Float32
   TWord "f64" -> return $ TypeNum Float64
-  TWord (c : _) | isUpper c -> return $ TypeParam [c]
+  TWord (c:_) | isUpper c -> return $ TypeParam [c]
   TWord _ -> throwError $ UnexpectedToken tok "valid type"
   _ -> throwError $ UnexpectedToken tok "valid type"
 

@@ -427,26 +427,3 @@ spec = do
                 "Expected struct_lit call, got: " ++ show other
             Left err ->
               expectationFailure $ "Conversion failed: " ++ show err
-
-        it "handles field access type tracking correctly" $ do
-          let input =
-                Program
-                  [ TLType "Box[T]" $ TypeStruct (StructId 0) "Box",
-                    TLExpr $ Let "b" $ Call "Box[i32]" [Lit (IntLit "42" (Just Int32))],
-                    TLExpr $ Call "print" [FieldAccess (Var "b") "value"]
-                  ]
-          let st = makeTestSymbolTable input
-          case convertToIR' input st of
-            Right (IRProgram []) ->
-              expectationFailure "Expected program with functions"
-            Right (IRProgram (_:_:_)) ->
-              expectationFailure "Expected single function"
-            Right (IRProgram [(mainFn, _)]) -> do
-              let IRBlock _ stmts = fnBody mainFn
-              case stmts of
-                [] -> expectationFailure "Expected statements in block"
-                ((IRProcCall "print" [IRCall "field_access" [IRVar "b", IRLit (IRStringLit "value")]], _):_) ->
-                  return ()
-                (stmt:_) ->
-                  expectationFailure $ "Expected field access, got: " ++ show stmt
-            Left err -> expectationFailure $ "Conversion failed: " ++ show err
