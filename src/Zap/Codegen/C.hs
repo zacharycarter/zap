@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Zap.Codegen.C
   ( generateC,
@@ -7,12 +8,10 @@ module Zap.Codegen.C
 where
 
 import Control.Monad (forM_, when)
-import Control.Monad.Except
 import Control.Monad.State
 import Data.Char (isSpace)
 import qualified Data.List as L
 import qualified Data.Map.Strict as M
-import Data.Maybe (isJust)
 import qualified Data.Set as S
 import qualified Data.Text as T
 import Debug.Trace
@@ -27,22 +26,13 @@ data CGState = CGState
   }
   deriving (Show)
 
-initialCGState :: CGState
-initialCGState =
-  CGState
-    { cgVarTypes = M.empty,
-      cgUsedLabels = S.empty,
-      cgDeclaredLabels = S.empty,
-      cgPendingReturn = False
-    }
-
 data CGenError
   = UnsupportedType IRType
   | UnsupportedOperation T.Text
   deriving (Show, Eq)
 
 generateC :: IRProgram -> Either CGenError T.Text
-generateC prog@(IRProgram funcs) = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty False)
+generateC prog@(IRProgram _funcs) = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty False)
 
 generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
 generateCWithState (IRProgram funcs) = do
@@ -61,8 +51,8 @@ generateCWithState (IRProgram funcs) = do
   lift $ traceM $ "Symbol table: " ++ show symTable
 
   -- Get struct definitions from last function's metadata (where we store symbol table)
-  let structDefs = generateStructDefinitions symTable [(func, meta) | (func, meta) <- funcs]
-  lift $ traceM $ "Generated struct definitions: " ++ show structDefs
+  let structDefs' = generateStructDefinitions symTable [(func, meta) | (func, meta) <- funcs]
+  lift $ traceM $ "Generated struct definitions: " ++ show structDefs'
 
   -- Add isMainFunc at module level since it's used in multiple places
   let declarations =
@@ -76,7 +66,7 @@ generateCWithState (IRProgram funcs) = do
           [ "#include <stdio.h>",
             "#include <stdint.h>",
             "",
-            structDefs, -- Add struct definitions first
+            structDefs', -- Add struct definitions first
             "",
             T.unlines declarations,
             "",
@@ -144,7 +134,7 @@ checkUnusedLabels = do
 
 -- Helper for generating function declarations
 generateFunctionDeclaration :: SymbolTable -> (IRFuncDecl, IRMetadata) -> T.Text
-generateFunctionDeclaration st (func, meta) = do
+generateFunctionDeclaration st (func, _) = do
   let _ = trace "\n=== generateFunctionDeclaration ===" ()
       _ = trace ("Function: " ++ show func) ()
       typeStr = irTypeToC (fnRetType func) st
@@ -248,10 +238,6 @@ collectStructTypes funcs = do
     isStructType (TypeStruct _ _) = True
     isStructType _ = False
 
-    -- Helper to find dependencies in a struct's fields
-    findDeps :: (String, [(String, IRType)]) -> [String]
-    findDeps (_, fields) = [n | (_, IRTypeStruct n _) <- fields]
-
     -- Topological sort implementation
     topologicalSort :: [(String, [String])] -> [String]
     topologicalSort deps =
@@ -259,13 +245,13 @@ collectStructTypes funcs = do
           edges = [(from, to) | (from, tos) <- deps, to <- tos]
        in reverse $ dfs S.empty vertices edges
       where
-        dfs visited [] _ = []
+        dfs _ [] _ = []
         dfs visited (v : vs) edges
           | v `S.member` visited = dfs visited vs edges
           | otherwise =
               let visited' = S.insert v visited
-                  deps = [u | (_, u) <- edges, u == v]
-                  rest = dfs visited' (deps ++ vs) edges
+                  deps' = [u | (_, u) <- edges, u == v]
+                  rest = dfs visited' (deps' ++ vs) edges
                in v : rest
 
     -- Type conversion helper
@@ -288,7 +274,7 @@ irTypeToC irType st = do
         IRTypeFloat32 -> "float"
         IRTypeFloat64 -> "double"
         IRTypeStruct name sid -> do
-          let structName = case (M.lookup name (structNames st), lookupStruct sid st) of
+          let structName' = case (M.lookup name (structNames st), lookupStruct sid st) of
                 -- Generic struct - find all specializations
                 (Just _, Just def)
                   | not (null (structParams def)) ->
@@ -303,10 +289,10 @@ irTypeToC irType st = do
                             [] -> name
                 (Just _, _) -> name -- Concrete struct
                 (Nothing, _) -> getSpecializedStructName name sid st
-          let _ = trace ("Found struct name: " ++ structName) ()
-          T.concat ["struct ", T.pack structName]
+          let _ = trace ("Found struct name: " ++ structName') ()
+          T.concat ["struct ", T.pack structName']
         IRTypeVoid -> "void"
-        IRTypeVar tvar -> do
+        IRTypeVar _ -> do
           -- Look at the funcDefs to find a specialized version
           let funcNames = M.keys (funcDefs st)
           -- Match any specialized version by looking for _suffix pattern
@@ -350,17 +336,17 @@ generateFunctionWithState st (func, _) = do
       let paramTypes = map snd params
       let paramDecls =
             zipWith
-              ( \name typ ->
+              ( \name' typ ->
                   T.concat
                     [ case typ of
                         -- Use specialized type name for struct parameters
-                        IRTypeStruct structName _ ->
+                        IRTypeStruct structName' _ ->
                           let specializedName =
-                                if "Box" == structName
+                                if "Box" == structName'
                                   then "Box_i32" -- Use concrete type
-                                  else structName
-                           in T.concat ["struct ", T.pack specializedName, " ", T.pack name]
-                        _ -> T.concat [irTypeToC typ st, " ", T.pack name]
+                                  else structName'
+                           in T.concat ["struct ", T.pack specializedName, " ", T.pack name']
+                        _ -> T.concat [irTypeToC typ st, " ", T.pack name']
                     ]
               )
               paramNames
@@ -404,9 +390,6 @@ generateFunctionWithState st (func, _) = do
 
       -- Determine return type (extended)
       let typeStr = case fnRetType func of
-            IRTypeVar _ -> case specializedType of
-              Just concreteType -> irTypeToC concreteType st
-              Nothing -> "void" -- Generic functions use void
             IRTypeInt32 -> "int32_t"
             IRTypeVoid -> "void"
             _ -> "int" -- Default to int for now
@@ -468,7 +451,7 @@ generateBlockWithState st (IRBlock _ stmts) = do
       let (loopBody, endStmts) =
             span
               ( \(stmt, _) -> case stmt of
-                  IRLabel l -> not ("_end" `T.isSuffixOf` T.pack label)
+                  IRLabel _ -> not ("_end" `T.isSuffixOf` T.pack label)
                   _ -> True
               )
               rest
@@ -495,8 +478,8 @@ generateBlockWithState st (IRBlock _ stmts) = do
                   ++ remainingCode
         _ -> do
           -- Fall through to normal statement handling
-          stmts <- generateStmtsUntilReturn stmts st
-          return $ T.unlines $ filter (not . T.null) stmts
+          stmts' <- generateStmtsUntilReturn stmts st
+          return $ T.unlines $ filter (not . T.null) stmts'
     _ -> case isIfElsePattern stmts of
       Just (cond, thenStmts, elseStmts, remaining) -> do
         condCode <- generateExprWithState st cond
@@ -515,8 +498,8 @@ generateBlockWithState st (IRBlock _ stmts) = do
         restCode <- mapM (generateStmtWithState st) remaining
         return $ T.unlines $ filter (not . T.null) $ ifBlock : map T.strip restCode
       Nothing -> do
-        stmts <- generateStmtsUntilReturn stmts st
-        return $ T.unlines $ filter (not . T.null) stmts
+        stmts' <- generateStmtsUntilReturn stmts st
+        return $ T.unlines $ filter (not . T.null) stmts'
 
 -- Helper to generate statements but stop at first return
 generateStmtsUntilReturn :: [(IRStmt, IRMetadata)] -> SymbolTable -> StateT CGState (Either CGenError) [T.Text]
@@ -540,8 +523,8 @@ generateStmtsUntilReturn ((stmt, meta) : rest) symTable = do
           traceM $ "No pending return found in state. Continuing."
           restCode <- generateStmtsUntilReturn rest symTable
           return $ if T.null code then restCode else code : restCode
-    stmt -> do
-      traceM $ "Found statement: " ++ show stmt
+    stmt' -> do
+      traceM $ "Found statement: " ++ show stmt'
       restCode <- generateStmtsUntilReturn rest symTable
       return $ if T.null code then restCode else code : restCode
 
@@ -550,7 +533,7 @@ generateStmtWithState st (stmt, _) = do
   traceM $ "\n=== generateStmtWithState: " ++ show stmt ++ " ==="
   case stmt of
     -- Struct handling (unchanged)
-    IRVarDecl name irType@(IRTypeStruct structName _) initExpr -> do
+    IRVarDecl name irType@(IRTypeStruct structName' _) initExpr -> do
       traceM $ "\n=== generateStmtWithState: IRVarDecl | IRTypeStruct ==="
       modify $ \s ->
         s
@@ -561,16 +544,14 @@ generateStmtWithState st (stmt, _) = do
           }
       exprCode <- generateExprWithState st initExpr
       modify $ \s -> s {cgVarTypes = M.delete "current_struct_type" (cgVarTypes s)}
-      return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
+      return $ T.concat ["    struct ", T.pack structName', " ", T.pack name, " = ", exprCode, ";"]
 
     -- Regular variable declarations (unchanged)
     IRVarDecl name irType initExpr -> do
       traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
       modify $ \s -> s {cgVarTypes = M.insert name irType (cgVarTypes s)}
       exprCode <- generateExprWithState st initExpr
-      let typeStr = case irType of
-            IRTypeStruct sname _ -> T.concat ["struct ", T.pack sname]
-            _ -> irTypeToC irType st
+      let typeStr = irTypeToC irType st
       return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
 
     -- Return statements
@@ -606,8 +587,8 @@ generateStmtWithState st (stmt, _) = do
     IRLabel label -> do
       traceM $ "\n=== generateStmtWithState: IRLabel ==="
       markLabelDeclared label
-      st <- get
-      if isLabelUsed label st
+      st' <- get
+      if isLabelUsed label st'
         then return $ T.concat [T.pack label, ":"]
         else return "" -- Skip unused labels
 
@@ -615,8 +596,8 @@ generateStmtWithState st (stmt, _) = do
     IRGoto label | "while_" `T.isPrefixOf` T.pack label -> do
       traceM $ "\n=== generateStmtWithState: IRGoto | \"while_\" ==="
       traceM $ "Label: " ++ label
-      st <- get
-      traceM $ "Current state: " ++ show st
+      st' <- get
+      traceM $ "Current state: " ++ show st'
       trackLabel label
       return $ T.concat ["    goto ", T.pack label, ";"]
 
@@ -640,8 +621,8 @@ generateStmtWithState st (stmt, _) = do
       traceM $ "Converting StmtExpr: " ++ show expr
       exprCode <- generateExprWithState st expr
       -- Check if this should be a return
-      st <- get
-      if cgPendingReturn st
+      st' <- get
+      if cgPendingReturn st'
         then do
           -- Reset pending return state
           modify $ \s -> s {cgPendingReturn = False}
@@ -701,20 +682,6 @@ markLabelDeclared label = do
 isLabelUsed :: String -> CGState -> Bool
 isLabelUsed label st = S.member label (cgUsedLabels st)
 
-isLabelDeclared :: String -> CGState -> Bool
-isLabelDeclared label st = S.member label (cgDeclaredLabels st)
-
--- Helper to detect if a condition is already negated
-isNegatedCondition :: T.Text -> Bool
-isNegatedCondition cond =
-  "!(" `T.isPrefixOf` cond && ")" `T.isSuffixOf` cond
-
--- Helper to remove negation from a condition
-unnegateCondition :: T.Text -> T.Text
-unnegateCondition cond =
-  let inner = T.drop 2 $ T.dropEnd 1 cond -- Remove "!(" and ")"
-   in inner
-
 -- Helper for generating literal values
 generateLiteral :: IRLiteral -> T.Text
 generateLiteral (IRInt32Lit n) = T.pack $ show n
@@ -772,10 +739,10 @@ generateExprWithState st expr = do
         genField val = case val of
           IRLit lit -> generateLiteral lit
           _ -> T.pack $ show val
-    IRCall "print" [expr] -> do
+    IRCall "print" [expr'] -> do
       traceM $ "\n=== generateExpr: print ==="
-      traceM $ "Print argument: " ++ show expr
-      (value, fmt) <- generatePrintExprWithState st expr
+      traceM $ "Print argument: " ++ show expr'
+      (value, fmt) <- generatePrintExprWithState st expr'
       traceM $ "Generated print: value=" ++ T.unpack value ++ ", fmt=" ++ T.unpack fmt
       return $ T.concat ["    printf(\"", fmt, "\\n\", ", value, ");"]
     IRCall "Not" conds -> do
@@ -784,44 +751,33 @@ generateExprWithState st expr = do
     IRCall fname args
       | fname `elem` ["Add", "Sub", "Mul", "Div", "Lt", "Gt", "Eq"] -> do
           -- Keep existing operator handling
-          left <- generateExprWithState st (head args)
-          right <- generateExprWithState st (args !! 1)
-          let cOp = case fname of
-                "Add" -> "+"
-                "Sub" -> "-"
-                "Mul" -> "*"
-                "Div" -> "/"
-                "Lt" -> "<"
-                "Gt" -> ">"
-                "Eq" -> "=="
-          return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
+          case args of
+            left:right:_ -> do
+              leftCode <- generateExprWithState st left
+              rightCode <- generateExprWithState st right
+              case operatorToC fname of
+                Right cOp ->
+                  return $ T.concat ["(", leftCode, ") ", cOp, " (", rightCode, ")"]
+                Left err -> lift $ Left err
+            _ -> lift $ Left $ UnsupportedOperation $
+              T.pack $ "Binary operator " ++ fname ++ " requires two arguments"
       | otherwise -> do
           -- New case: Handle regular function calls
           argExprs <- mapM (generateExprWithState st) args
           return $ T.concat [T.pack fname, "(", T.intercalate ", " argExprs, ")"]
-    IRCall op [e1, e2] -> do
-      traceM $ "\n=== generateExpr: binary op ==="
-      traceM $ "Operator: " ++ op
-      traceM $ "Left expr: " ++ show e1
-      traceM $ "Right expr: " ++ show e2
-      -- Map operator strings to C operators
-      left <- generateExprWithState st e1
-      right <- generateExprWithState st e2
-      let cOp = case op of
-            "Lt" -> "<"
-            "Gt" -> ">"
-            "Eq" -> "=="
-            "NotEq" -> "!="
-            "Add" -> "+"
-            "Sub" -> "-"
-            "Mul" -> "*"
-            "Div" -> "/"
-            "Point" -> error $ "Found struct constructor in binary op path" -- Added debug case
-            _ -> error $ "Unsupported operator: " ++ op
-      return $ T.concat ["(", left, ") ", T.pack cOp, " (", right, ")"]
     IRLit lit -> return $ generateLiteral lit
     IRVar name -> return $ T.pack name
-    expr -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unsupported expression: " ++ show expr
+
+operatorToC :: String -> Either CGenError T.Text
+operatorToC = \case
+  "Add" -> Right "+"
+  "Sub" -> Right "-"
+  "Mul" -> Right "*"
+  "Div" -> Right "/"
+  "Lt"  -> Right "<"
+  "Gt"  -> Right ">"
+  "Eq"  -> Right "=="
+  op    -> Left $ UnsupportedOperation $ T.pack $ "Unsupported operator: " ++ op
 
 -- Helper to determine format specifier
 generatePrintExprWithState :: SymbolTable -> IRExpr -> StateT CGState (Either CGenError) (T.Text, T.Text)
@@ -837,9 +793,9 @@ generatePrintExprWithState st expr = do
       traceM $ "  Generated base: " ++ T.unpack base
 
       -- Get stored type information for the variable
-      st <- get
+      st' <- get
       let fmt = case baseExpr of
-            IRVar name -> case M.lookup name (cgVarTypes st) of
+            IRVar name -> case M.lookup name (cgVarTypes st') of
               Just (IRTypeStruct sname _) ->
                 if "_i64" `T.isSuffixOf` T.pack sname
                   then "%ld"
@@ -866,8 +822,8 @@ generatePrintExprWithState st expr = do
     IRLit (IRFloat64Lit n) ->
       return (T.pack (show n), "%lf")
     IRVar name -> do
-      st <- get
-      let fmt = case M.lookup name (cgVarTypes st) of
+      st' <- get
+      let fmt = case M.lookup name (cgVarTypes st') of
             Just IRTypeInt32 -> "%d"
             Just IRTypeInt64 -> "%ld"
             Just IRTypeFloat32 -> "%f"
@@ -889,8 +845,8 @@ generatePrintExprWithState st expr = do
           argCode <- mapM (generateExprWithState st) [e1, e2]
           let call = T.concat [T.pack op, "(", T.intercalate ", " argCode, ")"]
           return (call, "%d")
-    expr -> do
-      exprCode <- generateExprWithState st expr
+    expr' -> do
+      exprCode <- generateExprWithState st expr'
       return (exprCode, "%d")
 
 isIfElsePattern ::
@@ -901,7 +857,7 @@ isIfElsePattern ::
       [(IRStmt, IRMetadata)], -- else statements
       [(IRStmt, IRMetadata)] -- remaining statements
     )
-isIfElsePattern ((IRJumpIfZero (IRCall "Not" [cond]) label, meta) : rest) = do
+isIfElsePattern ((IRJumpIfZero (IRCall "Not" [cond]) label, _) : rest) = do
   traceM "\n=== isIfElsePattern ===\n"
   traceM $ "Found Not-wrapped condition"
   traceM $ "Cond: " ++ show cond
@@ -920,7 +876,7 @@ isIfElsePattern ((IRJumpIfZero (IRCall "Not" [cond]) label, meta) : rest) = do
   -- Handle early returns in the then branch
   let thenBody = beforeElse
   let elseBody = case afterElse of
-        (_ : rest) ->
+        (_ : rest') ->
           -- Skip the else label
           takeWhile
             ( \(stmt, _) -> case stmt of
@@ -928,11 +884,11 @@ isIfElsePattern ((IRJumpIfZero (IRCall "Not" [cond]) label, meta) : rest) = do
                 IRGoto _ -> False
                 _ -> True
             )
-            rest
+            rest'
         _ -> []
 
   Just (cond, thenBody, elseBody, [])
-isIfElsePattern ((IRJumpIfZero cond label, meta) : rest) = do
+isIfElsePattern ((IRJumpIfZero cond label, _) : rest) = do
   traceM "\n=== isIfElsePattern ==="
   traceM $ "Cond: " ++ show cond
   traceM $ "Label: " ++ show label
@@ -955,7 +911,7 @@ isIfElsePattern ((IRJumpIfZero cond label, meta) : rest) = do
 
   -- Keep expressions after the label but before another label/goto
   let elseBody = case afterElse of
-        (_ : rest) ->
+        (_ : rest') ->
           -- Skip the else label
           takeWhile
             ( \(stmt, _) -> case stmt of
@@ -963,7 +919,7 @@ isIfElsePattern ((IRJumpIfZero cond label, meta) : rest) = do
                 IRGoto _ -> False
                 _ -> True
             )
-            rest
+            rest'
         _ -> []
 
   traceM $ "Then body: " ++ show thenBody
@@ -974,13 +930,6 @@ isIfElsePattern s = do
   traceM "\n=== isIfElsePattern - unrecognized ==="
   traceM $ "Stmt: " ++ show s
   Nothing
-
-isPendingReturn :: CGState -> Bool
-isPendingReturn = cgPendingReturn
-
-isBreakOrGoto :: IRStmt -> Bool
-isBreakOrGoto (IRGoto _) = True
-isBreakOrGoto _ = False
 
 rstrip :: String -> T.Text
 rstrip = T.pack . reverse . dropWhile isSpace . reverse

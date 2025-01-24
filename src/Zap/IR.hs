@@ -22,9 +22,8 @@ module Zap.IR
   )
 where
 
-import Control.Monad (foldM, forM_, unless, when)
-import Control.Monad.Except
-import qualified Data.Char as C
+import Control.Monad (when)
+import Data.Int (Int32, Int64)
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -81,11 +80,7 @@ data IRBlock = IRBlock
 data IRStmt
   = IRStmtExpr IRExpr
   | IRReturn (Maybe IRExpr)
-  | IRVarDecl
-      { varDeclName :: String,
-        varDeclType :: IRType,
-        varDeclInit :: IRExpr
-      }
+  | IRVarDecl String IRType IRExpr
   | IRAssign String IRExpr
   | IRAssignOp String Op IRExpr
   | IRLabel String
@@ -104,8 +99,8 @@ data IRExpr
 data IRLiteral
   = IRBoolLit Bool
   | IRStringLit String
-  | IRInt32Lit Int
-  | IRInt64Lit Int
+  | IRInt32Lit Int32
+  | IRInt64Lit Int64
   | IRFloat32Lit Float
   | IRFloat64Lit Double
   | IRVarRef String
@@ -150,8 +145,6 @@ data TypeConstraint
   | TVar TypeVar IRType
   | TFunc TypeVar [IRType] IRType
   deriving (Eq, Show)
-
-type TypeSubst = M.Map TypeVar IRType
 
 data TypeError
   = UnificationError IRType IRType
@@ -198,8 +191,8 @@ convertToIR' (Program tops) symTable = do
   traceM "\n=== Converting Program to IR ==="
   traceM $ "Initial symbol table: " ++ show symTable
 
-  let (structDefs, restTops) = partitionStructs tops
-  traceM $ "Found struct definitions: " ++ show structDefs
+  let (structDefs', restTops) = partitionStructs tops
+  traceM $ "Found struct definitions: " ++ show structDefs'
 
   let (funcs, exprs) = partitionFuncs restTops
   traceM $ "Found functions: " ++ show funcs
@@ -238,24 +231,11 @@ convertToIR' (Program tops) symTable = do
 --                    Convert Function Declarations
 --------------------------------------------------------------------------------
 
-convertStructType :: Type -> Either IRConversionError IRType
-convertStructType (TypeStruct sid name) =
-  Right $ IRTypeStruct name sid
-convertStructType t = Right $ convertType t
-
--- | Check if last statement is IRReturn
-endsInReturn :: [(IRStmt, IRMetadata)] -> Bool
-endsInReturn [] = False
-endsInReturn stmts =
-  case fst (last stmts) of
-    IRReturn _ -> True
-    _ -> False
-
 convertFuncDecl ::
   SymbolTable ->
   Decl ->
   Either IRConversionError (IRFuncDecl, IRMetadata)
-convertFuncDecl symTable (DFunc name typeParams params retType (Block label bodyExprs blockResult)) = do
+convertFuncDecl symTable (DFunc name typeParams params retType (Block _ bodyExprs _)) = do
   traceM $ "\n=== Converting function: " ++ name
   traceM $ "Parameters: " ++ show params
   traceM $ "Return type: " ++ show retType
@@ -321,10 +301,20 @@ convertFuncDecl symTable (DFunc name typeParams params retType (Block label body
         },
       funcMeta
     )
-convertFuncDecl _ (DFunc name _ _ _ body) =
+convertFuncDecl _ (DFunc _ _ _ _ body) =
   Left $
     IRUnsupportedExpr $
       "Function body must be a block: " ++ show body
+convertFuncDecl _ (DStruct _ _) =
+  Left $ IRUnsupportedExpr "Cannot convert struct definition to IR function"
+
+-- | Check if last statement is IRReturn
+endsInReturn :: [(IRStmt, IRMetadata)] -> Bool
+endsInReturn [] = False
+endsInReturn stmts =
+  case fst (last stmts) of
+    IRReturn _ -> True
+    _ -> False
 
 --------------------------------------------------------------------------------
 --                     Convert Expressions to IR Stmts
@@ -420,9 +410,9 @@ convertExprToStmts symTable ctx expr = do
       traceM $ "Value: " ++ show mexpr
       traceM $ "Context: " ++ show ctx
       case mexpr of
-        Just expr -> do
-          traceM $ "Break has value expression: " ++ show expr
-          convertedExpr <- convertToIRExprWithSymbols symTable expr
+        Just expr' -> do
+          traceM $ "Break has value expression: " ++ show expr'
+          convertedExpr <- convertToIRExprWithSymbols symTable expr'
           let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
           traceM $ "Converted break value to IR: " ++ show convertedExpr
           return [(IRReturn (Just convertedExpr), meta)]
@@ -551,11 +541,6 @@ splitAtFunctionBreak stmts = do
     isFuncBreak (IRGoto label, _) = isFunctionLabel label
     isFuncBreak _ = False
 
--- Helper to identify function breaks - pure function
-isFunctionBreak :: IRStmt -> Bool
-isFunctionBreak (IRGoto label) = isFunctionLabel label
-isFunctionBreak _ = False
-
 --------------------------------------------------------------------------------
 --             Single-Expression Block => IRReturn
 --------------------------------------------------------------------------------
@@ -565,11 +550,11 @@ convertBlockOrLiteralReturn ::
   Expr ->
   Maybe LoopContext ->
   Either IRConversionError [(IRStmt, IRMetadata)]
-convertBlockOrLiteralReturn symTable (Block _ [e] Nothing) ctx = do
+convertBlockOrLiteralReturn symTable (Block _ [e] Nothing) _ = do
   traceM "Single-expression block => IRReturn"
   converted <- convertToIRExprWithSymbols symTable e
-  let metaType = typeFromExpr e (Just symTable)
-  let meta = mkMetadata metaType (S.singleton PureEffect)
+  let metaType' = typeFromExpr e (Just symTable)
+  let meta = mkMetadata metaType' (S.singleton PureEffect)
   pure [(IRReturn (Just converted), meta)]
 convertBlockOrLiteralReturn symTable other ctx =
   convertBlock symTable other ctx
@@ -616,7 +601,7 @@ validateStructTypes (FieldAccess baseExpr fieldName) symTable = do
           case lookupStruct sid symTable of
             Just def ->
               case lookup fieldName (structFields def) of
-                Just fieldType -> Right ()
+                Just _ -> Right ()
                 Nothing ->
                   Left $
                     IRError $
@@ -644,7 +629,7 @@ typeFromExpr (Lit (FloatLit _ (Just Float32))) _ = IRTypeFloat32
 typeFromExpr (Lit (FloatLit _ (Just Float64))) _ = IRTypeFloat64
 typeFromExpr (Lit (IntLit _ (Just Int32))) _ = IRTypeInt32
 typeFromExpr (Lit (IntLit _ (Just Int64))) _ = IRTypeInt64
-typeFromExpr (Call fname args) symTable
+typeFromExpr (Call fname _) symTable
   | isFnameStructConstructor fname =
       let _ =
             trace
@@ -657,11 +642,7 @@ typeFromExpr (Call fname args) symTable
               ()
        in case symTable >>= \st -> M.lookup fname (structNames st) of
             Just sid -> IRTypeStruct fname sid
-            Nothing ->
-              -- Check if this is a specialized name (e.g. Box_i32)
-              case symTable >>= \st -> M.lookup fname (structNames st) of
-                Just sid -> IRTypeStruct fname sid
-                Nothing -> error $ "Unknown struct type: " ++ fname
+            Nothing -> error $ "Unknown struct type: " ++ fname
 typeFromExpr (Call fname _) _
   | isFnameStructConstructor fname =
       IRTypeStruct fname (StructId 0)
@@ -671,7 +652,7 @@ typeFromExpr (FieldAccess baseExpr fieldName) (Just st) =
   case baseExpr of
     Var varName ->
       case lookupVarType varName st of
-        Just (TypeStruct sid structName) ->
+        Just (TypeStruct sid _) ->
           case lookupStruct sid st of
             Just def ->
               case lookup fieldName (structFields def) of
@@ -701,7 +682,7 @@ convertType t =
         TypeNum Float64 -> IRTypeFloat64
         TypeVoid -> IRTypeVoid
         TypeStruct sid nm -> IRTypeStruct nm sid
-        TypeParam p -> IRTypeVar (TypeVar 0)
+        TypeParam _ -> IRTypeVar (TypeVar 0)
         _ -> IRTypeVoid
       _ = trace ("Converted to: " ++ show result) ()
    in result
@@ -750,8 +731,8 @@ convertTops symTable tops ctx = do
 --------------------------------------------------------------------------------
 --           Convert a Single Toplevel Expression
 --------------------------------------------------------------------------------
-
-convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
+convertTop :: SymbolTable -> TopLevel -> Maybe LoopContext -> Either IRConversionError [(IRStmt, IRMetadata)]
+convertTop symTable (TLExpr (If cond thenExpr elseExpr)) ctx = do
   traceM $ "\n=== convertTop: If expression ==="
   traceM $ "Condition: " ++ show cond
   traceM $ "Context: " ++ show ctx
@@ -787,9 +768,6 @@ convertTop symTable (TLExpr e@(If cond thenExpr elseExpr)) ctx = do
              ]
           ++ elseStmts
           ++ [(IRLabel endLabel, meta)]
-  where
-    isSimpleBlock (Block _ [Lit _] Nothing) = True
-    isSimpleBlock _ = False
 convertTop symTable (TLExpr (While cond body)) prevCtx = do
   traceM "\n=== Converting While Loop ==="
   let nextNum = case prevCtx of
@@ -836,22 +814,24 @@ convertTop symTable (TLExpr (While cond body)) prevCtx = do
   pure result
   where
     removeTrailingGoto :: String -> [(IRStmt, IRMetadata)] -> [(IRStmt, IRMetadata)]
-    removeTrailingGoto startLabel stmts =
+    removeTrailingGoto _ stmts =
       -- Find the first break statement (goto to end label)
       let (beforeBreak, afterBreak) = break isLoopBreak stmts
        in case afterBreak of
             -- Keep statements before break and the break itself only
-            (breakStmt@(IRGoto label, _) : rest)
+            (breakStmt@(IRGoto label, _) : _)
               | isEndLabel label ->
                   beforeBreak ++ [breakStmt] -- Drop everything after break
-                  -- No break found - keep trailing goto to start
+            -- No break found - keep trailing goto to start
             [] -> stmts
+            -- Add catchall for other statements after break
+            (_ : rest) -> beforeBreak ++ rest
       where
         isLoopBreak (IRGoto label, _) = isEndLabel label
         isLoopBreak _ = False
 
         isEndLabel label = "_end" `T.isSuffixOf` T.pack label
-convertTop symTable (TLExpr (VarDecl name value)) ctx = do
+convertTop symTable (TLExpr (VarDecl name value)) _ = do
   -- Unchanged from your code
   traceM $ "Converting top-level variable declaration: " ++ name
   convertedExpr <- convertToIRExprWithSymbols symTable value
@@ -861,9 +841,13 @@ convertTop symTable (TLExpr (VarDecl name value)) ctx = do
             case mtype of
               Just Int32 -> IRTypeInt32
               Just Int64 -> IRTypeInt64
+              Just Float32 -> IRTypeFloat32
+              Just Float64 -> IRTypeFloat64
               Nothing -> IRTypeInt32
           Lit (FloatLit _ mtype) ->
             case mtype of
+              Just Int32 -> IRTypeInt32
+              Just Int64 -> IRTypeInt64
               Just Float32 -> IRTypeFloat32
               Just Float64 -> IRTypeFloat64
               Nothing -> IRTypeFloat32
@@ -916,6 +900,12 @@ convertTop symTable (TLExpr e) ctx =
   case e of
     Let {} -> convertExprToStmts symTable ctx e
     _ -> (: []) <$> convertExpr symTable e
+convertTop _ (TLDecl _) _ =
+  Left $ IRUnsupportedExpr "Cannot convert declarations at top level"
+
+convertTop _ (TLType _ _) _ =
+  -- Type declarations don't generate runtime code
+  Right []
 
 --------------------------------------------------------------------------------
 --            convertBlock (unchanged except minor details)
@@ -984,7 +974,7 @@ convertExpr symTable (Lit lit) = do
         BooleanLit _ ->
           mkLiteralMetadata IRTypeInt32 (S.singleton PureEffect) LitBoolean
   pure (IRStmtExpr irExpr, meta)
-convertExpr symTable e@(If _ _ _) = do
+convertExpr _ (If _ _ _) = do
   traceM "Skipping If in convertExpr—already handled by statement-based logic"
   let dummy = IRStmtExpr (IRLit (IRInt32Lit 0))
   let dMeta = mkMetadata IRTypeVoid (S.singleton PureEffect)
@@ -1009,8 +999,8 @@ evalBinOp Add (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x + y)
 evalBinOp Add (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x + y)
 evalBinOp Sub (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (x - y)
 evalBinOp Sub (IRInt64Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (x - y)
-evalBinOp Sub (IRInt64Lit x) (IRInt32Lit y) = Right $ IRInt64Lit (x - fromIntegral y)
-evalBinOp Sub (IRInt32Lit x) (IRInt64Lit y) = Right $ IRInt64Lit (fromIntegral x - y)
+evalBinOp Sub (IRInt64Lit x) (IRInt32Lit y) = Right $ IRInt64Lit ((x :: Int64) - (fromIntegral y))
+evalBinOp Sub (IRInt32Lit x) (IRInt64Lit y) = Right $ IRInt64Lit ((fromIntegral x) - (y :: Int64))
 evalBinOp Sub (IRFloat32Lit x) (IRFloat32Lit y) = Right $ IRFloat32Lit (x - y)
 evalBinOp Sub (IRFloat64Lit x) (IRFloat64Lit y) = Right $ IRFloat64Lit (x - y)
 evalBinOp Mul (IRInt32Lit x) (IRInt32Lit y) = Right $ IRInt32Lit (x * y)
@@ -1047,12 +1037,16 @@ convertToLiteral expr = case expr of
       case mtype of
         Just Int32 -> Right $ IRInt32Lit (read val)
         Just Int64 -> Right $ IRInt64Lit (read val)
+        Just Float32 -> Right $ IRFloat32Lit (read val)
+        Just Float64 -> Right $ IRFloat64Lit (read val)
         Nothing ->
-          if read val > (2 ^ 31 - 1)
-            then Right $ IRInt64Lit (read val)
-            else Right $ IRInt32Lit (read val)
+          if (read val :: Int64) > (2 :: Int64) ^ (31 :: Int64) - (1 :: Int64)
+            then Right $ IRInt64Lit (read val :: Int64)
+            else Right $ IRInt32Lit (read val :: Int32)
     FloatLit val mtype ->
       case mtype of
+        Just Int32 -> Right $ IRInt32Lit (read val)
+        Just Int64 -> Right $ IRInt64Lit (read val)
         Just Float32 -> Right $ IRFloat32Lit (read val)
         Just Float64 -> Right $ IRFloat64Lit (read val)
         Nothing -> Right $ IRFloat32Lit (read val)
@@ -1089,12 +1083,16 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
     case mtype of
       Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
       Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
+      Just Float32 -> Right $ IRLit $ IRInt32Lit (read val)
+      Just Float64 -> Right $ IRLit $ IRInt64Lit (read val)
       Nothing ->
-        if read val > (2 ^ 31 - 1)
+        if read val > ((2 :: Int64) ^ (31 :: Int64) - (1 :: Int64))
           then Right $ IRLit $ IRInt64Lit (read val)
           else Right $ IRLit $ IRInt32Lit (read val)
   FloatLit val mtype ->
     case mtype of
+      Just Int32 -> Right $ IRLit $ IRInt32Lit (read val)
+      Just Int64 -> Right $ IRLit $ IRInt64Lit (read val)
       Just Float32 -> Right $ IRLit $ IRFloat32Lit (read val)
       Just Float64 -> Right $ IRLit $ IRFloat64Lit (read val)
       Nothing -> Right $ IRLit $ IRFloat32Lit (read val)

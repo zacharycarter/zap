@@ -180,6 +180,7 @@ emptySymbolTable =
       funcDefs = M.empty
     }
 
+lookupStruct :: StructId -> SymbolTable -> Maybe StructDef
 lookupStruct sid st =
   trace
     ( "\n=== lookupStruct ===\n"
@@ -425,14 +426,14 @@ substituteFieldType seen fieldName fieldType substitutions st =
                     (replacement, st)
                 Nothing -> (t, st)
           _ ->
-            let t' = foldr (substituteOneParam) t substitutions
+            let t' = foldr (substituteOneTypeParam) t substitutions
              in trace
                   ("  Basic substitution result: " ++ show t')
                   (t', curST)
 
     -- fallback param-substitution for e.g. TypeParam "T"
-    substituteOneParam :: (String, Type) -> Type -> Type
-    substituteOneParam (param, replType) ty =
+    substituteOneTypeParam :: (String, Type) -> Type -> Type
+    substituteOneTypeParam (param, replType) ty =
       trace
         ( "\n=== substitute' ===\n"
             ++ "Param: "
@@ -576,15 +577,15 @@ substituteOneParam param repl fullList t st =
               )
               repl
       -- If it is a struct type that *may* have the parameter(s):
-      TypeStruct sid structName ->
-        let debug1 = "[DEBUG] TypeStruct: " ++ structName ++ " (sid=" ++ show sid ++ ")"
+      TypeStruct sid structName' ->
+        let debug1 = "[DEBUG] TypeStruct: " ++ structName' ++ " (sid=" ++ show sid ++ ")"
          in trace debug1 $
               case lookupStruct sid st of
                 Just def ->
                   let childParams = structParams def
                       debug2 =
                         "[DEBUG] "
-                          ++ structName
+                          ++ structName'
                           ++ " has childParams = "
                           ++ show childParams
                       relevantSubs =
@@ -595,7 +596,7 @@ substituteOneParam param repl fullList t st =
                         "[DEBUG] relevantSubs for child struct = "
                           ++ show relevantSubs
                       specializedName =
-                        getMultiParamName structName (map snd relevantSubs)
+                        getMultiParamName structName' (map snd relevantSubs)
                    in trace debug2 $
                         trace debug3 $
                           if not (null relevantSubs)
@@ -621,7 +622,7 @@ substituteOneParam param repl fullList t st =
                                 ( "[DEBUG] param "
                                     ++ param
                                     ++ " is not relevant to child struct: "
-                                    ++ structName
+                                    ++ structName'
                                     ++ " => returning original t: "
                                     ++ show t
                                 )
@@ -631,7 +632,7 @@ substituteOneParam param repl fullList t st =
                     ( "[DEBUG] Could NOT look up struct sid="
                         ++ show sid
                         ++ " named "
-                        ++ structName
+                        ++ structName'
                         ++ " => returning t"
                     )
                     t
@@ -668,8 +669,8 @@ substituteTypeParamWithSymbols param replacement t st =
               ("Substituting param " ++ name)
               replacement
       -- If it is a struct type that *does* have the parameter(s):
-      TypeStruct sid structName ->
-        trace ("Found struct, looking up struct with name: " ++ show structName ++ " and sid: " ++ show sid) $
+      TypeStruct sid structName' ->
+        trace ("Found struct, looking up struct with name: " ++ show structName' ++ " and sid: " ++ show sid) $
           case lookupStruct sid st of
             Just def ->
               -- Check if param is in def's structParams
@@ -686,7 +687,7 @@ substituteTypeParamWithSymbols param replacement t st =
                       -- Build final specialized name once
                       specializedName =
                         getMultiParamName
-                          structName
+                          structName'
                           [snd sub | sub <- relevantSubs]
                    in -- Look for or create that specialized struct sid
                       case M.lookup specializedName (structNames st) of
@@ -707,7 +708,7 @@ substituteTypeParamWithSymbols param replacement t st =
             Nothing -> do
               trace
                 ( "Failed looking up struct with name: "
-                    ++ show structName
+                    ++ show structName'
                     ++ " and sid: "
                     ++ show sid
                 )
@@ -722,8 +723,6 @@ substituteTypeParamWithSymbols param replacement t st =
     -- If you have a larger "substitutions" map in scope, gather them here:
     -- For example, you might pass in all `(funcTypeParam, Type)` pairs too:
     allOtherParams = [] -- stub
-    getMultiParamName base ts =
-      base ++ "_" ++ T.unpack (T.intercalate "_" (map (T.pack . typeToSuffix) ts))
 
 substituteTypeParam :: String -> Type -> Type -> Type
 substituteTypeParam param replacement = go
@@ -789,8 +788,8 @@ registerSpecializedStruct specializationName baseDef paramTypes st = do
                     ++ ", creating new definition with sid "
                     ++ show sid
                 )
-                $ let substitutions = zip (structParams baseDef) paramTypes
-                      (tempDef, stTmp) = substituteStructParams baseDef substitutions st
+                $ let substitutions' = zip (structParams baseDef) paramTypes
+                      (tempDef, stTmp) = substituteStructParams baseDef substitutions' st
                       -- First clean up the old mapping
                       stCleaned =
                         stTmp
@@ -837,8 +836,8 @@ registerSpecializedStruct specializationName baseDef paramTypes st = do
         let sid = nextStructId st
         trace
           "No existing specialized struct definition found in symbol table. Registering it..."
-          $ let substitutions = zip (structParams baseDef) paramTypes
-                (tempDef, stTmp) = substituteStructParams baseDef substitutions st
+          $ let substitutions' = zip (structParams baseDef) paramTypes
+                (tempDef, stTmp) = substituteStructParams baseDef substitutions' st
                 existingName = findNameForId sid (structNames stTmp)
                 stCleaned = case existingName of
                   Just name -> stTmp {structNames = M.delete name (structNames stTmp)}
@@ -890,35 +889,6 @@ registerSpecializedStruct specializationName baseDef paramTypes st = do
        in case matches of
             (name, _) : _ -> Just name
             [] -> Nothing
-    substitutions = zip (structParams baseDef) paramTypes
-
-registerNestedSpecializations :: String -> StructDef -> [Type] -> SymbolTable -> (StructId, SymbolTable)
-registerNestedSpecializations specializationName baseDef paramTypes st =
-  trace
-    ( "\n=== registerNestedSpecializations ===\n"
-        ++ "Base struct: "
-        ++ show baseDef
-        ++ "\nParam types: "
-        ++ show paramTypes
-    )
-    $ let
-          -- First register main specialized struct
-          (sid, st1) = registerSpecializedStruct specializationName baseDef paramTypes st
-
-          -- For each field, register specialized versions of nested structs
-          finalSt = foldr registerAllNested st1 (structFields baseDef)
-            where
-              registerAllNested (fname, typ) acc = case typ of
-                TypeStruct innerSid _ ->
-                  case lookupStruct innerSid acc of
-                    Just innerDef
-                      | not (null (structParams innerDef)) ->
-                          let innerName = structName innerDef ++ "_" ++ concatMap typeToSuffix paramTypes
-                           in snd $ registerSpecializedStruct innerName innerDef paramTypes acc
-                    _ -> acc
-                _ -> acc
-       in trace ("Registered nested specializations. Final symbol table: " ++ show finalSt) $
-            (sid, finalSt)
 
 -- Helper to instantiate a function definition with concrete types
 specializeFunctionDef ::
@@ -963,8 +933,8 @@ specializeFunctionDef def typeArgs st = do
   where
     -- For each Param, we do a multi-substitution on its type
     substituteAllInParam :: [(String, Type)] -> SymbolTable -> Param -> Param
-    substituteAllInParam fullList st (Param nm ty) =
-      let newTy = substituteAllParamsWithSymbols fullList ty st
+    substituteAllInParam fullList st' (Param nm ty) =
+      let newTy = substituteAllParamsWithSymbols fullList ty st'
        in Param nm newTy
 
     -- rename struct-literal calls from old -> new in the function body

@@ -142,8 +142,8 @@ parseIf expectedType = do
 
   traceM "Parsing then branch"
   -- Parse then branch with proper indentation
-  st <- get
-  let curIndent = stateIndent st
+  st' <- get
+  let curIndent = stateIndent st'
   let newIndent = curIndent + 2
   modify $ \s -> s {stateIndent = newIndent}
 
@@ -156,8 +156,8 @@ parseIf expectedType = do
 
   -- Reset indentation for else check
   modify $ \s -> s {stateIndent = curIndent}
-  st' <- get
-  traceM $ "Current tokens after then: " ++ show (take 3 $ stateTokens st')
+  st'' <- get
+  traceM $ "Current tokens after then: " ++ show (take 3 $ stateTokens st'')
 
   -- Look for else branch at original indent level
   elseBlock <- do
@@ -249,25 +249,25 @@ parseComparison expectedType = do
   traceM $ "Parsed additive: " ++ show left
   remainingComparison expectedType left
   where
-    remainingComparison expectedType left = do
+    remainingComparison expectedType' left = do
       st <- get
       case stateTokens st of
         (tok : _) -> case locToken tok of
           TOperator "<" -> do
             traceM "Found less than operator"
             _ <- matchToken isOperator "<"
-            right <- parseAdditive expectedType
-            remainingComparison expectedType (BinOp Lt left right)
+            right <- parseAdditive expectedType'
+            remainingComparison expectedType' (BinOp Lt left right)
           TOperator ">" -> do
             traceM "Found greater than operator"
             _ <- matchToken isOperator ">"
-            right <- parseAdditive expectedType
-            remainingComparison expectedType (BinOp Gt left right)
+            right <- parseAdditive expectedType'
+            remainingComparison expectedType' (BinOp Gt left right)
           TOperator "==" -> do
             traceM "Found equality operator"
             _ <- matchToken (== TOperator "==") "=="
-            right <- parseAdditive expectedType
-            remainingComparison expectedType (BinOp Eq left right)
+            right <- parseAdditive expectedType'
+            remainingComparison expectedType' (BinOp Eq left right)
           _ -> return left
         [] -> return left
 
@@ -278,7 +278,7 @@ parseAdditive expectedType = do
   left <- parseMultiplicative expectedType
   remainingAdditive expectedType left
   where
-    remainingAdditive expectedType left = do
+    remainingAdditive expectedType' left = do
       st <- get
       traceM $ "Parsing remaining additive with left: " ++ show left
       case stateTokens st of
@@ -286,20 +286,20 @@ parseAdditive expectedType = do
           TOperator "+" -> do
             traceM "Found addition operator"
             _ <- matchToken isOperator "+"
-            right <- parseMultiplicative expectedType
-            remainingAdditive expectedType (BinOp Add left right)
+            right <- parseMultiplicative expectedType'
+            remainingAdditive expectedType' (BinOp Add left right)
           TOperator "+=" -> do
             traceM "Found += operator"
             _ <- matchToken (\t -> t == TOperator "+=") "+="
-            right <- parseMultiplicative expectedType
+            right <- parseMultiplicative expectedType'
             case left of
               Var name -> return $ AssignOp name Add right
               _ -> throwError $ UnexpectedToken tok "variable for assignment"
           TOperator "-" -> do
             traceM "Found subtraction operator"
             _ <- matchToken isOperator "-"
-            right <- parseMultiplicative expectedType
-            remainingAdditive expectedType (BinOp Sub left right)
+            right <- parseMultiplicative expectedType'
+            remainingAdditive expectedType' (BinOp Sub left right)
           _ -> return left
         [] -> return left
 
@@ -310,22 +310,22 @@ parseMultiplicative expectedType = do
   left <- parseUnary expectedType
   remainingMultiplicative expectedType left
   where
-    remainingMultiplicative expectedType left = do
+    remainingMultiplicative expectedType' left = do
       st <- get
       case stateTokens st of
         (tok : _) -> case locToken tok of
           TOperator "*" -> do
             _ <- matchToken isOperator "*"
-            right <- parseUnary expectedType
-            remainingMultiplicative expectedType (BinOp Mul left right)
+            right <- parseUnary expectedType'
+            remainingMultiplicative expectedType' (BinOp Mul left right)
           TOperator "/" -> do
             _ <- matchToken isOperator "/"
-            right <- parseUnary expectedType
-            remainingMultiplicative expectedType (BinOp Div left right)
+            right <- parseUnary expectedType'
+            remainingMultiplicative expectedType' (BinOp Div left right)
           TOperator "div" -> do
             _ <- matchToken (\t -> t == TOperator "div") "div"
-            right <- parseUnary expectedType
-            remainingMultiplicative expectedType (BinOp Div left right)
+            right <- parseUnary expectedType'
+            remainingMultiplicative expectedType' (BinOp Div left right)
           _ -> return left
         [] -> return left
 
@@ -394,13 +394,6 @@ parseTerm expectedType = do
         _ -> parseBaseTerm >>= parseFieldAccess
     [] -> throwError $ EndOfInput "term"
 
-createNumericLiteral :: NumType -> String -> Expr
-createNumericLiteral typ val = case typ of
-  Float32 -> Lit (FloatLit val (Just Float32))
-  Float64 -> Lit (FloatLit val (Just Float64))
-  Int32 -> Lit (IntLit val (Just Int32))
-  Int64 -> Lit (IntLit val (Just Int64))
-
 parseFieldOrCallChain :: Expr -> Parser Expr
 parseFieldOrCallChain expr = do
   traceM "\n=== parseFieldOrCallChain ==="
@@ -435,13 +428,13 @@ parseFieldOrCallChain expr = do
               let specializedName = name ++ "_" ++ T.unpack (T.intercalate "_" (map T.pack paramSuffixes))
 
               -- Check struct definition and update symbol table if it exists
-              st <- get
-              case M.lookup name (structNames (stateSymTable st)) of
-                Just sid -> case lookupStruct sid (stateSymTable st) of
+              st' <- get
+              case M.lookup name (structNames (stateSymTable st')) of
+                Just sid -> case lookupStruct sid (stateSymTable st') of
                   Just baseDef -> do
                     traceM $ "Registering specialized struct: " ++ show specializedName
-                    let (specializedId, newSymTable) =
-                          registerSpecializedStruct specializedName baseDef paramTypes (stateSymTable st)
+                    let (_, newSymTable) =
+                          registerSpecializedStruct specializedName baseDef paramTypes (stateSymTable st')
                     traceM $ "Updated symbol table: " ++ show newSymTable
                     modify $ \s -> s {stateSymTable = newSymTable}
                   Nothing -> return ()
@@ -449,6 +442,22 @@ parseFieldOrCallChain expr = do
 
               -- Continue with constructor call
               parseMaybeCall specializedName
+            Let _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Block _ _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Break _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Result _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            BinOp _ _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            If _ _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            StructLit _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            FieldAccess _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            ArrayLit _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Index _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            VarDecl _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Assign _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            AssignOp _ _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Call _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            While _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
+            Lit _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
         TDot -> do
           _ <- matchToken (== TDot) "dot"
           fieldTok <- matchToken isValidName "field name"
@@ -496,14 +505,6 @@ parseTypeParams = do
               return (name : rest)
             _ -> return [name] -- Single parameter
         _ -> throwError $ UnexpectedToken paramTok "type parameter name"
-
-parseParamType :: String -> Parser Type
-parseParamType param = case param of
-  "i32" -> return $ TypeNum Int32
-  "i64" -> return $ TypeNum Int64
-  "f32" -> return $ TypeNum Float32
-  "f64" -> return $ TypeNum Float64
-  _ -> throwError $ UnexpectedToken undefined "valid type"
 
 parseBaseTerm :: Parser Expr
 parseBaseTerm = do
@@ -632,6 +633,7 @@ parseCallArgs :: Parser [Expr]
 parseCallArgs = do
   st <- get
   case stateTokens st of
+    [] -> throwError $ EndOfInput "expected tokens for arg parsing"
     (tok : _)
       | locToken tok == TRightParen -> return []
       | otherwise -> do
@@ -644,12 +646,16 @@ parseCallArgs = do
                       Just def -> case structFields def of
                         (_, TypeNum t) : _ -> Just (TypeNum t)
                         _ -> Nothing
+                      Nothing -> Nothing
                     Nothing -> Nothing
                 _ -> Nothing
           firstArg <- parseExpressionWithType expectedType
           parseMoreArgs [firstArg]
   where
-    isConstructorName name = not (null name) && isUpper (head name)
+    isConstructorName :: String -> Bool
+    isConstructorName "" = False
+    isConstructorName (c:_) = isUpper c
+   
     parseMoreArgs acc = do
       st <- get
       case stateTokens st of
@@ -663,6 +669,7 @@ parseCallArgsWithType :: Maybe Type -> Parser [Expr]
 parseCallArgsWithType expectedType = do
   st <- get
   case stateTokens st of
+    [] -> throwError $ EndOfInput "expected tokens for arg list"
     (tok : _)
       | locToken tok == TRightParen -> return []
       | otherwise -> do
@@ -670,13 +677,13 @@ parseCallArgsWithType expectedType = do
           parseMoreArgs expectedType [firstArg]
   where
     parseMoreArgs :: Maybe Type -> [Expr] -> Parser [Expr]
-    parseMoreArgs expectedType acc = do
+    parseMoreArgs expectedType' acc = do
       st <- get
       case stateTokens st of
         (tok : _) | locToken tok == TComma -> do
           _ <- matchToken (== TComma) "comma"
-          arg <- parseExpressionWithType expectedType
-          parseMoreArgs expectedType (acc ++ [arg])
+          arg <- parseExpressionWithType expectedType'
+          parseMoreArgs expectedType' (acc ++ [arg])
         _ -> return acc
 
 parseFieldAccess :: Expr -> Parser Expr
@@ -738,7 +745,9 @@ parseBasicExprImpl = do
             -- Default to 64-bit types
             let typ = if '.' `elem` n then Float64 else Int64
             case typ of
+              Int32 -> return $ Lit (IntLit n (Just Int32))
               Int64 -> return $ Lit (IntLit n (Just Int64))
+              Float32 -> return $ Lit (FloatLit n (Just Float32))
               Float64 -> return $ Lit (FloatLit n (Just Float64))
       TVec vecTypeStr -> do
         traceM $ "Parsing vector constructor: " ++ vecTypeStr
@@ -830,7 +839,6 @@ parseSingleBindingLine = do
       -- Register annotated type if present
       case annotatedType of
         Just typ -> do
-          st <- get
           modify $ \s ->
             s
               { stateSymTable =
@@ -840,15 +848,15 @@ parseSingleBindingLine = do
 
       -- Register type if we can determine it
       case value of
-        Call structName args -> do
+        Call structName' _ -> do
           -- Struct instantiation
           st <- get
-          case M.lookup structName (structNames $ stateSymTable st) of
+          case M.lookup structName' (structNames $ stateSymTable st) of
             Just sid ->
               modify $ \s ->
                 s
                   { stateSymTable =
-                      registerVarType varName (TypeStruct sid structName) (stateSymTable s)
+                      registerVarType varName (TypeStruct sid structName') (stateSymTable s)
                   }
             Nothing -> return ()
         Let _ _ -> return () -- Let expressions
@@ -1306,17 +1314,17 @@ parseWhileExpr expectedType = do
   traceM $ "While loop body state: " ++ show bodyState
 
   -- Get current parent block's base indent
-  let parentIndent = stateIndent bodyState
-  traceM $ "Parent indent level: " ++ show parentIndent
+  let parentIndent' = stateIndent bodyState
+  traceM $ "Parent indent level: " ++ show parentIndent'
 
   -- Calculate child block indent relative to parent
-  let blockIndent = parentIndent + 2
-  traceM $ "Setting block indent to: " ++ show blockIndent
+  let blockIndent' = parentIndent' + 2
+  traceM $ "Setting block indent to: " ++ show blockIndent'
 
   -- Parse block contents at new indent level
   let savedIndent = stateIndent bodyState
-  modify $ \s -> s {stateIndent = blockIndent}
-  (bodyExprs, mResult) <- parseBlockExprs expectedType BasicBlock blockIndent
+  modify $ \s -> s {stateIndent = blockIndent'}
+  (bodyExprs, mResult) <- parseBlockExprs expectedType BasicBlock blockIndent'
   modify $ \s -> s {stateIndent = savedIndent} -- Restore parent indent
   let body = Block "while_body" bodyExprs mResult
   traceM $ "Parsed while body: " ++ show body
@@ -1331,7 +1339,7 @@ parseFuncDecl = do
   traceM "Parsing function declaration"
   _ <- matchToken (\t -> t == TWord "fn") "fn"
   nameTok <- matchToken isValidName "function name"
-  let funcName = case locToken nameTok of
+  let funcName' = case locToken nameTok of
         TWord name -> name
         _ -> error "Expected function name"
 
@@ -1372,7 +1380,7 @@ parseFuncDecl = do
           | locLine next > locLine tok + 1 && locCol next < indent -> do
               traceM $ "Found line gap and dedent - ending function body"
               modify $ \s -> s {stateIndent = 0} -- Reset indent for top level
-              let body = Block funcName [expr] Nothing -- Changed from "function_body"
+              let body = Block funcName' [expr] Nothing -- Changed from "function_body"
               case locToken nameTok of
                 TWord name -> return $ DFunc name typeParams params retType body
                 _ -> throwError $ UnexpectedToken nameTok "function name"
@@ -1380,7 +1388,7 @@ parseFuncDecl = do
               -- Continue parsing block contents normally
               (rest, result) <- parseBlockContents ctx
               modify $ \s -> s {stateIndent = 0} -- Reset indent for top level
-              let body = Block funcName (expr : rest) result -- Changed from "function_body"
+              let body = Block funcName' (expr : rest) result -- Changed from "function_body"
               case locToken nameTok of
                 TWord name -> return $ DFunc name typeParams params retType body
                 _ -> throwError $ UnexpectedToken nameTok "function name"
@@ -1427,10 +1435,8 @@ parseTypeToken tok = case locToken tok of
   TWord "i64" -> return $ TypeNum Int64
   TWord "f32" -> return $ TypeNum Float32
   TWord "f64" -> return $ TypeNum Float64
-  -- NEW: Handle type parameters as valid types
-  TWord name
-    | length name == 1 && isUpper (head name) ->
-        return $ TypeParam name
+  TWord (c:_) | isUpper c -> return $ TypeParam [c]
+  TWord _ -> throwError $ UnexpectedToken tok "valid type"
   _ -> throwError $ UnexpectedToken tok "valid type"
 
 parseVarDecl :: Parser Expr
@@ -1459,7 +1465,6 @@ parseVarDecl = do
       -- Register variable type if annotation was present
       case annotatedType of
         Just typ -> do
-          st <- get
           modify $ \s ->
             s
               { stateSymTable =

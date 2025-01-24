@@ -89,7 +89,7 @@ checkBlockIndent :: BlockType -> Int -> Parser ()
 checkBlockIndent bt bi = do
   st <- get
   case stateTokens st of
-    (tok : rest) -> do
+    (tok : _) -> do
       let tokCol = locCol tok
       traceM $ "=== checkBlockIndent ==="
       traceM $ "Block type: " ++ show bt
@@ -99,20 +99,27 @@ checkBlockIndent bt bi = do
       case locToken tok of
         TEOF -> return ()
         TWord "else" | tokCol <= bi -> return () -- Allow else at parent level
-        _ -> case bt of
-          TopLevel -> return ()
-          BasicBlock -> do
-            if tokCol < bi
-              then do
-                traceM $ "Found block termination dedent"
-                modify $ \s -> s {stateIndent = tokCol}
-                return ()
-              else return ()
-          FunctionBlock -> do
-            when (tokCol > 1 && tokCol < bi) $
-              throwError $
-                IndentationError $
-                  IndentationErrorDetails bi tokCol GreaterEq
+        _ ->
+          case bt of
+            TopLevel -> return ()
+            BasicBlock -> do
+              if tokCol < bi
+                then do
+                  traceM $ "Found block termination dedent"
+                  modify $ \s -> s {stateIndent = tokCol}
+                  return ()
+                else return ()
+            FunctionBlock -> do
+              when (tokCol > 1 && tokCol < bi) $
+                throwError $
+                  IndentationError $
+                    IndentationErrorDetails bi tokCol GreaterEq
+            TypeBlock -> do
+              -- Type blocks follow similar rules to function blocks
+              when (tokCol > 1 && tokCol < bi) $
+                throwError $
+                  IndentationError $
+                    IndentationErrorDetails bi tokCol GreaterEq
     [] -> return ()
 
 -- | Get the next token if it matches
@@ -148,6 +155,12 @@ validateIndent ctx col = do
           IndentationError $
             IndentationErrorDetails (baseIndent ctx) col GreaterEq
     FunctionBlock ->
+      unless (col > baseIndent ctx) $
+        throwError $
+          IndentationError $
+            IndentationErrorDetails (baseIndent ctx) col Greater
+    TypeBlock ->
+      -- Type blocks should be indented like function blocks
       unless (col > baseIndent ctx) $
         throwError $
           IndentationError $

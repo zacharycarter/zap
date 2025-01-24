@@ -16,9 +16,8 @@ import Control.Monad
 import Control.Monad.Except
 import Control.Monad.State
 import qualified Data.Char as C
-import Data.List (isInfixOf, isPrefixOf, nub, unfoldr)
+import Data.List (isPrefixOf, nub, unfoldr)
 import qualified Data.Map.Strict as M
-import Data.Maybe (isNothing)
 import qualified Data.Text as T
 import Debug.Trace
 import Zap.AST
@@ -41,13 +40,9 @@ data SemanticError
 
 -- | Type constraints with source locations for error reporting
 data Constraint
-  = Constraint
-      { constLhs :: Type,
-        constRhs :: Type,
-        constSource :: String -- Where constraint came from
-      }
-  | CTruthable Type String -- Constraint for truthiness
-  | CBreakable Type -- Constraint for break return types
+  = CEquality Type Type String
+  | CTruthable Type String
+  | CBreakable Type
   deriving (Show, Eq)
 
 -- | Analysis environment with phases
@@ -147,19 +142,19 @@ parseSymTable :: Program -> Maybe SymbolTable
 parseSymTable (Program tops) = Just $ foldr collectStructs emptySymbolTable tops
   where
     collectStructs :: TopLevel -> SymbolTable -> SymbolTable
-    collectStructs (TLType name (TypeStruct sid _)) st =
+    collectStructs (TLType name (TypeStruct _sid _)) st =
       let (_, newSt) = registerStruct name [] st
        in newSt
     collectStructs _ st = st
 
 -- | Main analysis entry points (keep existing API)
 analyze :: Program -> Either SemanticError Program
-analyze prog@(Program tops) = case parseSymTable prog of
+analyze prog@(Program _tops) = case parseSymTable prog of
   Just symTable -> analyzeWithSymbols prog symTable
   Nothing -> Left $ UndefinedStruct "Failed to get symbol table"
 
 analyzeWithSymbols :: Program -> SymbolTable -> Either SemanticError Program
-analyzeWithSymbols prog@(Program tops) symTable =
+analyzeWithSymbols prog@(Program _tops) symTable =
   runExcept $ evalStateT (analyzeProgramPhases prog) (initialEnv symTable)
 
 -- | Phased program semantic analysis
@@ -227,8 +222,8 @@ analyzeProgramPhases (Program tops) = do
 collectBasicDeclarations :: TopLevel -> SemCheck TopLevel
 collectBasicDeclarations tl = do
   st <- gets envSymbols
-  newSt <- case tl of
-    TLDecl d@(DFunc name typeParams params retType body) -> do
+  _ <- case tl of
+    TLDecl (DFunc name typeParams params retType body) -> do
       traceM $ "\n=== collectBasicDeclarations: Function ==="
       traceM $ "Registering function: " ++ name
 
@@ -247,7 +242,7 @@ collectBasicDeclarations tl = do
               st {funcDefs = M.insert name funcDef (funcDefs st)}
           }
       return st
-    TLType name typ@(TypeStruct sid _) -> do
+    TLType name (TypeStruct sid _) -> do
       traceM $ "\n=== collectBasicDeclarations: Struct ==="
       traceM $ "Registering struct type: " ++ name
 
@@ -256,7 +251,7 @@ collectBasicDeclarations tl = do
           -- Register constructor function
           let fields = structFields def
           let fieldParams =
-                [Param f t | (i, (f, t)) <- zip [1 ..] fields]
+                [Param f t | (_, (f, t)) <- zip [1 :: Int ..] fields]
           let funcDef =
                 FunctionDef
                   { funcName = name,
@@ -314,8 +309,13 @@ registerAllSpecializations st tops = do
   where
     -- Helper to extract function declarations
     getDecls :: [TopLevel] -> [Decl]
-    getDecls = map (\(TLDecl d) -> d) . filter isFuncDecl
+    getDecls = map extractDecl . filter isFuncDecl
       where
+        extractDecl :: TopLevel -> Decl
+        extractDecl (TLDecl d) = d
+        extractDecl (TLExpr _) = error "isFuncDecl should prevent TLExpr"
+        extractDecl (TLType _ _) = error "isFuncDecl should prevent TLType"
+
         isFuncDecl (TLDecl (DFunc {})) = True
         isFuncDecl _ = False
 
@@ -388,12 +388,6 @@ registerAllSpecializations st tops = do
           concatMap findImplicitSpecsInExpr [e1, e2]
         _ -> []
 
-    -- Check if it's a numeric or float literal with a known type
-    getNumTypeFromLit :: Expr -> Maybe Type
-    getNumTypeFromLit (Lit (IntLit _ (Just nt))) = Just (TypeNum nt)
-    getNumTypeFromLit (Lit (FloatLit _ (Just nt))) = Just (TypeNum nt)
-    getNumTypeFromLit _ = Nothing
-
     -- If your parser has already turned "Pair[i64, i32]" into "Pair_i64_i32",
     -- then this function reverts to "Pair". Otherwise, you could no-op it.
     stripSuffixIfAny :: String -> String
@@ -410,29 +404,29 @@ registerAllSpecializations st tops = do
       SymbolTable ->
       String ->
       StateT Environment (Except SemanticError) SymbolTable
-    registerSpecForBase implicitSpecs st baseName = do
+    registerSpecForBase implicitSpecs st' baseName = do
       traceM $ "\n=== registerSpecForBase: " ++ baseName
       traceM $ "Current symbol table state:"
       traceM $ "- Implicit specs: " ++ show implicitSpecs
-      traceM $ "- Struct defs: " ++ show (M.keys $ structDefs st)
-      traceM $ "- Function defs: " ++ show (M.keys $ funcDefs st)
-      traceM $ "- Base constructor function: " ++ show (M.lookup baseName (funcDefs st))
+      traceM $ "- Struct defs: " ++ show (M.keys $ structDefs st')
+      traceM $ "- Function defs: " ++ show (M.keys $ funcDefs st')
+      traceM $ "- Base constructor function: " ++ show (M.lookup baseName (funcDefs st'))
 
       -- First check if this is a function that needs specialization
-      case M.lookup baseName (funcDefs st) of
+      case M.lookup baseName (funcDefs st') of
         Just baseFuncDef | not (null (funcTypeParams baseFuncDef)) -> do
           traceM $ "Found generic function: " ++ show baseFuncDef
           let thisBaseSpecs = [(ts, nm) | (nm, ts) <- implicitSpecs, nm == baseName, not (null ts)] -- Skip empty type lists
           traceM $ "Function specializations needed: " ++ show thisBaseSpecs
 
           -- Use existing registerSpecializedFunc to create specializations
-          foldM (\s (types, name) -> registerSpecializedFunc baseFuncDef s (name ++ "_" ++ concatMap typeToSuffix types, [])) st thisBaseSpecs
+          foldM (\s (types, name) -> registerSpecializedFunc baseFuncDef s (name ++ "_" ++ concatMap typeToSuffix types, [])) st' thisBaseSpecs
 
         -- If not a function or not generic, try struct path (existing code)
         _ -> do
           let specializedVersions =
                 [ parseTypeArgs (drop (length baseName + 1) name)
-                  | (name, _) <- M.toList (structNames st),
+                  | (name, _) <- M.toList (structNames st'),
                     name /= baseName,
                     stripSuffixIfAny name == baseName
                 ]
@@ -443,39 +437,39 @@ registerAllSpecializations st tops = do
           traceM $ "Specs for " ++ baseName ++ ": " ++ show thisBaseSpecs
 
           -- Also look for nested uses in other types' fields
-          let nestedSpecs = findNestedSpecializations baseName st
+          let nestedSpecs = findNestedSpecializations baseName st'
           traceM $ "Found nested uses: " ++ show nestedSpecs
 
           -- Combine both sources of specializations
           let allSpecs = nub $ specializedVersions ++ map fst thisBaseSpecs ++ nestedSpecs
           traceM $ "All specializations to create: " ++ show allSpecs
 
-          case M.lookup baseName (structNames st) of
+          case M.lookup baseName (structNames st') of
             Just sid ->
-              case lookupStruct sid st of
+              case lookupStruct sid st' of
                 Just def -> do
                   traceM $ "Found base struct def: " ++ show def
-                  foldM (registerSpecialization def baseName) st allSpecs
+                  foldM (registerSpecialization def baseName) st' allSpecs
                 Nothing -> do
                   traceM $ "No structDef found for " ++ baseName ++ " (sid=" ++ show sid ++ "), skipping..."
-                  return st
+                  return st'
             Nothing -> do
               traceM $ "No struct name found for baseName " ++ baseName ++ ", skipping..."
-              return st
+              return st'
           where
             -- \| Find places where a type is used in other structs' fields
             findNestedSpecializations :: String -> SymbolTable -> [[Type]]
-            findNestedSpecializations baseName st = do
-              traceM $ "\n=== findNestedSpecializations for " ++ baseName ++ " ==="
-              let specs = [paramType | StructDef {structFields = fields} <- M.elems (structDefs st), (_, fieldType) <- fields, paramType <- extractTypeParams baseName fieldType]
+            findNestedSpecializations baseName' st'' = do
+              traceM $ "\n=== findNestedSpecializations for " ++ baseName' ++ " ==="
+              let specs = [paramType | StructDef {structFields = fields} <- M.elems (structDefs st''), (_, fieldType) <- fields, paramType <- extractTypeParams baseName' fieldType]
               traceM $ "Found nested usages: " ++ show specs
               return specs
 
             -- \| Extract type parameters when a type is used in a field
             extractTypeParams :: String -> Type -> [Type]
-            extractTypeParams baseName = \case
-              TypeStruct sid name
-                | name == baseName ->
+            extractTypeParams baseName' = \case
+              TypeStruct _ name
+                | name == baseName' ->
                     -- If this is a parameter field like Box[T], grab T from context
                     case name of
                       n
@@ -483,7 +477,7 @@ registerAllSpecializations st tops = do
                             -- Already specialized, extract concrete type
                             parseTypeArgs $ dropWhile (/= '_') n
                       _ -> []
-                | takeWhile (/= '_') name == baseName ->
+                | takeWhile (/= '_') name == baseName' ->
                     -- Found specialized version like Box_i32
                     parseTypeArgs $ dropWhile (/= '_') name
               TypeParam param ->
@@ -497,18 +491,18 @@ registerAllSpecializations st tops = do
               SymbolTable ->
               [Type] ->
               StateT Environment (Except SemanticError) SymbolTable
-            registerSpecialization baseDef baseNm st' paramTypes = do
+            registerSpecialization baseDef baseNm st'' paramTypes = do
               traceM $ "\n=== registerSpecialization ==="
               traceM $ "Base name: " ++ show baseNm
               traceM $ "Base struct: " ++ show baseDef
               traceM $ "Param types: " ++ show paramTypes
-              traceM $ "Current state: " ++ show st'
+              traceM $ "Current state: " ++ show st''
 
               -- Only specialize if we have concrete types
               if any isTypeParam paramTypes
                 then do
                   traceM "Skipping specialization with type parameters"
-                  return st'
+                  return st''
                 else do
                   let specName = getMultiParamName baseNm paramTypes
                   traceM $ "  specialized struct name: " ++ specName
@@ -516,7 +510,7 @@ registerAllSpecializations st tops = do
                   -----------------------------------------
                   -- 1) Register specialized struct
                   -----------------------------------------
-                  let (sid, newSt) = registerSpecializedStruct specName baseDef paramTypes st'
+                  let (sid, newSt) = registerSpecializedStruct specName baseDef paramTypes st''
                   traceM $ "  registerSpecializedStruct done, sid=" ++ show sid
 
                   -----------------------------------------
@@ -545,11 +539,6 @@ registerAllSpecializations st tops = do
                 isTypeParam (TypeParam _) = True
                 isTypeParam _ = False
 
-                -- Helper to build specialized name with multiple type parameters
-                getMultiParamName :: String -> [Type] -> String
-                getMultiParamName base ts =
-                  base ++ "_" ++ T.unpack (T.intercalate "_" (map (T.pack . typeToSuffix) ts))
-
 registerSpecializedFunc :: FunctionDef -> SymbolTable -> (String, [Expr]) -> SemCheck SymbolTable
 registerSpecializedFunc baseDef st (specName, _) = do
   traceM $ "\n=== registerSpecializedFunc ==="
@@ -576,7 +565,7 @@ registerSpecializedFunc baseDef st (specName, _) = do
 verifySpecializedStructs :: SymbolTable -> StateT Environment (Except SemanticError) ()
 verifySpecializedStructs st = do
   let specialized = M.filter (not . null . structParams) (structDefs st)
-  forM_ (M.toList specialized) $ \(sid, def) -> do
+  forM_ (M.toList specialized) $ \(_, def) -> do
     let baseName = structName def
     forM_ (M.keys $ structNames st) $ \name ->
       when (baseName `isPrefixOf` name && name /= baseName) $ do
@@ -618,9 +607,9 @@ parseTypeArgs s =
 collectConstraints :: TopLevel -> SemCheck TopLevel
 collectConstraints = \case
   TLExpr expr -> do
-    (typ, expr') <- inferExpr expr
+    (_, expr') <- inferExpr expr
     return $ TLExpr expr'
-  TLDecl d@(DFunc name typeParams params retType body) -> do
+  TLDecl (DFunc name typeParams params retType body) -> do
     -- Save old function name
     oldFn <- gets envCurrentFunction
     -- Set current function
@@ -639,7 +628,7 @@ collectConstraints = \case
 
     -- Add constraint for return type
     addConstraint
-      ( Constraint bodyType retType $
+      ( CEquality bodyType retType $
           "Return type of function " ++ name
       )
 
@@ -664,9 +653,9 @@ inferExpr e = do
       -- For struct constructor calls, ensure we store the struct type
       st <- gets envSymbols
       let finalType = case val of
-            Call structName _ ->
-              case M.lookup structName (structNames st) of
-                Just sid -> TypeStruct sid structName
+            Call structName' _ ->
+              case M.lookup structName' (structNames st) of
+                Just sid -> TypeStruct sid structName'
                 Nothing -> valType
             _ -> valType
 
@@ -714,7 +703,7 @@ inferExpr e = do
       (valType, val') <- inferExpr val
       -- Value must match variable's type
       addConstraint
-        ( Constraint valType varType $
+        ( CEquality valType varType $
             "Assignment to variable " ++ name
         )
       return (valType, Assign name val')
@@ -790,7 +779,7 @@ inferExpr e = do
           zipWithM_
             ( \paramType argType ->
                 addConstraint
-                  ( Constraint
+                  ( CEquality
                       paramType
                       argType
                       ("Argument to " ++ name)
@@ -809,7 +798,7 @@ inferExpr e = do
           addConstraint (CTruthable condType "While condition must be convertible to boolean")
 
           -- Keep constraint checking for body
-          (bodyType, body') <- inferExpr body
+          (_, body') <- inferExpr body
 
           -- Body can be any type since it's executed for side effects
           return (TypeVoid, While cond' body')
@@ -868,7 +857,7 @@ inferExpr e = do
 
           -- Add constraint using result type
           addConstraint
-            ( Constraint
+            ( CEquality
                 elseType
                 resultType
                 "Then and else branches must have same type"
@@ -881,9 +870,6 @@ inferExpr e = do
       traceM $ "\n=== inferExpr: Block ==="
       traceM $ "Block name: " ++ name
       traceM $ "Expressions: " ++ show exprs
-
-      -- Save current break type
-      oldBreakType <- gets envBreakType
 
       -- Get enclosing function type
       st <- gets envSymbols
@@ -905,7 +891,7 @@ inferExpr e = do
       -- Get block type, now considering break type
       blockType <- case (mresult, types, currentBreakType) of
         (Just result, _, _) -> do
-          (resultType, result') <- inferExpr result
+          (resultType, _) <- inferExpr result
           return resultType
         (Nothing, t : ts, _) -> do
           return $ last (t : ts)
@@ -915,8 +901,8 @@ inferExpr e = do
         (Nothing, [], Nothing) -> do
           -- Empty block without break - try function type
           curFn <- gets envCurrentFunction
-          st <- gets envSymbols
-          case curFn >>= \fn -> M.lookup fn (funcDefs st) of
+          st' <- gets envSymbols
+          case curFn >>= \fn -> M.lookup fn (funcDefs st') of
             Just def -> return $ funcRetType def
             Nothing -> return TypeVoid
 
@@ -943,7 +929,7 @@ inferExpr e = do
         Just expr -> do
           (exprType, expr') <- inferExpr expr
           addConstraint
-            ( Constraint
+            ( CEquality
                 exprType
                 fnRetType
                 ("Break expression in " ++ label)
@@ -955,6 +941,21 @@ inferExpr e = do
       -- For unlabeled breaks in while loops, we return TypeVoid
       -- since they're used for control flow only
       return (TypeVoid, Break Nothing Nothing)
+    Break Nothing (Just expr) -> do
+      -- Get enclosing function's return type
+      fnName <- gets envCurrentFunction
+      case fnName of
+        Just name -> do
+          st <- gets envSymbols
+          case M.lookup name (funcDefs st) of
+            Just def -> do
+              (exprType, expr') <- inferExpr expr
+              -- Break value must match function return type
+              addConstraint (CEquality exprType (funcRetType def)
+                $ "Break value type in " ++ name)
+              return (funcRetType def, Break Nothing (Just expr'))
+            Nothing -> throwError $ UndefinedFunction name
+        Nothing -> throwError $ InvalidBreak "break with value outside function"
     StructLit name fields -> do
       traceM $ "Inferring struct literal: " ++ name
       syms <- gets envSymbols
@@ -967,7 +968,7 @@ inferExpr e = do
                 Just expectedType -> do
                   (actualType, fexpr') <- inferExpr fexpr
                   addConstraint
-                    ( Constraint
+                    ( CEquality
                         actualType
                         expectedType
                         ("Field " ++ fname ++ " in struct " ++ name)
@@ -977,6 +978,27 @@ inferExpr e = do
             return (TypeStruct sid name, StructLit name inferredFields)
           Nothing -> throwError $ UndefinedStruct name
         Nothing -> throwError $ UndefinedStruct name
+    Result expr -> do
+      (exprType, expr') <- inferExpr expr
+      return (exprType, Result expr')
+    ArrayLit elemType elems -> do
+      (elemTypes, elems') <- unzip <$> mapM inferExpr elems
+      -- All elements should match the declared element type
+      forM_ elemTypes $ \typ ->
+        addConstraint (CEquality typ elemType $
+          "Array element type mismatch")
+      return (TypeArray elemType, ArrayLit elemType elems')
+    Index arr idx -> do
+      (arrType, arr') <- inferExpr arr
+      (idxType, idx') <- inferExpr idx
+      -- Index must be numeric
+      addConstraint (CEquality idxType (TypeNum Int32)
+        "Array index must be numeric")
+      case arrType of
+        TypeArray elemType ->
+          return (elemType, Index arr' idx')
+        _ -> throwError $ TypeError arrType (TypeArray TypeAny)
+          "Cannot index non-array type"
   where
     getBaseType :: Expr -> SymbolTable -> SemCheck Type
     getBaseType expr symTable = do
@@ -1027,7 +1049,7 @@ solveConstraints :: [Constraint] -> SemCheck Substitution
 solveConstraints = foldM solveConstraint emptySubst
   where
     solveConstraint :: Substitution -> Constraint -> SemCheck Substitution
-    solveConstraint subst (Constraint t1 t2 src) = do
+    solveConstraint subst (CEquality t1 t2 src) = do
       lift $
         unifyTypes t1 t2 src >>= \s ->
           return $ composeSubst s subst
@@ -1039,7 +1061,7 @@ solveConstraints = foldM solveConstraint emptySubst
           u <- lift $ unifyTruthable t src
           return $ composeSubst u subst
         _ -> throwError $ TypeError t TypeBool "Type is not truthable"
-    solveConstraint subst (CBreakable t) = return subst
+    solveConstraint subst (CBreakable _) = return subst
 
 -- | Type unification
 unifyTypes :: Type -> Type -> String -> Except SemanticError Substitution
@@ -1055,13 +1077,13 @@ unifyTypes t1 t2 src = do
           if occursCheck name t2
             then throwError $ TypeError t1 t2 ("Infinite type in " ++ src)
             else return $ singleSubst name t2
-        (_, TypeParam name) -> unifyTypes t2 t1 src
+        (_, TypeParam _) -> unifyTypes t2 t1 src
         (TypeNum n1, TypeNum n2) ->
           if n1 == n2 || (isImplicitlyConvertible n1 n2)
             then return emptySubst
             else throwError $ TypeError t1 t2 ("Numeric type mismatch in " ++ src)
         -- New case: Handle specialized struct types
-        (TypeStruct sid1 name1, TypeStruct sid2 name2) -> do
+        (TypeStruct _ name1, TypeStruct _ name2) -> do
           -- Allow matching specialized version with generic version
           if stripSpecialization name1 == stripSpecialization name2
             then return emptySubst
@@ -1080,7 +1102,7 @@ stripSpecialization name =
 
 -- | Type unification for truthable types
 unifyTruthable :: Type -> String -> Except SemanticError Substitution
-unifyTruthable (TypeParam name) src =
+unifyTruthable (TypeParam name) _ =
   if occursCheck name (TypeNum Int64)
     then throwError $ InfiniteType name (TypeNum Int64)
     else
@@ -1151,12 +1173,6 @@ isPrintableType = \case
   TypeBool -> True
   _ -> False -- Can add more printable types as needed
 
-freshTypeVar :: SemCheck Type
-freshTypeVar = do
-  n <- gets envNextVar
-  modify $ \s -> s {envNextVar = n + 1}
-  return $ TypeParam ("t" ++ show n)
-
 addConstraint :: Constraint -> SemCheck ()
 addConstraint constraint = modify $ \s ->
   s {envConstraints = constraint : envConstraints s}
@@ -1219,5 +1235,5 @@ specializedFuncDefToAST name def =
     (funcBody def)
 
 isFnameStructConstructor :: String -> Bool
-isFnameStructConstructor nm =
-  not (null nm) && C.isUpper (head nm)
+isFnameStructConstructor "" = False
+isFnameStructConstructor (c:_) = C.isUpper c

@@ -80,7 +80,7 @@ parseTopLevels = do
                     let registerTypes = do
                           st'' <- get
                           case stateTokens st'' of
-                            (regTok : rest)
+                            (regTok : _)
                               | isTypeKeyword (locToken regTok) -> do
                                   -- Found next type declaration at same level
                                   traceM $ "\n=== Pre-registering type at base indent ==="
@@ -177,19 +177,8 @@ parseTopLevels = do
       st <- get
       case stateTokens st of
         (tok : rest) -> do
-          let baseIndent = locCol tok
-          let (fields, remaining) = span (\t -> locCol t > baseIndent || locToken t == TColon) rest
-          modify $ \s -> s {stateTokens = remaining}
-        _ -> return ()
-
-    -- Helper to skip to next line
-    skipToNextLine :: Parser ()
-    skipToNextLine = do
-      st <- get
-      case stateTokens st of
-        (tok : rest) -> do
-          let currentLine = locLine tok
-          let (_, remaining) = span (\t -> locLine t == currentLine) rest
+          let baseIndent' = locCol tok
+          let (_, remaining) = span (\t -> locCol t > baseIndent' || locToken t == TColon) rest
           modify $ \s -> s {stateTokens = remaining}
         _ -> return ()
 
@@ -367,12 +356,12 @@ parseStructFields = do
   traceM $ "Field base indentation level: " ++ show fieldBaseIndent
 
   let loop acc = do
-        st <- get
+        st' <- get
         traceM $ "\n=== Struct fields loop ==="
         traceM $ "Field base indent: " ++ show fieldBaseIndent
-        traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+        traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st')
 
-        case stateTokens st of
+        case stateTokens st' of
           (tok : _)
             | isValidName (locToken tok) && locCol tok > fieldBaseIndent -> do
                 traceM $ "Parsing field at col " ++ show (locCol tok)
@@ -430,8 +419,6 @@ parseType = do
         -- Handle generic type reference (e.g. Box[T])
         (next : _) | locToken next == TLeftBracket -> do
           traceM $ "Parsing generic type reference: " ++ typeName
-          -- Parse the type parameter
-          params <- parseTypeParams
           -- Look up base struct in symbol table
           case M.lookup typeName (structNames $ stateSymTable st) of
             Just sid -> do
@@ -443,15 +430,9 @@ parseType = do
 
         -- Original cases for basic types and type parameters
         _ -> case typeName of
-          "i32" -> return $ TypeNum Int32
-          "i64" -> return $ TypeNum Int64
-          "f32" -> return $ TypeNum Float32
-          "f64" -> return $ TypeNum Float64
           -- Single uppercase letter is a type parameter
-          _
-            | length typeName == 1 && isUpper (head typeName) ->
-                return $ TypeParam typeName
-          _ -> throwError $ UnexpectedToken tok "type name"
+          [c] | isUpper c -> return $ TypeParam typeName
+          _ -> throwError $ UnexpectedToken tok "valid type"
     _ -> throwError $ UnexpectedToken tok "type name"
   where
     isUpper c = c >= 'A' && c <= 'Z'
@@ -591,7 +572,7 @@ fixType (TypeParam p) _ =
 
 --------------------------------------------------------------------------------
 fixExpr :: Expr -> SymbolTable -> Expr
-fixExpr a@(ArrayLit ty es) sym =
+fixExpr (ArrayLit ty es) sym =
   let newTy = fixType ty sym
       newEs = map (`fixExpr` sym) es
    in trace
@@ -604,7 +585,7 @@ fixExpr a@(ArrayLit ty es) sym =
             ++ show (length es)
         )
         $ ArrayLit newTy newEs
-fixExpr s@(StructLit nm fields) sym =
+fixExpr (StructLit nm fields) sym =
   let newFields = [(fname, fixExpr fval sym) | (fname, fval) <- fields]
    in trace
         ( "\n=== fixExpr (StructLit) => name: "

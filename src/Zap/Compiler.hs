@@ -92,7 +92,7 @@ compile' opts source = do
   astResult <-
     if targetStage opts >= Parsing
       then case (parsedAST parseResult, symbolTable parseResult) of
-        (Just topLevels, Just symTable) -> do
+        (Just topLevels, Just _) -> do
           let prog = Program topLevels
           return $ parseResult {program = Just prog}
         _ -> return parseResult
@@ -113,16 +113,16 @@ compile' opts source = do
     if targetStage opts >= IRConversion
       then case (analyzed semanticResult, symbolTable semanticResult) of
         (Just prog, Just symTable) -> do
-          ir <- mapLeft IRConversionError $ convertToIR' prog symTable
-          return $ semanticResult {ir = Just ir}
+          ir' <- mapLeft IRConversionError $ convertToIR' prog symTable
+          return $ semanticResult {ir = Just ir'}
         _ -> return semanticResult
       else return semanticResult
 
   -- Code Generation
   if targetStage opts >= CodeGeneration
     then case ir irResult of
-      Just ir -> do
-        code <- mapLeft GenerationError $ generateC ir
+      Just ir' -> do
+        code <- mapLeft GenerationError $ generateC ir'
         return $ irResult {generatedCode = Just code}
       Nothing -> return irResult
     else return irResult
