@@ -226,11 +226,12 @@ spec = do
               "Expected top-level expression, got: " ++ show other
 
     it "registers specialized struct in symbol table" $ do
-      let specializedStructInput = T.unlines
-            [ "type Box[T] = struct"
-            , "  value: T"
-            , "let b = Box[i32](42)"
-            ]
+      let specializedStructInput =
+            T.unlines
+              [ "type Box[T] = struct",
+                "  value: T",
+                "let b = Box[i32](42)"
+              ]
       expectParseWithSymbols specializedStructInput $ \(_, st) -> do
         -- Verify base generic struct exists
         case M.lookup "Box" (structNames st) of
@@ -429,8 +430,8 @@ spec = do
                     structParams def `shouldBe` ["S", "T"]
                     structFields def
                       `shouldBe` [ ("inner", TypeStruct (StructId 0) "Box"),
-                                  ("second", TypeParam "S")
-                                ]
+                                   ("second", TypeParam "S")
+                                 ]
                   Nothing -> expectationFailure "Nested struct not found"
               TLType _ typ ->
                 expectationFailure $ "Expected Nested to be a struct type, got: " ++ show typ

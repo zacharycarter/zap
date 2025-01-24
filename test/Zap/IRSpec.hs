@@ -31,7 +31,7 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected single main function, got empty program"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected single main function, got multiple functions"
           Right (IRProgram [(mainFn, meta)]) -> do
             fnName mainFn `shouldBe` "main"
@@ -47,13 +47,13 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case reverse stmts of
               [] -> expectationFailure "Expected at least one statement"
-              ((IRReturn Nothing, meta):_) -> do
+              ((IRReturn Nothing, meta) : _) -> do
                 metaType meta `shouldBe` IRTypeVoid
                 metaEffects meta `shouldBe` S.singleton PureEffect
               _ -> expectationFailure "Expected implicit return as last statement"
@@ -73,7 +73,7 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
@@ -152,7 +152,7 @@ spec = do
         case convertToIR' ast1 st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
@@ -180,7 +180,7 @@ spec = do
         case convertToIR' loopBreak st2 of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
@@ -225,14 +225,14 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, fnMeta)]) -> do
             metaEffects fnMeta `shouldBe` S.singleton IOEffect
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
               [] -> expectationFailure "Expected at least one statement"
-              ((_, stmtMeta):_) ->
+              ((_, stmtMeta) : _) ->
                 metaEffects stmtMeta `shouldBe` S.singleton IOEffect
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
@@ -243,14 +243,14 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
               [] -> expectationFailure "Expected at least one statement"
-              ((IRProcCall "print" [IRLit (IRStringLit "test")], _):_) -> return ()
-              (other:_) -> expectationFailure $ "Expected procedure call, got: " ++ show other
+              ((IRProcCall "print" [IRLit (IRStringLit "test")], _) : _) -> return ()
+              (other : _) -> expectationFailure $ "Expected procedure call, got: " ++ show other
           Left err -> expectationFailure $ "Conversion failed: " ++ show err
 
       it "converts print with binary operation to procedure call" $ do
@@ -259,14 +259,14 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
               [] -> expectationFailure "Expected at least one statement"
-              ((IRProcCall "print" [IRLit (IRInt32Lit 3)], _):_) -> return ()
-              (other:_) -> expectationFailure $ "Expected procedure call, got: " ++ show other
+              ((IRProcCall "print" [IRLit (IRInt32Lit 3)], _) : _) -> return ()
+              (other : _) -> expectationFailure $ "Expected procedure call, got: " ++ show other
           Left err -> expectationFailure $ show err
 
     describe "Variable declarations" $ do
@@ -280,12 +280,12 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
-              ((declStmt, declMeta):(printStmt, _):_) -> do
+              ((declStmt, declMeta) : (printStmt, _) : _) -> do
                 -- Check variable declaration
                 case declStmt of
                   IRVarDecl name irType expr -> do
@@ -328,13 +328,13 @@ spec = do
         case convertToIR' ast st of
           Right (IRProgram []) ->
             expectationFailure "Expected one function, got none"
-          Right (IRProgram ((_, _):_:_)) ->
+          Right (IRProgram ((_, _) : _ : _)) ->
             expectationFailure "Expected one function, got multiple"
           Right (IRProgram [(mainFn, _)]) -> do
             let IRBlock _ stmts = fnBody mainFn
             case stmts of
               [] -> expectationFailure "Expected statements in block"
-              _ -> return ()  -- Basic structure verification
+              _ -> return () -- Basic structure verification
           Left err -> expectationFailure $ "IR conversion failed: " ++ show err
 
       describe "Literal conversion" $ do
@@ -344,13 +344,13 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram []) ->
               expectationFailure "Expected one function, got none"
-            Right (IRProgram ((_, _):_:_)) ->
+            Right (IRProgram ((_, _) : _ : _)) ->
               expectationFailure "Expected one function, got multiple"
             Right (IRProgram [(mainFn, _)]) -> do
               let IRBlock _ stmts = fnBody mainFn
               case stmts of
                 [] -> expectationFailure "Expected at least one statement"
-                ((IRVarDecl "x" _ (IRLit _), meta):_) ->
+                ((IRVarDecl "x" _ (IRLit _), meta) : _) ->
                   metaLiteralType meta `shouldBe` Just (LitInt Int32)
                 _ -> expectationFailure "Expected variable declaration"
             Left err -> expectationFailure $ "IR conversion failed: " ++ show err
@@ -361,15 +361,15 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram []) ->
               expectationFailure "Expected one function, got none"
-            Right (IRProgram ((_, _):_:_)) ->
+            Right (IRProgram ((_, _) : _ : _)) ->
               expectationFailure "Expected one function, got multiple"
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
                 IRBlock _ [] ->
                   expectationFailure "Expected at least one statement"
-                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                IRBlock _ ((IRVarDecl _ _ _, meta) : _) ->
                   metaLiteralType meta `shouldBe` Just (LitFloat Float32)
-                IRBlock _ ((_, _):_) ->
+                IRBlock _ ((_, _) : _) ->
                   expectationFailure "Expected variable declaration"
             Left err -> expectationFailure $ show err
 
@@ -379,15 +379,15 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram []) ->
               expectationFailure "Expected one function, got none"
-            Right (IRProgram ((_, _):_:_)) ->
+            Right (IRProgram ((_, _) : _ : _)) ->
               expectationFailure "Expected one function, got multiple"
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
                 IRBlock _ [] ->
                   expectationFailure "Expected at least one statement"
-                IRBlock _ ((IRVarDecl _ _ _, meta):_) ->
+                IRBlock _ ((IRVarDecl _ _ _, meta) : _) ->
                   metaLiteralType meta `shouldBe` Just LitString
-                IRBlock _ ((_, _):_) ->
+                IRBlock _ ((_, _) : _) ->
                   expectationFailure "Expected variable declaration"
             Left err -> expectationFailure $ show err
 
@@ -397,15 +397,15 @@ spec = do
           case convertToIR' ast st of
             Right (IRProgram []) ->
               expectationFailure "Expected one function, got none"
-            Right (IRProgram ((_, _):_:_)) ->
+            Right (IRProgram ((_, _) : _ : _)) ->
               expectationFailure "Expected one function, got multiple"
             Right (IRProgram [(mainFn, _)]) -> do
               case fnBody mainFn of
                 IRBlock _ [] ->
                   expectationFailure "Expected at least one statement"
-                IRBlock _ ((IRProcCall "print" [IRLit lit], _):_) ->
+                IRBlock _ ((IRProcCall "print" [IRLit lit], _) : _) ->
                   lit `shouldBe` IRFloat32Lit 3.14
-                IRBlock _ ((other, _):_) ->
+                IRBlock _ ((other, _) : _) ->
                   expectationFailure $ "Expected print call, got: " ++ show other
             Left err -> expectationFailure $ show err
 
@@ -420,7 +420,7 @@ spec = do
           case convertToIRExpr ast of
             Right (IRCall "struct_lit" []) ->
               expectationFailure "Expected struct_lit with parameters"
-            Right (IRCall name (IRLit (IRStringLit str):_))
+            Right (IRCall name (IRLit (IRStringLit str) : _))
               | name == "struct_lit" && str == "Point" -> return ()
             Right other ->
               expectationFailure $
