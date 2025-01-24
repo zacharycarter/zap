@@ -822,7 +822,7 @@ convertTop symTable (TLExpr (While cond body)) prevCtx = do
             (breakStmt@(IRGoto label, _) : _)
               | isEndLabel label ->
                   beforeBreak ++ [breakStmt] -- Drop everything after break
-            -- No break found - keep trailing goto to start
+                  -- No break found - keep trailing goto to start
             [] -> stmts
             -- Add catchall for other statements after break
             (_ : rest) -> beforeBreak ++ rest
@@ -902,7 +902,6 @@ convertTop symTable (TLExpr e) ctx =
     _ -> (: []) <$> convertExpr symTable e
 convertTop _ (TLDecl _) _ =
   Left $ IRUnsupportedExpr "Cannot convert declarations at top level"
-
 convertTop _ (TLType _ _) _ =
   -- Type declarations don't generate runtime code
   Right []

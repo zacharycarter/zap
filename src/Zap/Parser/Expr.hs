@@ -654,8 +654,8 @@ parseCallArgs = do
   where
     isConstructorName :: String -> Bool
     isConstructorName "" = False
-    isConstructorName (c:_) = isUpper c
-   
+    isConstructorName (c : _) = isUpper c
+
     parseMoreArgs acc = do
       st <- get
       case stateTokens st of
@@ -1435,7 +1435,7 @@ parseTypeToken tok = case locToken tok of
   TWord "i64" -> return $ TypeNum Int64
   TWord "f32" -> return $ TypeNum Float32
   TWord "f64" -> return $ TypeNum Float64
-  TWord (c:_) | isUpper c -> return $ TypeParam [c]
+  TWord (c : _) | isUpper c -> return $ TypeParam [c]
   TWord _ -> throwError $ UnexpectedToken tok "valid type"
   _ -> throwError $ UnexpectedToken tok "valid type"
 

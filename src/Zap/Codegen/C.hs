@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Zap.Codegen.C
   ( generateC,
@@ -752,15 +752,19 @@ generateExprWithState st expr = do
       | fname `elem` ["Add", "Sub", "Mul", "Div", "Lt", "Gt", "Eq"] -> do
           -- Keep existing operator handling
           case args of
-            left:right:_ -> do
+            left : right : _ -> do
               leftCode <- generateExprWithState st left
               rightCode <- generateExprWithState st right
               case operatorToC fname of
                 Right cOp ->
                   return $ T.concat ["(", leftCode, ") ", cOp, " (", rightCode, ")"]
                 Left err -> lift $ Left err
-            _ -> lift $ Left $ UnsupportedOperation $
-              T.pack $ "Binary operator " ++ fname ++ " requires two arguments"
+            _ ->
+              lift $
+                Left $
+                  UnsupportedOperation $
+                    T.pack $
+                      "Binary operator " ++ fname ++ " requires two arguments"
       | otherwise -> do
           -- New case: Handle regular function calls
           argExprs <- mapM (generateExprWithState st) args
@@ -774,10 +778,10 @@ operatorToC = \case
   "Sub" -> Right "-"
   "Mul" -> Right "*"
   "Div" -> Right "/"
-  "Lt"  -> Right "<"
-  "Gt"  -> Right ">"
-  "Eq"  -> Right "=="
-  op    -> Left $ UnsupportedOperation $ T.pack $ "Unsupported operator: " ++ op
+  "Lt" -> Right "<"
+  "Gt" -> Right ">"
+  "Eq" -> Right "=="
+  op -> Left $ UnsupportedOperation $ T.pack $ "Unsupported operator: " ++ op
 
 -- Helper to determine format specifier
 generatePrintExprWithState :: SymbolTable -> IRExpr -> StateT CGState (Either CGenError) (T.Text, T.Text)

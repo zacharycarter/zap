@@ -951,8 +951,10 @@ inferExpr e = do
             Just def -> do
               (exprType, expr') <- inferExpr expr
               -- Break value must match function return type
-              addConstraint (CEquality exprType (funcRetType def)
-                $ "Break value type in " ++ name)
+              addConstraint
+                ( CEquality exprType (funcRetType def) $
+                    "Break value type in " ++ name
+                )
               return (funcRetType def, Break Nothing (Just expr'))
             Nothing -> throwError $ UndefinedFunction name
         Nothing -> throwError $ InvalidBreak "break with value outside function"
@@ -985,20 +987,30 @@ inferExpr e = do
       (elemTypes, elems') <- unzip <$> mapM inferExpr elems
       -- All elements should match the declared element type
       forM_ elemTypes $ \typ ->
-        addConstraint (CEquality typ elemType $
-          "Array element type mismatch")
+        addConstraint
+          ( CEquality typ elemType $
+              "Array element type mismatch"
+          )
       return (TypeArray elemType, ArrayLit elemType elems')
     Index arr idx -> do
       (arrType, arr') <- inferExpr arr
       (idxType, idx') <- inferExpr idx
       -- Index must be numeric
-      addConstraint (CEquality idxType (TypeNum Int32)
-        "Array index must be numeric")
+      addConstraint
+        ( CEquality
+            idxType
+            (TypeNum Int32)
+            "Array index must be numeric"
+        )
       case arrType of
         TypeArray elemType ->
           return (elemType, Index arr' idx')
-        _ -> throwError $ TypeError arrType (TypeArray TypeAny)
-          "Cannot index non-array type"
+        _ ->
+          throwError $
+            TypeError
+              arrType
+              (TypeArray TypeAny)
+              "Cannot index non-array type"
   where
     getBaseType :: Expr -> SymbolTable -> SemCheck Type
     getBaseType expr symTable = do
@@ -1236,4 +1248,4 @@ specializedFuncDefToAST name def =
 
 isFnameStructConstructor :: String -> Bool
 isFnameStructConstructor "" = False
-isFnameStructConstructor (c:_) = C.isUpper c
+isFnameStructConstructor (c : _) = C.isUpper c
