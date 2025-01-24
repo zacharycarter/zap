@@ -54,6 +54,11 @@ stack test
 ```
 
 ## Contributing
+
+> [!WARNING]
+> The codebase is still rapidly changing so please keep that in mind when considering whether
+> or not to contribute to the Zap programmigng language and compiler project.
+
 Contributions are welcome! Please follow these steps:
 1. Fork the repository.
 2. Create a new branch for your feature or bug fix.
