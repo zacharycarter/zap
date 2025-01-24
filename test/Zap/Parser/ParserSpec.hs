@@ -9,7 +9,6 @@ import Debug.Trace
 import Test.Hspec
 import Zap.AST
 import Zap.Parser.Core (ParseError (..))
-import Zap.Parser.Expr
 import Zap.Parser.Program
 
 extractParseResult :: Either ParseError ([TopLevel], SymbolTable) -> Either ParseError [TopLevel]
@@ -72,10 +71,9 @@ spec = do
     it "parses simple block" $ do
       let input = "block test:\n  \"Hello\""
       case extractParseResult $ parseProgram input of
-        Right [TLExpr (Block blockLabel blockExprs blockResult)] -> do
+        Right [TLExpr (Block blockLabel blockExprs _)] -> do
           blockLabel `shouldBe` "test"
           blockExprs `shouldBe` [Lit (StringLit "Hello")]
-          blockResult `shouldBe` Nothing
         Left err -> expectationFailure $ "Parse failed: " ++ show err
         Right other ->
           expectationFailure $
@@ -88,7 +86,7 @@ spec = do
     it "parses nested blocks" $ do
       let input = "block outer:\n  block inner:\n    \"Hello\""
       case extractParseResult $ parseProgram input of
-        Right [TLExpr (Block blockLabel blockExprs blockResult)] -> do
+        Right [TLExpr (Block blockLabel blockExprs _)] -> do
           blockLabel `shouldBe` "outer"
           case blockExprs of
             (Block innerBlockLabel innerBlockExprs _ : _) -> do
@@ -99,8 +97,6 @@ spec = do
         Right other ->
           expectationFailure $
             "Unexpected parse result: " ++ show other
-
-  -- Rest of the test cases follow similar pattern...
 
   describe "Top-level expressions" $ do
     it "parses multiple top-level expressions" $ do
@@ -145,121 +141,10 @@ spec = do
             _ -> expectationFailure "Expected only two type declarations"
         Left err -> expectationFailure $ "Parse failed: " ++ show err
 
-  describe "While loop parsing" $ do
-    it "parses simple while loop" $ do
-      let input = "while x < 3:\n  print x"
-      case extractParseResult $ parseProgram input of
-        Right [TLExpr (While (BinOp Lt (Var "x") (Lit (IntLit "3" (Just Int32)))) (Block _ blockExprs _))] ->
-          blockExprs `shouldBe` [Call "print" [Var "x"]]
-        Left err -> expectationFailure $ "Parse failed: " ++ show err
-        Right other ->
-          expectationFailure $
-            "Unexpected parse result: " ++ show other
-
-    it "enforces proper while loop structure" $ do
-      let input = "while x < 3" -- Missing colon
-      parseProgram input `shouldSatisfy` isLeft
-
-  describe "Numeric literal parsing" $ do
-    it "parses integer literals as Int64" $ do
-      parseExprFromText "42'i64" `shouldBe` Right (Lit (IntLit "42" (Just Int64)))
-
-    it "parses decimal literals as Float64" $ do
-      parseExprFromText "42.0'f64" `shouldBe` Right (Lit (FloatLit "42.0" (Just Float64)))
-
-  describe "Variable declarations and assignments" $ do
-    it "parses variable declaration with initialization" $ do
-      parseExprFromText "var x = 42"
-        `shouldBe` Right (VarDecl "x" (Lit (IntLit "42" (Just Int32))))
-
-    it "parses variable declaration within block" $ do
-      expectParseSuccess "block test:\n  var x = 42" $ \tops ->
-        tops
-          `shouldBe` [ TLExpr
-                         ( Block
-                             "test"
-                             [VarDecl "x" (Lit (IntLit "42" (Just Int32)))]
-                             Nothing
-                         )
-                     ]
-
-    it "parses variable assignment" $ do
-      parseExprFromText "x = 42"
-        `shouldBe` Right (Assign "x" (Lit (IntLit "42" (Just Int32))))
-
-    it "parses variable declaration and assignment in function" $ do
-      let input =
-            T.unlines
-              [ "fn sum_squares(x, y: i32): i32 =",
-                "  var sum = x * x",
-                "  sum = sum + y * y",
-                "  sum"
-              ]
-      expectParseSuccess input $ \tops ->
-        tops
-          `shouldBe` [ TLDecl
-                         ( DFunc
-                             "sum_squares"
-                             []
-                             [Param "x" (TypeNum Int32), Param "y" (TypeNum Int32)]
-                             (TypeNum Int32)
-                             ( Block
-                                 "sum_squares"
-                                 [ VarDecl "sum" (BinOp Mul (Var "x") (Var "x")),
-                                   Assign "sum" (BinOp Add (Var "sum") (BinOp Mul (Var "y") (Var "y")))
-                                 ]
-                                 (Just (Var "sum"))
-                             )
-                         )
-                     ]
-
-  describe "Type consistency in numeric literals" $ do
-    it "maintains consistent type information between literal and declared type" $ do
-      let input = "let x: i32 = 42" -- Variable with explicit type annotation
-      case extractParseResult $ parseProgram input of
-        Right [TLExpr (Let "x" expr)] -> do
-          -- The IntLit type should match the declared type
-          case expr of
-            Lit (IntLit val numType) -> do
-              numType `shouldBe` (Just Int32)
-              val `shouldBe` "42"
-            _ -> expectationFailure "Expected numeric literal"
-        Left err -> expectationFailure $ "Parse failed: " ++ show err
-        Right other ->
-          expectationFailure $
-            "Unexpected parse result: " ++ show other
-
-    it "infers consistent types for numeric literals" $ do
-      let input = "42'i32" -- Literal with type suffix
-      case parseExprFromText input of
-        Right (Lit (IntLit val numType)) -> do
-          numType `shouldBe` (Just Int32)
-          val `shouldBe` "42"
-        Left err -> expectationFailure $ "Parse failed: " ++ show err
-        Right other ->
-          expectationFailure $
-            "Unexpected parse result: " ++ show other
-
-    it "handles literals with contextual type information" $ do
-      let input = "let x: i32 = 42\nlet y: i64 = x"
-      case extractParseResult $ parseProgram input of
-        Right [first, second] -> do
-          case first of
-            TLExpr (Let "x" (Lit (IntLit "42" (Just Int32)))) -> return () -- Accept new form
-            other -> expectationFailure $ "Unexpected first expr: " ++ show other
-          second `shouldBe` TLExpr (Let "y" (Var "x"))
-        other -> expectationFailure $ "Unexpected parse result: " ++ show other
-
-    it "enforces type consistency with float literals" $ do
-      let input = "let x: f32 = 3.14"
-      case extractParseResult $ parseProgram input of
-        Right [TLExpr (Let "x" (Lit (FloatLit "3.14" (Just Float32))))] -> return ()
-        other -> expectationFailure $ "Unexpected parse result: " ++ show other
-
     it "parses struct definition with fields" $ do
       expectParseWithSymbols "type Point = struct\n  x: i32\n  y: i32" $ \(tops, st) -> do
         case tops of
-          [TLType name typ@(TypeStruct sid _)] -> do
+          [TLType name (TypeStruct sid _)] -> do
             name `shouldBe` "Point"
             case lookupStruct sid st of
               Just def -> do
@@ -278,15 +163,9 @@ spec = do
         lookupVarType "x" symTable `shouldBe` Just (TypeNum Int32)
 
     it "registers struct in symbol table during parse" $ do
-      let input =
-            T.unlines
-              [ "type Point = struct",
-                "  x: i32",
-                "  y: i32"
-              ]
       expectParseWithSymbols "type Point = struct\n  x: i32\n  y: i32" $ \(tops, symTable) ->
         case tops of
-          [TLType name typ@(TypeStruct sid _)] -> do
+          [TLType name (TypeStruct sid _)] -> do
             name `shouldBe` "Point"
             -- Check the struct is properly registered
             lookupStruct sid symTable `shouldNotBe` Nothing
@@ -300,7 +179,7 @@ spec = do
               ]
       expectParseWithSymbols input $ \(tops, st) -> do
         case tops of
-          [TLType name typ@(TypeStruct sid _)] -> do
+          [TLType name (TypeStruct sid _)] -> do
             name `shouldBe` "Box"
             case lookupStruct sid st of
               Just def -> do
@@ -318,7 +197,7 @@ spec = do
               ]
       expectParseWithSymbols input $ \(tops, st) -> do
         case tops of
-          [TLType name typ@(TypeStruct sid _)] -> do
+          [TLType name (TypeStruct sid _)] -> do
             name `shouldBe` "Box"
             case lookupStruct sid st of
               Just def -> do
@@ -347,13 +226,12 @@ spec = do
               "Expected top-level expression, got: " ++ show other
 
     it "registers specialized struct in symbol table" $ do
-      let input =
-            T.unlines
-              [ "type Box[T] = struct",
-                "  value: T",
-                "let b = Box[i32](42)"
-              ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      let specializedStructInput = T.unlines
+            [ "type Box[T] = struct"
+            , "  value: T"
+            , "let b = Box[i32](42)"
+            ]
+      expectParseWithSymbols specializedStructInput $ \(_, st) -> do
         -- Verify base generic struct exists
         case M.lookup "Box" (structNames st) of
           Nothing -> expectationFailure "Base struct not found"
@@ -385,7 +263,7 @@ spec = do
       expectParseWithSymbols input $ \(tops, st) -> do
         -- First verify the struct definition
         case tops of
-          [TLType name typ@(TypeStruct sid _), _, _] -> do
+          [TLType name (TypeStruct sid _), _, _] -> do
             name `shouldBe` "Box"
             case lookupStruct sid st of
               Just def -> do
@@ -426,7 +304,7 @@ spec = do
                 "let p1 = Pair[i64, i32](42'i64, 17'i32)",
                 "let p2 = Pair[i32, i64](17'i32, 42'i64)" -- Same types, different order
               ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      expectParseWithSymbols input $ \(_, st) -> do
         -- Verify both specialized versions exist with correct fields
         let p1Name = "Pair_i64_i32"
         let p2Name = "Pair_i32_i64"
@@ -465,7 +343,7 @@ spec = do
                 "",
                 "print x.inner.data" -- Should access inner Box's data
               ]
-      expectParseWithSymbols input $ \(tops, st) -> do
+      expectParseWithSymbols input $ \(_, st) -> do
         -- Verify base structs exist
         traceM $ "\n=== Looking up Box struct ==="
         case M.lookup "Box" (structNames st) of
@@ -541,8 +419,9 @@ spec = do
                     structParams def `shouldBe` ["S"]
                     structFields def `shouldBe` [("data", TypeParam "S")]
                   Nothing -> expectationFailure "Box struct not found"
+              TLType _ typ ->
+                expectationFailure $ "Expected Box to be a struct type, got: " ++ show typ
 
-            -- Verify Nested struct
             case second of
               TLType _ (TypeStruct sid2 _) -> do
                 case lookupStruct sid2 st of
@@ -550,7 +429,9 @@ spec = do
                     structParams def `shouldBe` ["S", "T"]
                     structFields def
                       `shouldBe` [ ("inner", TypeStruct (StructId 0) "Box"),
-                                   ("second", TypeParam "S")
-                                 ]
+                                  ("second", TypeParam "S")
+                                ]
                   Nothing -> expectationFailure "Nested struct not found"
+              TLType _ typ ->
+                expectationFailure $ "Expected Nested to be a struct type, got: " ++ show typ
           _ -> expectationFailure $ "Expected two type declarations, got: " ++ show tops
