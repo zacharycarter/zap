@@ -32,6 +32,7 @@ import Control.Monad.Error.Class
 import Control.Monad.State
 import Data.Char (isUpper)
 import qualified Data.Map.Strict as M
+import Data.Maybe (isNothing)
 import qualified Data.Text as T
 import Debug.Trace
 import Zap.AST
@@ -500,6 +501,7 @@ parseTypeArg = do
   tok <-
     matchToken
       ( \case
+          TWord _ -> True
           TSpecialize _ -> True
           TTypeParam _ -> True
           _ -> False
@@ -510,6 +512,14 @@ parseTypeArg = do
 
   case locToken tok of
     TSpecialize spec -> do
+      traceM $ "Found specialized type: " ++ spec
+      case spec of
+        "i32" -> return $ TypeNum Int32
+        "i64" -> return $ TypeNum Int64
+        "f32" -> return $ TypeNum Float32
+        "f64" -> return $ TypeNum Float64
+        _ -> throwError $ UnexpectedToken tok "valid type specialization"
+    TWord spec -> do
       traceM $ "Found specialized type: " ++ spec
       case spec of
         "i32" -> return $ TypeNum Int32
@@ -642,7 +652,21 @@ parseMaybeCall fname = do
                 _ <- matchToken (== TLeftParen) "("
                 args <- parseCallArgs
                 _ <- matchToken (== TRightParen) ")"
-                return $ Call specializedName args
+
+                -- Check if the base name corresponds to a generic struct
+                symTable <- gets stateSymTable
+                case M.lookup fname (structNames symTable) of
+                  Just sid -> case lookupStruct sid symTable of
+                    Just def
+                      | not (null (structParams def)) ->
+                          -- It's a generic struct, so treat this as a constructor call
+                          return $ Call specializedName args
+                    _ ->
+                      -- Not a generic struct, treat as a regular function call
+                      return $ Call fname args
+                  Nothing ->
+                    -- Not a struct, treat as a regular function call
+                    return $ Call fname args
               Nothing -> throwError $ UnexpectedToken tok "valid struct definition"
             Nothing -> throwError $ UnexpectedToken tok "defined struct"
         TLeftParen -> do
@@ -651,13 +675,24 @@ parseMaybeCall fname = do
 
           -- Look up expected type from struct fields
           symTable <- gets stateSymTable
-          let expectedType = case M.lookup fname (structNames symTable) of
-                Just sid -> case lookupStruct sid symTable of
-                  Just def -> case structFields def of
-                    (_, TypeNum t) : _ -> Just (TypeNum t)
-                    _ -> Nothing
-                  Nothing -> Nothing
+          let expectedType = case M.lookup fname (funcDefs symTable) of
+                Just funcDef ->
+                  -- Get the type of the first parameter
+                  case funcParams funcDef of
+                    (Param _ typ) : _ -> Just typ
+                    [] -> Nothing
                 Nothing -> Nothing
+
+          -- If not a function, check if it's a struct constructor
+          let expectedType' =
+                if isNothing expectedType
+                  then case M.lookup fname (structNames symTable) of
+                    Just sid -> case lookupStruct sid symTable of
+                      Just def -> case structFields def of
+                        (_, TypeNum t) : _ -> Just (TypeNum t)
+                        _ -> Nothing
+                      Nothing -> Nothing
+                  else expectedType
 
           args <- parseCallArgsWithType expectedType
           _ <- matchToken (== TRightParen) ")"
@@ -866,38 +901,25 @@ parseSingleBindingLine = do
             _ <- matchToken (== TRightBracket) "]"
 
             -- Build specialized name
-            let specializedName = name ++ "_" ++ concatMap typeToSuffix typeArgs
+            let paramSuffixes = map typeToSuffix typeArgs
+            let specializedName = name ++ "_" ++ T.unpack (T.intercalate "_" (map T.pack paramSuffixes))
             traceM $ "Generated specialized name: " ++ specializedName
 
-            -- Look up base struct
-            symTable <- gets stateSymTable
-            traceM $ "Current symbol table: " ++ show symTable
+            -- Check struct definition and update symbol table if it exists
+            st' <- get
+            case M.lookup name (structNames $ stateSymTable st') of
+              Just sid -> case lookupStruct sid (stateSymTable st') of
+                Just baseDef -> do
+                  traceM $ "Registering specialized struct: " ++ show specializedName
+                  let (_, newSymTable) =
+                        registerSpecializedStruct specializedName baseDef typeArgs (stateSymTable st')
+                  traceM $ "Updated symbol table: " ++ show newSymTable
+                  modify $ \s -> s {stateSymTable = newSymTable}
+                Nothing -> return ()
+              Nothing -> return ()
 
-            case M.lookup name (structNames symTable) of
-              Just baseSid -> do
-                traceM $ "Found base struct " ++ name ++ " with sid " ++ show baseSid
-                case lookupStruct baseSid symTable of
-                  Just baseDef -> do
-                    traceM $ "Base struct definition: " ++ show baseDef
-                    -- Register specialized version
-                    let (specSid, newSt) =
-                          registerSpecializedStruct
-                            specializedName
-                            baseDef
-                            typeArgs
-                            symTable
-                    traceM $ "Registered specialized struct with sid: " ++ show specSid
-                    modify $ \s -> s {stateSymTable = newSt}
-
-                    -- Continue parsing constructor call
-                    args <- parseConstructorArgs typeArgs
-                    return $ Call specializedName args
-                  Nothing -> do
-                    traceM $ "Base struct definition not found for sid " ++ show baseSid
-                    parseExpressionWithType annotatedType
-              Nothing -> do
-                traceM $ "Base struct " ++ name ++ " not found, treating as normal expression"
-                parseExpressionWithType annotatedType
+            -- Continue with constructor call
+            parseMaybeCall specializedName
           _ -> parseExpressionWithType annotatedType
       _ -> parseExpressionWithType annotatedType
     [] -> throwError $ EndOfInput "expression"
@@ -933,14 +955,18 @@ parseSingleBindingLine = do
 
   case locToken nameTok of
     TWord varName -> do
-      -- Register annotated type (keep existing code)
+      -- Register annotated type if present
       case annotatedType of
         Just typ -> do
           modify $ \s ->
-            s {stateSymTable = registerVarType varName typ (stateSymTable s)}
+            s
+              { stateSymTable =
+                  registerVarType varName typ (stateSymTable s)
+              }
+          traceM $ "Registered type of " ++ varName ++ " as: " ++ show typ
         Nothing -> return ()
 
-      -- Register inferred type (enhanced logging)
+      -- Register inferred type if possible
       case value of
         Call structName' _ -> do
           traceM $ "\n=== Registering variable type for struct call ==="
@@ -955,8 +981,10 @@ parseSingleBindingLine = do
                   { stateSymTable =
                       registerVarType varName (TypeStruct sid structName') (stateSymTable s)
                   }
+              traceM $ "Registered type of " ++ varName ++ " as: " ++ show (TypeStruct sid structName')
             Nothing -> traceM $ "Struct " ++ structName' ++ " not found in symbol table"
         _ -> return ()
+
       return (varName, value)
     _ -> throwError $ UnexpectedToken nameTok "identifier"
 

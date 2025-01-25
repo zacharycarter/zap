@@ -27,7 +27,7 @@ parseProgram input = do
   traceM $ "Tokenized input: " ++ show tokens
 
   -- 1) Parse into a list of TopLevel plus final parser state (which holds the SymbolTable).
-  (tops, finalState) <- runParserWithState parseTopLevels tokens
+  (tops, finalState) <- runParserWithState parseTopLevelsWithRegistration tokens
   traceM $ "Parsed top-levels: " ++ show tops
 
   let symTable = stateSymTable finalState
@@ -37,7 +37,7 @@ parseProgram input = do
 
   -- 2) Use your new pass to fix TypeUnresolved placeholders to TypeStruct if possible
   let resolvedProgram = resolveUnresolvedTypes rawProgram symTable
-  let symTableFixed = fixSymbolTableStructs symTable
+  let symTableFixed = fixSymbolTableTypes symTable
   traceM $ "Symbol table after specialization: " ++ show symTableFixed
   traceM $ "Resolved program: " ++ show resolvedProgram
 
@@ -50,7 +50,54 @@ parseProgram input = do
   return (finalTops, symTableFixed)
 
 runParserWithState :: Parser a -> [Located] -> Either ParseError (a, ParseState)
-runParserWithState p tokens = runStateT p (ParseState tokens 0 0 emptySymbolTable)
+runParserWithState p tokens = runStateT p (ParseState tokens 0 0 emptySymbolTable tokens)
+
+parseTopLevelsWithRegistration :: Parser [TopLevel]
+parseTopLevelsWithRegistration = do
+  -- First pass: Register all structs
+  st <- get
+  let originalTokens = stateTokens st
+  registerStructs
+  modify $ \s -> s {stateTokens = originalTokens}
+
+  -- Second pass: Parse all top-level expressions
+  parseTopLevels
+
+-- | Perform the initial pass to register all structs
+registerStructs :: Parser ()
+registerStructs = do
+  st <- get
+  traceM $ "\n=== Starting registerStructs ==="
+  case stateTokens st of
+    [] -> do
+      traceM "No more tokens to process. Exiting registerStructs."
+      return () -- Base case: no more tokens
+    (tok : _) ->
+      case locToken tok of
+        TWord "type" -> do
+          traceM $ "Found type block, parsing type declarations..."
+          -- Parse the type declaration using parseSingleTypeDecl
+          topLevel <- parseSingleTypeDecl
+          case topLevel of
+            TLType name (TypeStruct sid _) -> do
+              traceM $ "Found declaration for struct with id: " ++ show sid ++ " and name: " ++ show name
+              -- Register the struct
+              st <- get
+              let (sid, newSt) = registerParamStruct name [] [] (stateSymTable st)
+              modify $ \s -> s {stateSymTable = newSt}
+              traceM $ "Registered struct: " ++ name ++ " with SID: " ++ show sid
+              -- Continue with the rest of the tokens
+              registerStructs
+            d -> do
+              -- Ignore non-struct type declarations
+              traceM $ "Found non-struct type declaration. Ignoring."
+              registerStructs
+        t -> do
+          traceM $ "Continuing with struct registration. Processing token: " ++ show t
+          modify $ \s -> s {stateTokens = rest} -- Consume the token
+          registerStructs -- Continue with the rest of the tokens
+      where
+        rest = drop 1 $ stateTokens st
 
 parseTopLevels :: Parser [TopLevel]
 parseTopLevels = do
@@ -171,16 +218,20 @@ parseTopLevels = do
     isTypeKeyword (TWord "type") = True
     isTypeKeyword _ = False
 
-    -- Helper to skip to next top-level declaration
-    skipStructBody :: Parser ()
-    skipStructBody = do
-      st <- get
-      case stateTokens st of
-        (tok : rest) -> do
-          let baseIndent' = locCol tok
-          let (_, remaining) = span (\t -> locCol t > baseIndent' || locToken t == TColon) rest
-          modify $ \s -> s {stateTokens = remaining}
-        _ -> return ()
+-- Helper to skip to next top-level declaration
+-- Helper function to skip the body of a struct definition
+skipStructBody :: Parser ()
+skipStructBody = do
+  st <- get
+  let baseIndent = stateIndent st
+  case stateTokens st of
+    [] -> return () -- Base case: no more tokens
+    (tok : rest) -> do
+      if locCol tok > baseIndent
+        then do
+          modify $ \s -> s {stateTokens = rest} -- Consume the token
+          skipStructBody -- Continue with the rest of the tokens
+        else return () -- Stop when indentation is no longer greater
 
 parseTopLevel :: Parser TopLevel
 parseTopLevel = do
@@ -598,18 +649,24 @@ fixExpr other _ =
   trace ("\n=== fixExpr => passing through: " ++ show other) other
 
 -- After you fix the AST, fix all structs in symbolDefs
-fixSymbolTableStructs :: SymbolTable -> SymbolTable
-fixSymbolTableStructs sym =
-  let oldDefs = structDefs sym
-      newDefs = M.map (fixStructDef sym) oldDefs
+fixSymbolTableTypes :: SymbolTable -> SymbolTable
+fixSymbolTableTypes sym =
+  let oldStructDefs = structDefs sym
+      newStructDefs = M.map (fixStructDef sym) oldStructDefs
+      oldFuncDefs = funcDefs sym
+      newFuncDefs = M.map (fixFuncDef sym) oldFuncDefs
    in trace
-        ( "\n=== fixSymbolTableStructs === "
-            ++ "\n oldDefs => "
-            ++ show oldDefs
-            ++ "\n newDefs => "
-            ++ show newDefs
+        ( "\n=== fixSymbolTableTypes === "
+            ++ "\n oldStructDefs => "
+            ++ show oldStructDefs
+            ++ "\n newStructDefs => "
+            ++ show newStructDefs
+            ++ "\n oldFuncDefs => "
+            ++ show oldFuncDefs
+            ++ "\n newFuncDefs => "
+            ++ show newFuncDefs
         )
-        $ sym {structDefs = newDefs}
+        $ sym {structDefs = newStructDefs, funcDefs = newFuncDefs}
 
 fixStructDef :: SymbolTable -> StructDef -> StructDef
 fixStructDef sym oldDef =
@@ -623,3 +680,17 @@ fixStructDef sym oldDef =
             ++ show newFields
         )
         $ oldDef {structFields = newFields}
+
+fixFuncDef :: SymbolTable -> FunctionDef -> FunctionDef
+fixFuncDef sym oldDef =
+  let oldParams = funcParams oldDef
+      newParams = map (fixParam sym) oldParams
+      newRetType = fixType (funcRetType oldDef) sym
+   in trace
+        ( "\n=== fixFuncDef === "
+            ++ "\n oldParams => "
+            ++ show oldParams
+            ++ "\n newParams => "
+            ++ show newParams
+        )
+        $ oldDef {funcParams = newParams, funcRetType = newRetType}

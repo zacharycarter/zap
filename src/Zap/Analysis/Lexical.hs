@@ -171,7 +171,8 @@ isTypeParam _ = False
 
 -- Helper to identify type specializations
 isTypeSpecialization :: String -> Bool
-isTypeSpecialization s = s `elem` ["i32", "i64", "f32", "f64"]
+-- isTypeSpecialization s = s `elem` ["i32", "i64", "f32", "f64"]
+isTypeSpecialization _ = False
 
 lexOperator :: Int -> Int -> String -> String -> LexerState -> Either LexError [Located]
 lexOperator line col acc cs state = do

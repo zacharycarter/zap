@@ -201,7 +201,7 @@ spec = do
         let expected =
               [ Located (TWord "Box") 1 1,
                 Located TLeftBracket 4 1,
-                Located (TSpecialize "i32") 5 1,
+                Located (TWord "i32") 5 1,
                 Located TRightBracket 8 1,
                 Located TEOF 9 1
               ]
