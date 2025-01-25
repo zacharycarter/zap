@@ -546,7 +546,6 @@ parseTypeParams = do
       _ <- matchToken (== TRightBracket) "]"
       return params
     _ -> parseTypeParamList -- Original direct parameter list parsing
-
   where
     parseTypeParamList :: Parser [Type]
     parseTypeParamList = do
@@ -1543,13 +1542,15 @@ parseParams = do
   st <- get
   traceM $ "Current tokens before type: " ++ show (take 3 $ stateTokens st)
 
-  typeTok <- matchToken
-    (\case
-      TWord _ -> True
-      TTypeParam _ -> True
-      TSpecialize _ -> True
-      _ -> False
-    ) "valid type"
+  typeTok <-
+    matchToken
+      ( \case
+          TWord _ -> True
+          TTypeParam _ -> True
+          TSpecialize _ -> True
+          _ -> False
+      )
+      "valid type"
   traceM $ "Matched type token: " ++ show typeTok
 
   paramType <- parseTypeToken typeTok

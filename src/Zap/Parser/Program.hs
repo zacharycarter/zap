@@ -105,6 +105,7 @@ parseTopLevels = do
   traceM $ "\n=== Starting parseTopLevels ==="
   traceM $ "Current state indent: " ++ show (stateIndent st)
   traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
+  traceM $ "Current symTable: " ++ show (stateSymTable st)
 
   let ptlLoop ptlAcc =
         let loop = do
