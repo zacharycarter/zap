@@ -537,28 +537,30 @@ parseTypeParams = do
   traceM $ "\n=== parseTypeParams ==="
   st <- get
   traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
-  traceM $ "Starting type parameter list parsing"
 
-  -- Parse the first type parameter
-  tok <- matchToken (\case TTypeParam _ -> True; _ -> False) "type parameter"
-  case locToken tok of
-    TTypeParam param -> do
-      traceM $ "Found type parameter: " ++ param
-      -- Check for more parameters
-      st' <- get
-      case stateTokens st' of
-        (t : _) | locToken t == TComma -> do
-          traceM "Found comma, parsing additional parameters"
-          _ <- matchToken (== TComma) ","
-          rest <- parseTypeParams
-          traceM $ "Parsed additional parameters: " ++ show rest
-          return (TypeParam param : rest)
-        _ -> do
-          traceM "Single type parameter"
-          return [TypeParam param]
-    _ -> do
-      traceM "Invalid type parameter token"
-      throwError $ UnexpectedToken tok "type parameter"
+  case stateTokens st of
+    (tok : _) | locToken tok == TLeftBracket -> do
+      traceM "Found bracketed type parameters"
+      _ <- matchToken (== TLeftBracket) "["
+      params <- parseTypeParamList
+      _ <- matchToken (== TRightBracket) "]"
+      return params
+    _ -> parseTypeParamList -- Original direct parameter list parsing
+
+  where
+    parseTypeParamList :: Parser [Type]
+    parseTypeParamList = do
+      tok <- matchToken (\case TTypeParam _ -> True; _ -> False) "type parameter"
+      case locToken tok of
+        TTypeParam param -> do
+          st <- get
+          case stateTokens st of
+            (t : _) | locToken t == TComma -> do
+              _ <- matchToken (== TComma) ","
+              rest <- parseTypeParamList
+              return (TypeParam param : rest)
+            _ -> return [TypeParam param]
+        _ -> throwError $ UnexpectedToken tok "type parameter"
 
 parseBaseTerm :: Parser Expr
 parseBaseTerm = do
@@ -1478,6 +1480,7 @@ parseFuncDecl = do
     matchToken
       ( \t -> case t of
           TSpecialize _ -> True
+          TTypeParam _ -> True
           TWord _ -> True
           _ -> False
       )
@@ -1531,28 +1534,28 @@ parseFuncDecl = do
 -- Helper to parse parameters with shared type annotation
 parseParams :: Parser [Param]
 parseParams = do
-  traceM "Parsing function parameters"
-  -- Parse comma-separated parameter names
+  traceM "\n=== parseParams ==="
   names <- parseParamNames
   traceM $ "Parsed parameter names: " ++ show names
 
-  -- Parse shared type annotation
   _ <- matchToken (== TColon) ":"
-  typeTok <-
-    matchToken
-      ( \t -> case t of
-          TSpecialize _ -> True
-          TWord _ -> True
-          _ -> False
-      )
-      "parameter type"
+  traceM "Parsing parameter type"
+  st <- get
+  traceM $ "Current tokens before type: " ++ show (take 3 $ stateTokens st)
+
+  typeTok <- matchToken
+    (\case
+      TWord _ -> True
+      TTypeParam _ -> True
+      TSpecialize _ -> True
+      _ -> False
+    ) "valid type"
+  traceM $ "Matched type token: " ++ show typeTok
+
   paramType <- parseTypeToken typeTok
   traceM $ "Parsed parameter type: " ++ show paramType
 
-  -- Consume closing parenthesis
   _ <- matchToken (== TRightParen) ")"
-
-  -- Create params with shared type
   return [Param name paramType | name <- names]
   where
     parseParamNames :: Parser [String]
@@ -1574,7 +1577,11 @@ parseTypeToken :: Located -> Parser Type
 parseTypeToken tok = do
   traceM $ "\n=== parseTypeToken ==="
   traceM $ "Processing token: " ++ show tok
+
   case locToken tok of
+    TTypeParam param -> do
+      traceM $ "Found type parameter: " ++ param
+      return $ TypeParam param
     TSpecialize spec -> do
       traceM $ "Found specialized type: " ++ spec
       case spec of
@@ -1582,7 +1589,7 @@ parseTypeToken tok = do
         "i64" -> return $ TypeNum Int64
         "f32" -> return $ TypeNum Float32
         "f64" -> return $ TypeNum Float64
-        _ -> throwError $ UnexpectedToken tok "valid type"
+        _ -> throwError $ UnexpectedToken tok "valid type specialization"
     TWord w -> do
       traceM $ "Found word type: " ++ w
       case w of
