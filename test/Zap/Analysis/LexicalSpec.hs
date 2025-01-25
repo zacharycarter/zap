@@ -184,13 +184,38 @@ spec = do
             ]
       tokenize input `shouldBe` Right expected
 
-    it "tokenizes type parameters" $ do
-      let input = T.pack "Box[T]"
-      let expected =
-            [ Located (TWord "Box") 1 1,
-              Located TLeftBracket 4 1,
-              Located (TWord "T") 5 1,
-              Located TRightBracket 6 1,
-              Located TEOF 7 1
-            ]
-      tokenize input `shouldBe` Right expected
+    describe "Generic type tokenization" $ do
+      it "tokenizes simple generic type declaration" $ do
+        let input = T.pack "Box[T]"
+        let expected =
+              [ Located (TWord "Box") 1 1,
+                Located TLeftBracket 4 1,
+                Located (TTypeParam "T") 5 1,
+                Located TRightBracket 6 1,
+                Located TEOF 7 1
+              ]
+        tokenize input `shouldBe` Right expected
+
+      it "tokenizes type specialization" $ do
+        let input = T.pack "Box[i32]"
+        let expected =
+              [ Located (TWord "Box") 1 1,
+                Located TLeftBracket 4 1,
+                Located (TSpecialize "i32") 5 1,
+                Located TRightBracket 8 1,
+                Located TEOF 9 1
+              ]
+        tokenize input `shouldBe` Right expected
+
+      it "tokenizes multiple type parameters" $ do
+        let input = T.pack "Pair[S, T]"
+        let expected =
+              [ Located (TWord "Pair") 1 1,
+                Located TLeftBracket 5 1,
+                Located (TTypeParam "S") 6 1,
+                Located TComma 7 1,
+                Located (TTypeParam "T") 9 1,
+                Located TRightBracket 10 1,
+                Located TEOF 11 1
+              ]
+        tokenize input `shouldBe` Right expected

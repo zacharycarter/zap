@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Zap.Parser.Expr
@@ -17,6 +18,7 @@ module Zap.Parser.Expr
     parseVarDecl,
     parseWhileExpr,
     parseMaybeCall,
+    parseType,
     parseTypeParams,
     isPrint,
     isStringLit,
@@ -408,38 +410,31 @@ parseFieldOrCallChain expr = do
           case expr of
             Var name -> do
               traceM $ "\n=== Processing type parameters for: " ++ name
-              typeParams <- parseTypeParams
+              _ <- matchToken (== TLeftBracket) "["
+              typeArgs <- parseTypeArgsInExpr
+              traceM $ "Parsed type arguments: " ++ show typeArgs
+              _ <- matchToken (== TRightBracket) "]"
 
-              -- Parse type parameters regardless of struct existence
-              paramTypes <-
-                mapM
-                  ( \p -> case p of
-                      "i32" -> return $ TypeNum Int32
-                      "i64" -> return $ TypeNum Int64
-                      "f32" -> return $ TypeNum Float32
-                      "f64" -> return $ TypeNum Float64
-                      _ -> throwError $ UnexpectedToken undefined "valid type"
-                  )
-                  typeParams
-
-              -- Build specialized name
-              let paramSuffixes = map typeToSuffix paramTypes
-              let specializedName = name ++ "_" ++ T.unpack (T.intercalate "_" (map T.pack paramSuffixes))
-
-              -- Check struct definition and update symbol table if it exists
               st' <- get
-              case M.lookup name (structNames (stateSymTable st')) of
-                Just sid -> case lookupStruct sid (stateSymTable st') of
-                  Just baseDef -> do
-                    traceM $ "Registering specialized struct: " ++ show specializedName
-                    let (_, newSymTable) =
-                          registerSpecializedStruct specializedName baseDef paramTypes (stateSymTable st')
-                    traceM $ "Updated symbol table: " ++ show newSymTable
-                    modify $ \s -> s {stateSymTable = newSymTable}
-                  Nothing -> return ()
-                Nothing -> return ()
+              traceM $ "Current symbol table: " ++ show (stateSymTable st')
 
-              -- Continue with constructor call
+              -- Build specialized name even if struct not yet registered
+              let paramSuffixes = map typeToSuffix typeArgs
+              let specializedName = name ++ "_" ++ T.unpack (T.intercalate "_" (map T.pack paramSuffixes))
+              traceM $ "Generated specialized name: " ++ specializedName
+
+              -- Optional validation if struct is registered
+              case M.lookup name (structNames $ stateSymTable st') of
+                Just sid -> case lookupStruct sid (stateSymTable st') of
+                  Just def -> do
+                    when (length typeArgs /= length (structParams def)) $
+                      throwError $
+                        UnexpectedToken tok $
+                          "Wrong number of type arguments for " ++ name
+                  Nothing -> return ()
+                Nothing ->
+                  traceM $ "Note: struct " ++ name ++ " not yet registered"
+
               parseMaybeCall specializedName
             Let _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
             Block _ _ _ -> throwError $ UnexpectedToken tok "expected variable name before type parameters"
@@ -473,37 +468,87 @@ parseFieldOrCallChain expr = do
         _ -> return expr
     [] -> return expr
 
-parseTypeParams :: Parser [String]
-parseTypeParams = do
-  traceM "\n=== parseTypeParams ==="
+parseTypeArgsInExpr :: Parser [Type]
+parseTypeArgsInExpr = do
+  traceM "\n=== parseTypeArgsInExpr ==="
   st <- get
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+
+  -- Parse first type argument
+  first <- parseTypeArg
+  traceM $ "Parsed first type arg: " ++ show first
+
+  -- Check for more arguments
+  st' <- get
+  case stateTokens st' of
+    (t : _) | locToken t == TComma -> do
+      traceM "Found comma, parsing more type arguments"
+      _ <- matchToken (== TComma) ","
+      rest <- parseTypeArgsInExpr
+      traceM $ "Parsed rest of type args: " ++ show rest
+      return (first : rest)
+    _ -> do
+      traceM "Single type argument"
+      return [first]
+
+parseTypeArg :: Parser Type
+parseTypeArg = do
+  traceM "\n=== parseTypeArg ==="
+  st <- get
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+
+  tok <-
+    matchToken
+      ( \case
+          TSpecialize _ -> True
+          TTypeParam _ -> True
+          _ -> False
+      )
+      "type argument"
+
+  traceM $ "Parsed token: " ++ show tok
+
+  case locToken tok of
+    TSpecialize spec -> do
+      traceM $ "Found specialized type: " ++ spec
+      case spec of
+        "i32" -> return $ TypeNum Int32
+        "i64" -> return $ TypeNum Int64
+        "f32" -> return $ TypeNum Float32
+        "f64" -> return $ TypeNum Float64
+        _ -> throwError $ UnexpectedToken tok "valid type specialization"
+    TTypeParam param -> do
+      traceM $ "Found type parameter: " ++ param
+      return $ TypeParam param
+    _ -> throwError $ UnexpectedToken tok "type argument"
+
+parseTypeParams :: Parser [Type]
+parseTypeParams = do
   traceM $ "\n=== parseTypeParams ==="
-  traceM $ "Current indent: " ++ show (stateIndent st)
-  traceM $ "Next tokens: " ++ show (take 5 $ stateTokens st)
-  case stateTokens st of
-    (tok : _) | locToken tok == TLeftBracket -> do
-      _ <- matchToken (== TLeftBracket) "["
-      params <- parseParamList
-      _ <- matchToken (== TRightBracket) "]"
-      return params
-    _ -> return [] -- No type parameters
-  where
-    -- Parse a comma-separated list of type parameters
-    parseParamList = do
-      -- Parse first parameter
-      paramTok <- matchToken isValidName "type parameter"
-      case locToken paramTok of
-        TWord name -> do
-          -- Check for comma indicating more parameters
-          st <- get
-          case stateTokens st of
-            (next : _) | locToken next == TComma -> do
-              _ <- matchToken (== TComma) ","
-              -- Recursively parse rest of parameters
-              rest <- parseParamList
-              return (name : rest)
-            _ -> return [name] -- Single parameter
-        _ -> throwError $ UnexpectedToken paramTok "type parameter name"
+  st <- get
+  traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
+  traceM $ "Starting type parameter list parsing"
+
+  -- Parse the first type parameter
+  tok <- matchToken (\case TTypeParam _ -> True; _ -> False) "type parameter"
+  case locToken tok of
+    TTypeParam param -> do
+      traceM $ "Found type parameter: " ++ param
+      -- Check for more parameters
+      st' <- get
+      case stateTokens st' of
+        (t : _) | locToken t == TComma -> do
+          traceM "Found comma, parsing additional parameters"
+          _ <- matchToken (== TComma) ","
+          rest <- parseTypeParams
+          traceM $ "Parsed additional parameters: " ++ show rest
+          return (TypeParam param : rest)
+        _ -> do
+          traceM "Single type parameter"
+          return [TypeParam param]
+    _ -> do
+      traceM "Invalid type parameter token"
+      throwError $ UnexpectedToken tok "type parameter"
 
 parseBaseTerm :: Parser Expr
 parseBaseTerm = do
@@ -651,10 +696,6 @@ parseCallArgs = do
           firstArg <- parseExpressionWithType expectedType
           parseMoreArgs [firstArg]
   where
-    isConstructorName :: String -> Bool
-    isConstructorName "" = False
-    isConstructorName (c : _) = isUpper c
-
     parseMoreArgs acc = do
       st <- get
       case stateTokens st of
@@ -782,32 +823,90 @@ parseLetBinding _ = do
 -- Helper function to parse a single binding line (no 'let' keyword)
 parseSingleBindingLine :: Parser (String, Expr)
 parseSingleBindingLine = do
-  traceM "Parsing single binding line (identifier = expression)"
+  traceM "\n=== parseSingleBindingLine ==="
   checkIndent GreaterEq
   nameTok <- matchToken isValidName "identifier"
+  traceM $ "Found binding name: " ++ show nameTok
 
   -- Optional type annotation
   annotatedType <- do
     st <- get
+    traceM $ "Checking for type annotation, next tokens: " ++ show (take 3 $ stateTokens st)
     case stateTokens st of
       (tok : _) | locToken tok == TColon -> do
         traceM "Found type annotation"
         _ <- matchToken (== TColon) ":"
         typeTok <- matchToken isValidName "type name"
         declaredType <- parseTypeToken typeTok
+        traceM $ "Parsed type annotation: " ++ show declaredType
         return $ Just declaredType
       _ -> return Nothing
 
   _ <- matchToken (== (TOperator "=")) "equals sign"
   traceM "Parsing value for binding line"
-  value <- parseExpressionWithType annotatedType
 
-  -- If we have a type annotation, ensure value matches it
+  -- Get current value tokens for specialization check
+  st <- get
+  traceM $ "Tokens before value: " ++ show (take 3 $ stateTokens st)
+
+  -- Parse expression with generic instantiation handling
+  value <- case stateTokens st of
+    (tok : rest) -> case locToken tok of
+      TWord name | isConstructorName name -> do
+        traceM $ "\n=== Checking for generic instantiation of " ++ name
+        case rest of
+          (pTok : _) | locToken pTok == TLeftBracket -> do
+            traceM "Found generic type parameter list"
+            -- Consume base name
+            _ <- matchToken isValidName "type name"
+            -- Parse type parameters
+            _ <- matchToken (== TLeftBracket) "["
+            typeArgs <- parseTypeArgsInExpr
+            traceM $ "Parsed type arguments: " ++ show typeArgs
+            _ <- matchToken (== TRightBracket) "]"
+
+            -- Build specialized name
+            let specializedName = name ++ "_" ++ concatMap typeToSuffix typeArgs
+            traceM $ "Generated specialized name: " ++ specializedName
+
+            -- Look up base struct
+            symTable <- gets stateSymTable
+            traceM $ "Current symbol table: " ++ show symTable
+
+            case M.lookup name (structNames symTable) of
+              Just baseSid -> do
+                traceM $ "Found base struct " ++ name ++ " with sid " ++ show baseSid
+                case lookupStruct baseSid symTable of
+                  Just baseDef -> do
+                    traceM $ "Base struct definition: " ++ show baseDef
+                    -- Register specialized version
+                    let (specSid, newSt) =
+                          registerSpecializedStruct
+                            specializedName
+                            baseDef
+                            typeArgs
+                            symTable
+                    traceM $ "Registered specialized struct with sid: " ++ show specSid
+                    modify $ \s -> s {stateSymTable = newSt}
+
+                    -- Continue parsing constructor call
+                    args <- parseConstructorArgs typeArgs
+                    return $ Call specializedName args
+                  Nothing -> do
+                    traceM $ "Base struct definition not found for sid " ++ show baseSid
+                    parseExpressionWithType annotatedType
+              Nothing -> do
+                traceM $ "Base struct " ++ name ++ " not found, treating as normal expression"
+                parseExpressionWithType annotatedType
+          _ -> parseExpressionWithType annotatedType
+      _ -> parseExpressionWithType annotatedType
+    [] -> throwError $ EndOfInput "expression"
+
+  -- Type checking for annotated types (keep existing code)
   case annotatedType of
     Just (TypeNum expectedType) ->
       case value of
         Lit (IntLit val mtype) ->
-          -- Add support for new style int literals
           case mtype of
             Just actualType ->
               if actualType == expectedType
@@ -817,9 +916,8 @@ parseSingleBindingLine = do
                     UnexpectedToken
                       (Located (TNumber val) 0 0)
                       ("integer literal of type " ++ show expectedType)
-            Nothing -> return () -- Inferred type will be handled by convertToIR
+            Nothing -> return ()
         Lit (FloatLit val mtype) ->
-          -- Add support for new style float literals
           case mtype of
             Just actualType ->
               if actualType == expectedType
@@ -829,51 +927,36 @@ parseSingleBindingLine = do
                     UnexpectedToken
                       (Located (TNumber val) 0 0)
                       ("float literal of type " ++ show expectedType)
-            Nothing -> return () -- Inferred type will be handled by convertToIR
-        _ -> return () -- Allow other expressions for now
+            Nothing -> return ()
+        _ -> return ()
     _ -> return ()
 
   case locToken nameTok of
     TWord varName -> do
-      -- Register annotated type if present
+      -- Register annotated type (keep existing code)
       case annotatedType of
         Just typ -> do
           modify $ \s ->
-            s
-              { stateSymTable =
-                  registerVarType varName typ (stateSymTable s)
-              }
+            s {stateSymTable = registerVarType varName typ (stateSymTable s)}
         Nothing -> return ()
 
-      -- Register type if we can determine it
+      -- Register inferred type (enhanced logging)
       case value of
         Call structName' _ -> do
-          -- Struct instantiation
-          st <- get
-          case M.lookup structName' (structNames $ stateSymTable st) of
-            Just sid ->
+          traceM $ "\n=== Registering variable type for struct call ==="
+          traceM $ "Variable: " ++ varName
+          traceM $ "Structure: " ++ structName'
+          st' <- get
+          case M.lookup structName' (structNames $ stateSymTable st') of
+            Just sid -> do
+              traceM $ "Found struct sid: " ++ show sid
               modify $ \s ->
                 s
                   { stateSymTable =
                       registerVarType varName (TypeStruct sid structName') (stateSymTable s)
                   }
-            Nothing -> return ()
-        Let _ _ -> return () -- Let expressions
-        Block _ _ _ -> return () -- Block expressions
-        Break _ _ -> return () -- Break statements
-        Result _ -> return () -- Result expressions
-        BinOp _ _ _ -> return () -- Binary operations
-        If _ _ _ -> return () -- If expressions
-        StructLit _ _ -> return () -- Raw struct literals
-        FieldAccess _ _ -> return () -- Field access
-        ArrayLit _ _ -> return () -- Array literals
-        Index _ _ -> return () -- Array indexing
-        While _ _ -> return () -- While loops
-        VarDecl _ _ -> return () -- Variable declarations
-        Assign _ _ -> return () -- Assignments
-        AssignOp _ _ _ -> return () -- Compound assignments
-        Lit _ -> return () -- Literals
-        Var _ -> return () -- Variable references
+            Nothing -> traceM $ "Struct " ++ structName' ++ " not found in symbol table"
+        _ -> return ()
       return (varName, value)
     _ -> throwError $ UnexpectedToken nameTok "identifier"
 
@@ -1331,8 +1414,8 @@ parseWhileExpr expectedType = do
 
 parseFuncDecl :: Parser Decl
 parseFuncDecl = do
-  traceM "\n=== parseFuncDecl ==="
   oldIndent <- gets stateIndent
+  traceM $ "\n=== parseFuncDecl ==="
   traceM $ "Starting indent: " ++ show oldIndent
 
   traceM "Parsing function declaration"
@@ -1340,20 +1423,43 @@ parseFuncDecl = do
   nameTok <- matchToken isValidName "function name"
   let funcName' = case locToken nameTok of
         TWord name -> name
-        _ -> error "Expected function name"
+        _ -> error "Expected function name token"
+  traceM $ "Parsed function name: " ++ funcName'
 
-  typeParams <- parseTypeParams
-  traceM $ "Parsed type parameters: " ++ show typeParams
+  -- Check for optional type parameters
+  typeParams <- do
+    st <- get
+    traceM $ "Checking for type parameters, next tokens: " ++ show (take 3 $ stateTokens st)
+    case stateTokens st of
+      (tok : _) | locToken tok == TLeftBracket -> parseTypeParams
+      _ -> return []
+  traceM $ "Type parameters: " ++ show typeParams
 
+  -- Parse parameter list
+  traceM "Starting parameter list parsing"
   _ <- matchToken (== TLeftParen) "("
-
   params <- parseParams
+  traceM $ "Completed parameter parsing: " ++ show params
 
+  -- Parse return type
+  traceM "Starting return type parsing"
+  st <- get
+  traceM $ "Return type tokens: " ++ show (take 3 $ stateTokens st)
   _ <- matchToken (== TColon) ":"
-  retTypeTok <- matchToken isValidName "return type"
+  retTypeTok <-
+    matchToken
+      ( \t -> case t of
+          TSpecialize _ -> True
+          TWord _ -> True
+          _ -> False
+      )
+      "return type"
   retType <- parseTypeToken retTypeTok
+  traceM $ "Parsed return type: " ++ show retType
 
+  -- Continue with function body
   _ <- matchToken (== (TOperator "=")) "="
+  traceM "Starting function body parsing"
 
   -- Create function context with standard indent
   let indent = 2
@@ -1361,9 +1467,9 @@ parseFuncDecl = do
 
   -- Parse first expression with indentation
   traceM "=== Parsing function body ==="
-  st <- get
+  st' <- get
 
-  case stateTokens st of
+  case stateTokens st' of
     (tok : _) -> do
       when (locCol tok < indent) $
         throwError $
@@ -1373,8 +1479,8 @@ parseFuncDecl = do
       expr <- parseExpression
 
       -- Check next token for line gap and dedent
-      st' <- get
-      case stateTokens st' of
+      st'' <- get
+      case stateTokens st'' of
         (next : _)
           | locLine next > locLine tok + 1 && locCol next < indent -> do
               traceM $ "Found line gap and dedent - ending function body"
@@ -1404,10 +1510,18 @@ parseParams = do
 
   -- Parse shared type annotation
   _ <- matchToken (== TColon) ":"
-  typeTok <- matchToken isValidName "parameter type"
+  typeTok <-
+    matchToken
+      ( \t -> case t of
+          TSpecialize _ -> True
+          TWord _ -> True
+          _ -> False
+      )
+      "parameter type"
   paramType <- parseTypeToken typeTok
   traceM $ "Parsed parameter type: " ++ show paramType
 
+  -- Consume closing parenthesis
   _ <- matchToken (== TRightParen) ")"
 
   -- Create params with shared type
@@ -1429,14 +1543,28 @@ parseParams = do
 
 -- Helper to parse type tokens
 parseTypeToken :: Located -> Parser Type
-parseTypeToken tok = case locToken tok of
-  TWord "i32" -> return $ TypeNum Int32
-  TWord "i64" -> return $ TypeNum Int64
-  TWord "f32" -> return $ TypeNum Float32
-  TWord "f64" -> return $ TypeNum Float64
-  TWord (c : _) | isUpper c -> return $ TypeParam [c]
-  TWord _ -> throwError $ UnexpectedToken tok "valid type"
-  _ -> throwError $ UnexpectedToken tok "valid type"
+parseTypeToken tok = do
+  traceM $ "\n=== parseTypeToken ==="
+  traceM $ "Processing token: " ++ show tok
+  case locToken tok of
+    TSpecialize spec -> do
+      traceM $ "Found specialized type: " ++ spec
+      case spec of
+        "i32" -> return $ TypeNum Int32
+        "i64" -> return $ TypeNum Int64
+        "f32" -> return $ TypeNum Float32
+        "f64" -> return $ TypeNum Float64
+        _ -> throwError $ UnexpectedToken tok "valid type"
+    TWord w -> do
+      traceM $ "Found word type: " ++ w
+      case w of
+        "i32" -> return $ TypeNum Int32
+        "i64" -> return $ TypeNum Int64
+        "f32" -> return $ TypeNum Float32
+        "f64" -> return $ TypeNum Float64
+        (c : _) | isUpper c -> return $ TypeParam [c]
+        _ -> throwError $ UnexpectedToken tok "valid type"
+    _ -> throwError $ UnexpectedToken tok "valid type"
 
 parseVarDecl :: Parser Expr
 parseVarDecl = do
@@ -1474,6 +1602,82 @@ parseVarDecl = do
       return $ VarDecl name value
     _ -> throwError $ UnexpectedToken nameTok "identifier"
 
+parseType :: Parser Type
+parseType = do
+  traceM "Parsing type"
+  tok <-
+    matchToken
+      ( \t -> case t of
+          TWord _ -> True
+          TTypeParam _ -> True
+          TSpecialize _ -> True
+          _ -> False
+      )
+      "type name"
+  case locToken tok of
+    TTypeParam name -> do
+      traceM $ "Found type parameter: " ++ name
+      st <- get
+      traceM $ "Current symbol table: " ++ show (stateSymTable st)
+      return $ TypeParam name
+    TSpecialize spec -> do
+      traceM $ "Found specialized type: " ++ spec
+      st <- get
+      traceM $ "Current symbol table: " ++ show (stateSymTable st)
+      case spec of
+        "i32" -> do
+          traceM "Recognized i32 specialization"
+          return $ TypeNum Int32
+        "i64" -> do
+          traceM "Recognized i64 specialization"
+          return $ TypeNum Int64
+        "f32" -> do
+          traceM "Recognized f32 specialization"
+          return $ TypeNum Float32
+        "f64" -> do
+          traceM "Recognized f64 specialization"
+          return $ TypeNum Float64
+        _ -> do
+          traceM $ "Unrecognized specialization: " ++ spec
+          throwError $ UnexpectedToken tok "valid type specialization"
+    TWord typeName -> do
+      -- Preserve existing word token handling
+      st <- get
+      traceM $ "Found type word: " ++ typeName
+      traceM $ "Current symbol table: " ++ show (stateSymTable st)
+      case stateTokens st of
+        (next : _) | locToken next == TLeftBracket -> do
+          traceM $ "Found generic type reference: " ++ typeName
+          _ <- matchToken (== TLeftBracket) "["
+          typeParams <- parseTypeParams
+          traceM $ "Parsed type parameters: " ++ show typeParams
+          _ <- matchToken (== TRightBracket) "]"
+          case M.lookup typeName (structNames $ stateSymTable st) of
+            Just sid -> do
+              traceM $ "Found struct " ++ typeName ++ " with sid " ++ show sid
+              return $ TypeStruct sid typeName
+            Nothing -> do
+              traceM $ "No struct named " ++ typeName ++ " yet; returning unresolved placeholder"
+              return $ TypeUnresolved typeName
+        _ -> case typeName of
+          -- Preserve existing type name handling
+          "i32" -> do
+            traceM "Recognized i32 type"
+            return $ TypeNum Int32
+          "i64" -> do
+            traceM "Recognized i64 type"
+            return $ TypeNum Int64
+          "f32" -> do
+            traceM "Recognized f32 type"
+            return $ TypeNum Float32
+          "f64" -> do
+            traceM "Recognized f64 type"
+            return $ TypeNum Float64
+          _ -> do
+            traceM $ "Unrecognized type name: " ++ typeName
+            throwError $ UnexpectedToken tok "valid type"
+    _ -> throwError $ UnexpectedToken tok "type name"
+
 parseExprFromText :: T.Text -> Either ParseError Expr
 parseExprFromText input = do
   tokens <- mapLexError $ tokenize input
@@ -1494,3 +1698,28 @@ mapLexError (Left (UnterminatedString line col)) =
 mapLexError (Left (InvalidCharacter c line col)) =
   Left $ EndOfInput $ "Invalid character '" ++ [c] ++ "' at line " ++ show line ++ ", column " ++ show col
 mapLexError (Right a) = Right a
+
+isConstructorName :: String -> Bool
+isConstructorName "" = False
+isConstructorName (c : _) = isUpper c
+
+parseConstructorArgs :: [Type] -> Parser [Expr]
+parseConstructorArgs expectedTypes = do
+  traceM $ "\n=== parseConstructorArgs ==="
+  traceM $ "Expected types: " ++ show expectedTypes
+  _ <- matchToken (== TLeftParen) "("
+  args <- parseArgList expectedTypes
+  _ <- matchToken (== TRightParen) ")"
+  return args
+  where
+    parseArgList :: [Type] -> Parser [Expr]
+    parseArgList [] = return []
+    parseArgList (typ : types) = do
+      arg <- parseExpressionWithType (Just typ)
+      traceM $ "Parsed argument: " ++ show arg
+      rest <- case types of
+        [] -> return []
+        _ -> do
+          _ <- matchToken (== TComma) ","
+          parseArgList types
+      return (arg : rest)

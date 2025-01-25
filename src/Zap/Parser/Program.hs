@@ -310,17 +310,35 @@ parseSingleTypeDecl = do
   traceM $ "\n=== parseSingleTypeDecl ==="
   traceM $ "Current indent: " ++ show (stateIndent st)
   traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+
   typeNameTok <- matchToken isValidName "type name"
-  typeParams <- parseTypeParams
-  _ <- matchToken (== (TOperator "=")) "equals sign"
+  traceM $ "Found type name: " ++ show typeNameTok
+
+  -- Parse type parameters
+  typeParams <- do
+    st' <- get
+    traceM $ "Checking for type parameters, next tokens: " ++ show (take 3 $ stateTokens st')
+    case stateTokens st' of
+      (tok : _) | locToken tok == TLeftBracket -> do
+        traceM "Found type parameter list"
+        _ <- matchToken (== TLeftBracket) "["
+        params <- parseTypeParams
+        traceM $ "Parsed type parameters: " ++ show params
+        _ <- matchToken (== TRightBracket) "]"
+        return params
+      _ -> do
+        traceM "No type parameters found"
+        return []
+
+  _ <- matchToken (== TOperator "=") "equals sign"
   case locToken typeNameTok of
     TWord name -> do
-      traceM $ "Parsing type definition for: " ++ name
+      traceM $ "Continuing with type definition for: " ++ name
       typeDefinition <- parseTypeDefinition (T.pack name) typeParams
       return $ TLType name typeDefinition
     _ -> throwError $ UnexpectedToken typeNameTok "type name"
 
-parseTypeDefinition :: T.Text -> [String] -> Parser Type
+parseTypeDefinition :: T.Text -> [Type] -> Parser Type
 parseTypeDefinition givenName params = do
   traceM $ "\n=== parseTypeDefinition ==="
   traceM $ "Parsing type: " ++ T.unpack givenName
@@ -336,9 +354,9 @@ parseTypeDefinition givenName params = do
 
   let name = T.unpack givenName
   let (sid, newSt) =
-        if null params
-          then registerStruct name fields st
-          else registerParamStruct name params fields st
+        case params of
+          [] -> registerStruct name fields st
+          _ -> registerParamStruct name params fields st
 
   modify $ \s -> s {stateSymTable = newSt}
   return $ TypeStruct sid name
@@ -386,57 +404,26 @@ parseStructFields = do
 
 parseStructField :: Parser (String, Type)
 parseStructField = do
-  traceM "Parsing struct field"
+  traceM $ "\n=== parseStructField ==="
+  st <- get
+  traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
+
   name <- matchToken isValidName "field name"
+  traceM $ "Parsed field name token: " ++ show name
+
   _ <- matchToken (== TColon) "colon"
+
   fieldType <- parseType
+  traceM $ "Parsed field type: " ++ show fieldType
+
   let fieldName = case locToken name of
         TWord fn -> fn
         _ -> error "Invalid field name token"
+
   traceM $ "Field parsed: " ++ fieldName ++ ": " ++ show fieldType
+  traceM $ "Current symbol table state: " ++ show (stateSymTable st)
+
   return (fieldName, fieldType)
-
-parseType :: Parser Type
-parseType = do
-  traceM "Parsing type"
-  tok <- matchToken isValidName "type name"
-  case locToken tok of
-    TWord "i32" -> do
-      traceM "Recognized Int32"
-      return $ TypeNum Int32
-    TWord "i64" -> do
-      traceM "Recognized Int64"
-      return $ TypeNum Int64
-    TWord "f32" -> do
-      traceM "Recognized Float32"
-      return $ TypeNum Float32
-    TWord "f64" -> do
-      traceM "Recognized Float64"
-      return $ TypeNum Float64
-    TWord typeName -> do
-      st <- get
-      case stateTokens st of
-        -- Handle generic type reference (e.g. Box[T])
-        (next : _) | locToken next == TLeftBracket -> do
-          traceM $ "Parsing generic type reference: " ++ typeName
-          -- Look up base struct in symbol table
-          _ <- parseTypeParams
-          case M.lookup typeName (structNames $ stateSymTable st) of
-            Just sid -> do
-              -- Return generic type reference using struct ID
-              return $ TypeStruct sid typeName
-            Nothing -> do
-              traceM $ "No struct named " ++ typeName ++ " yet; returning unresolved placeholder"
-              return (TypeUnresolved typeName)
-
-        -- Original cases for basic types and type parameters
-        _ -> case typeName of
-          -- Single uppercase letter is a type parameter
-          [c] | isUpper c -> return $ TypeParam typeName
-          _ -> throwError $ UnexpectedToken tok "valid type"
-    _ -> throwError $ UnexpectedToken tok "type name"
-  where
-    isUpper c = c >= 'A' && c <= 'Z'
 
 --------------------------------------------------------------------------------
 

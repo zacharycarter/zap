@@ -749,14 +749,25 @@ inferExpr e = do
             TypeError t1 t2 $
               "Binary operator " ++ show op ++ " requires numeric operands"
     Call "print" [arg] -> do
-      -- Special case for print - takes any printable type
+      traceM $ "\n=== inferExpr: print call ==="
+      traceM $ "Print argument: " ++ show arg
       (argType, arg') <- inferExpr arg
-      when (not $ isPrintableType argType) $
+      traceM $ "Argument type after inference: " ++ show argType
+      st <- gets envSymbols
+      traceM $ "Current symbol table: " ++ show st
+
+      let isPrintable = isPrintableType argType (Just st)
+      traceM $ "isPrintableType returned: " ++ show isPrintable
+
+      when (not isPrintable) $ do
+        traceM $ "Type check failed - throwing TypeError"
         throwError $
           TypeError
             argType
             TypeAny
             "Print argument must be a printable type"
+
+      traceM $ "Print type check passed"
       return (TypeVoid, Call "print" [arg'])
     Call name args -> do
       -- For other function calls, look up function in symbol table
@@ -1178,12 +1189,31 @@ isTruthable = \case
   TypeBool -> True -- Boolean values
   _ -> False -- Can extend for other types later
 
-isPrintableType :: Type -> Bool
-isPrintableType = \case
-  TypeNum _ -> True
-  TypeString -> True
-  TypeBool -> True
-  _ -> False -- Can add more printable types as needed
+isPrintableType :: Type -> Maybe SymbolTable -> Bool
+isPrintableType t mbSt =
+  trace ("\n=== isPrintableType ===\nChecking type: " ++ show t) $
+    case t of
+      TypeNum n ->
+        trace ("TypeNum " ++ show n ++ " -> True") True
+      TypeString ->
+        trace "TypeString -> True" True
+      TypeBool ->
+        trace "TypeBool -> True" True
+      TypeParam p ->
+        trace ("TypeParam " ++ show p ++ "\nSymbol table: " ++ show mbSt) $
+          case mbSt of
+            Just st ->
+              trace ("Looking up var type for: " ++ p) $
+                case lookupVarType p st of
+                  Just specType ->
+                    trace ("Found specialized type: " ++ show specType) $
+                      isPrintableType specType (Just st)
+                  Nothing ->
+                    trace "No specialization found" False
+            Nothing ->
+              trace "No symbol table provided" False
+      other ->
+        trace ("Other type: " ++ show other ++ " -> False") False
 
 addConstraint :: Constraint -> SemCheck ()
 addConstraint constraint = modify $ \s ->

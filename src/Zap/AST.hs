@@ -60,7 +60,7 @@ newtype StructId = StructId Int
 
 data StructDef = StructDef
   { structName :: String,
-    structParams :: [String],
+    structParams :: [Type],
     structFields :: [(String, Type)],
     structId :: StructId
   }
@@ -101,7 +101,7 @@ data Param = Param String Type
   deriving (Show, Eq)
 
 data Decl
-  = DFunc String [String] [Param] Type Expr
+  = DFunc String [Type] [Param] Type Expr
   | DStruct String [(String, Type)]
   deriving (Show, Eq)
 
@@ -150,7 +150,7 @@ data VarType = VarType
 data FunctionDef = FunctionDef
   { funcName :: String,
     funcParams :: [Param],
-    funcTypeParams :: [String],
+    funcTypeParams :: [Type],
     funcRetType :: Type,
     funcBody :: Expr
   }
@@ -214,7 +214,7 @@ registerStruct name fields st =
             error "Symbol table verification failed"
         Right () -> (sid, st')
 
-registerParamStruct :: String -> [String] -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
+registerParamStruct :: String -> [Type] -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
 registerParamStruct name params fields st =
   let sid = nextStructId st
       def =
@@ -236,12 +236,9 @@ registerParamStruct name params fields st =
             error "Symbol table verification failed"
         Right () -> (sid, st')
 
-----------------------------------------------------------------------
--- This is your new substituteStructParams returning (StructDef, SymbolTable)
-----------------------------------------------------------------------
 substituteStructParams ::
   StructDef -> -- The struct whose fields we are substituting
-  [(String, Type)] -> -- The (param -> replacement) list
+  [(Type, Type)] -> -- The (param -> replacement) list
   SymbolTable -> -- Current symbol table
   (StructDef, SymbolTable)
 substituteStructParams def substitutions st =
@@ -286,7 +283,7 @@ substituteFieldType ::
   S.Set StructId -> -- 'seen' set
   String -> -- field name (for debug)
   Type -> -- original field type
-  [(String, Type)] -> -- top-level (param -> replacement) list
+  [(Type, Type)] -> -- top-level (param -> replacement) list
   SymbolTable ->
   (Type, SymbolTable)
 substituteFieldType seen fieldName fieldType substitutions st =
@@ -416,7 +413,7 @@ substituteFieldType seen fieldName fieldType substitutions st =
           ----------------------------------------------------------------
           -- Not a struct => fallback to param substitution
           ----------------------------------------------------------------
-          TypeParam p ->
+          p@(TypeParam _) ->
             -- First try to substitute the type parameter
             trace ("  Substituting parameter" ++ show p) $
               case lookup p substitutions of
@@ -432,12 +429,12 @@ substituteFieldType seen fieldName fieldType substitutions st =
                   (t', curST)
 
     -- fallback param-substitution for e.g. TypeParam "T"
-    substituteOneTypeParam :: (String, Type) -> Type -> Type
-    substituteOneTypeParam (param, replType) ty =
+    substituteOneTypeParam :: (Type, Type) -> Type -> Type
+    substituteOneTypeParam (paramType, replType) ty =
       trace
         ( "\n=== substitute' ===\n"
             ++ "Param: "
-            ++ param
+            ++ show paramType
             ++ "\n"
             ++ "Replacement: "
             ++ show replType
@@ -450,10 +447,10 @@ substituteFieldType seen fieldName fieldType substitutions st =
         )
         $ case ty of
           TypeParam p
-            | p == param ->
+            | TypeParam p == paramType ->
                 trace
                   ( "Substituting param "
-                      ++ p
+                      ++ show p
                       ++ " with "
                       ++ show replType
                   )
@@ -465,7 +462,7 @@ substituteFieldType seen fieldName fieldType substitutions st =
 ----------------------------------------------------------------------
 substituteNestedType ::
   SymbolTable ->
-  [(String, Type)] ->
+  [(Type, Type)] ->
   Type ->
   (Type, SymbolTable)
 substituteNestedType st subs t@(TypeStruct sid name) =
@@ -521,7 +518,7 @@ substituteNestedType st _ t = (t, st)
 --   we can produce "Pair_i64_i32" in one pass.
 substituteAllParamsWithSymbols ::
   -- | The entire (param -> replacement Type) list, e.g. [("S",TypeNum Int64), ("T",TypeNum Int32)]
-  [(String, Type)] ->
+  [(Type, Type)] ->
   Type ->
   SymbolTable ->
   Type
@@ -544,20 +541,20 @@ substituteAllParamsWithSymbols fullSubList t st =
 -- A small helper that can look up *all* relevant subs for a struct
 substituteOneParam ::
   -- | single param name
-  String ->
+  Type ->
   -- | single param replacement
   Type ->
   -- | the entire sub list
-  [(String, Type)] ->
+  [(Type, Type)] ->
   -- | the type we are substituting into
   Type ->
   SymbolTable ->
   Type
-substituteOneParam param repl fullList t st =
+substituteOneParam paramType repl fullList t st =
   trace
     ( "\n=== substituteOneParam (with extra logging) ===\n"
         ++ "param: "
-        ++ param
+        ++ show paramType
         ++ "\nrepl: "
         ++ show repl
         ++ "\nfullList: "
@@ -568,10 +565,10 @@ substituteOneParam param repl fullList t st =
     $ case t of
       -- If this is exactly the type parameter we are substituting:
       TypeParam name
-        | name == param ->
+        | t == paramType ->
             trace
               ( "[DEBUG] We found a matching param ("
-                  ++ name
+                  ++ show paramType
                   ++ "), substituting with "
                   ++ show repl
               )
@@ -620,7 +617,7 @@ substituteOneParam param repl fullList t st =
                             else
                               trace
                                 ( "[DEBUG] param "
-                                    ++ param
+                                    ++ show paramType
                                     ++ " is not relevant to child struct: "
                                     ++ structName'
                                     ++ " => returning original t: "
@@ -638,7 +635,7 @@ substituteOneParam param repl fullList t st =
                     t
       -- Recur if array, etc. (unchanged):
       TypeArray inner ->
-        let newInner = substituteOneParam param repl fullList inner st
+        let newInner = substituteOneParam paramType repl fullList inner st
          in newInner
       -- Otherwise, do nothing:
       other ->
@@ -648,12 +645,12 @@ substituteOneParam param repl fullList t st =
           )
           other
 
-substituteTypeParamWithSymbols :: String -> Type -> Type -> SymbolTable -> Type
-substituteTypeParamWithSymbols param replacement t st =
+substituteTypeParamWithSymbols :: Type -> Type -> Type -> SymbolTable -> Type
+substituteTypeParamWithSymbols paramType replacement t st =
   trace
     ( "\n=== substituteTypeParamWithSymbols ===\n"
         ++ "Param: "
-        ++ param
+        ++ show paramType
         ++ "\n"
         ++ "Replacement: "
         ++ show replacement
@@ -664,7 +661,7 @@ substituteTypeParamWithSymbols param replacement t st =
     $ case t of
       -- If this is exactly the type parameter we are substituting:
       TypeParam name
-        | name == param ->
+        | TypeParam name == paramType ->
             trace
               ("Substituting param " ++ name)
               replacement
@@ -674,13 +671,14 @@ substituteTypeParamWithSymbols param replacement t st =
           case lookupStruct sid st of
             Just def ->
               -- Check if param is in def's structParams
-              if param `elem` structParams def
+              if paramType `elem` structParams def
                 then -- Gather *all* relevant type-substitutions that match def's structParams
 
-                  let relevantSubs =
+                  let childParams = structParams def
+                      relevantSubs =
                         filter
-                          (\(p, _) -> p `elem` structParams def)
-                          ([(param, replacement)] ++ allOtherParams)
+                          (\(outerType, _ty) -> outerType `elem` childParams)
+                          [(paramType, replacement)]
                       -- \^ we add the single (param->replacement) plus
                       --   any others in your environment if needed…
 
@@ -717,24 +715,24 @@ substituteTypeParamWithSymbols param replacement t st =
       -- Recur if array, etc.
       TypeArray inner -> do
         trace ("Found type array: " ++ show inner ++ " recurring...") $
-          TypeArray (substituteTypeParamWithSymbols param replacement inner st)
+          TypeArray (substituteTypeParamWithSymbols paramType replacement inner st)
       _ -> t
   where
     -- If you have a larger "substitutions" map in scope, gather them here:
     -- For example, you might pass in all `(funcTypeParam, Type)` pairs too:
     allOtherParams = [] -- stub
 
-substituteTypeParam :: String -> Type -> Type -> Type
-substituteTypeParam param replacement = go
+substituteTypeParam :: Type -> Type -> Type -> Type
+substituteTypeParam paramType replacement = go
   where
     go t = case t of
-      TypeParam name | name == param -> replacement
+      p@(TypeParam _) | p == paramType -> replacement
       TypeArray inner -> TypeArray (go inner)
       TypeStruct sid name ->
         -- If this struct refers to Box[T], substitute T recursively
         case lookupStruct sid emptySymbolTable of
           Just def
-            | param `elem` structParams def ->
+            | paramType `elem` structParams def ->
                 -- This is a parameterized struct, substitute the type parameter
                 TypeStruct sid (name ++ "_" ++ typeToSuffix replacement)
           _ -> t
@@ -932,7 +930,7 @@ specializeFunctionDef def typeArgs st = do
       }
   where
     -- For each Param, we do a multi-substitution on its type
-    substituteAllInParam :: [(String, Type)] -> SymbolTable -> Param -> Param
+    substituteAllInParam :: [(Type, Type)] -> SymbolTable -> Param -> Param
     substituteAllInParam fullList st' (Param nm ty) =
       let newTy = substituteAllParamsWithSymbols fullList ty st'
        in Param nm newTy

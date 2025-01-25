@@ -30,12 +30,14 @@ data Token
   | TComment String -- Single-line comment
   | TType -- Type keyword
   | TStruct -- Struct keyword
+  | TTypeParam String -- Type parameters (Box[T])
+  | TSpecialize String -- Type specializations (Box[i32])
   | TEOF -- End of file
-  | TLeftParen
-  | TRightParen
-  | TComma
-  | TLeftBracket
-  | TRightBracket
+  | TLeftParen -- Left parentheses
+  | TRightParen -- Right parentheses
+  | TComma -- Comma
+  | TLeftBracket -- Left square bracket
+  | TRightBracket -- Right squarer bracket
   deriving (Show, Eq)
 
 -- Located tokens
@@ -94,22 +96,6 @@ scanTokensWithState state line col (c : cs) = do
       let newState = state {inVectorLit = False}
       rest <- scanTokensWithState newState line (col + 1) cs
       Right (Located TRightParen col line : rest)
-
-    -- ',' -> do
-    --     traceM $ "Found comma at line " ++ show line ++ ", col " ++ show col
-    --     traceM $ "Vector literal context: " ++ show (inVectorLit state)
-    --     traceM $ "Next char: " ++ take 1 (show cs)
-
-    --     let noSpaceAfterComma = null cs || not (isSpace (head cs))
-    --     if inVectorLit state || noSpaceAfterComma
-    --         then do
-    --             traceM "Accepting comma"
-    --             rest <- scanTokensWithState state line (col + 1) cs
-    --             Right (Located TComma col line : rest)
-    --         else do
-    --             traceM "Rejecting comma - requires space after"
-    --             throwError $ InvalidCharacter ',' line col
-
     ',' -> do
       traceM $ "Found comma at line " ++ show line ++ ", col " ++ show col
       let skipWhitespace = dropWhile isSpace cs
@@ -152,8 +138,40 @@ scanTokensWithState state line col (c : cs) = do
       lexNumber line col [c] cs
     _ | isAlpha c -> do
       traceM $ "scanTokens: Starting word"
-      lexWord line col [c] cs
+      let (word, rest) = span isValidIdChar cs
+          fullWord = c : word
+      if isTypeParam fullWord
+        then do
+          -- Handle type parameter
+          let tok = Located (TTypeParam fullWord) col line
+          rest' <- scanTokensWithState state line (col + length fullWord) rest
+          Right (tok : rest')
+        else
+          if isTypeSpecialization fullWord
+            then do
+              -- Handle type specialization
+              let tok = Located (TSpecialize fullWord) col line
+              rest' <- scanTokensWithState state line (col + length fullWord) rest
+              Right (tok : rest')
+            else do
+              -- Handle regular word (existing logic)
+              let tok = createWordToken fullWord col line
+              rest' <- scanTokensWithState state line (col + length fullWord) rest
+              Right (tok : rest')
     _ -> Left $ InvalidCharacter c line col
+
+-- Helper to determine if a character can be used to compose an identifier
+isValidIdChar :: Char -> Bool
+isValidIdChar c = isAlpha c || isDigit c || c == '_'
+
+-- Helper to identify type parameters (single uppercase letters)
+isTypeParam :: String -> Bool
+isTypeParam [c] = C.isUpper c
+isTypeParam _ = False
+
+-- Helper to identify type specializations
+isTypeSpecialization :: String -> Bool
+isTypeSpecialization s = s `elem` ["i32", "i64", "f32", "f64"]
 
 lexOperator :: Int -> Int -> String -> String -> LexerState -> Either LexError [Located]
 lexOperator line col acc cs state = do
@@ -230,20 +248,6 @@ isValidTypeSuffix c = isAlphaNum c || c == '_'
 -- Helper to validate complete type specifications
 isValidTypeSpec :: String -> Bool
 isValidTypeSpec s = s `elem` ["i32", "i64", "f32", "f64"]
-
--- Lexer for words
-lexWord :: Int -> Int -> String -> String -> Either LexError [Located]
-lexWord line col acc [] = do
-  let tok = createWordToken (reverse acc) col line
-  Right [tok, Located TEOF (col + length acc) line]
-lexWord line col acc (c : cs)
-  | isAlphaNum c || c == '_' = lexWord line col (c : acc) cs
-  | otherwise = do
-      let tok = createWordToken (reverse acc) col line
-      rest <- scanTokens line (col + length acc) (c : cs)
-      case rest of
-        [] -> Right [tok, Located TEOF (col + length acc) line]
-        rs -> Right (tok : rs)
 
 createWordToken :: String -> Int -> Int -> Located
 createWordToken word col line = Located token col line

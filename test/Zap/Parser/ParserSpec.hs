@@ -133,7 +133,7 @@ spec = do
               name `shouldBe` "Nested"
               case lookupStruct sid st of
                 Just def -> do
-                  structParams def `shouldBe` ["T"]
+                  structParams def `shouldBe` [TypeParam "T"]
                   let innerType = lookup "inner" (structFields def)
                   innerType `shouldBe` Just (TypeStruct (StructId 0) "Box")
                 Nothing ->
@@ -184,7 +184,7 @@ spec = do
             case lookupStruct sid st of
               Just def -> do
                 structName def `shouldBe` "Box"
-                structParams def `shouldBe` ["T"]
+                structParams def `shouldBe` [TypeParam "T"]
                 structFields def `shouldBe` [("value", TypeParam "T")]
               Nothing -> expectationFailure "Struct not found in symbol table"
           _ -> expectationFailure $ "Unexpected parse result: " ++ show tops
@@ -201,7 +201,7 @@ spec = do
             name `shouldBe` "Box"
             case lookupStruct sid st of
               Just def -> do
-                structParams def `shouldBe` ["T"]
+                structParams def `shouldBe` [TypeParam "T"]
                 structFields def `shouldBe` [("value", TypeParam "T")]
               Nothing -> expectationFailure "Struct not found in symbol table"
           _ -> expectationFailure $ "Unexpected parse result: " ++ show tops
@@ -269,7 +269,7 @@ spec = do
             case lookupStruct sid st of
               Just def -> do
                 structName def `shouldBe` "Box"
-                structParams def `shouldBe` ["T"]
+                structParams def `shouldBe` [TypeParam "T"]
                 structFields def `shouldBe` [("value", TypeParam "T")]
               Nothing -> expectationFailure "Base struct not found"
           _ -> expectationFailure $ "Unexpected top level structure: " ++ show tops
@@ -417,7 +417,7 @@ spec = do
               TLType _ (TypeStruct sid1 _) -> do
                 case lookupStruct sid1 st of
                   Just def -> do
-                    structParams def `shouldBe` ["S"]
+                    structParams def `shouldBe` [TypeParam "S"]
                     structFields def `shouldBe` [("data", TypeParam "S")]
                   Nothing -> expectationFailure "Box struct not found"
               TLType _ typ ->
@@ -427,7 +427,7 @@ spec = do
               TLType _ (TypeStruct sid2 _) -> do
                 case lookupStruct sid2 st of
                   Just def -> do
-                    structParams def `shouldBe` ["S", "T"]
+                    structParams def `shouldBe` [TypeParam "S", TypeParam "T"]
                     structFields def
                       `shouldBe` [ ("inner", TypeStruct (StructId 0) "Box"),
                                    ("second", TypeParam "S")
