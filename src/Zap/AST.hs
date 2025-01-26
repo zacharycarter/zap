@@ -29,6 +29,7 @@ module Zap.AST
     registerVarType,
     lookupVarType,
     specializeFunctionDef,
+    substituteFieldType,
     substituteTypeParam,
     substituteTypeParamWithSymbols,
     getMultiParamName,
@@ -237,47 +238,154 @@ registerParamStruct name params fields st =
         Right () -> (sid, st')
 
 substituteStructParams :: StructDef -> [(Type, Type)] -> SymbolTable -> (StructDef, SymbolTable)
-substituteStructParams def substitutions st = do
-  trace
-    ( "\n=== substituteStructParams ===\n"
-        ++ "Input def: "
-        ++ show def
-        ++ "Using nextStructId: "
-        ++ show (nextStructId st)
-        ++ "\n"
-        ++ "For struct: "
-        ++ structName def
-        ++ "\nSubstitutions: "
-        ++ show substitutions
-        ++ "\nPre-substitution structDefs: "
-        ++ show (M.toList $ structDefs st)
-    )
-    $
-    -- We'll fold over each field, accumulating (newFields, updatedSymTab).
-    let (newFields, finalST) =
-          foldl
-            ( \(accFields, curST) (fname, ftype) ->
-                let (newType, curST') =
-                      substituteFieldType
-                        (S.singleton (structId def))
-                        fname
-                        ftype
-                        substitutions
-                        curST
-                 in (accFields ++ [(fname, newType)], curST')
-            )
-            ([], st)
-            (structFields def)
+substituteStructParams def substitutions st =
+  do
+    trace
+      ( "\n=== substituteStructParams ===\n"
+          ++ "Input def: "
+          ++ show def
+          ++ "\n"
+          ++ "Using nextStructId: "
+          ++ show (nextStructId st)
+          ++ "\n"
+          ++ "For struct: "
+          ++ structName def
+          ++ "\n"
+          ++ "Substitutions: "
+          ++ show substitutions
+          ++ "\n"
+          ++ "Pre-substitution structDefs: "
+          ++ show (M.toList $ structDefs st)
+      )
+    $ let (newFields, finalST) =
+            foldl
+              ( \(accFields, curST) (fname, ftype) ->
+                  do
+                    trace
+                      ( "\n=== Processing field "
+                          ++ fname
+                          ++ " ===\n"
+                          ++ "Current type: "
+                          ++ show ftype
+                          ++ "\n"
+                          ++ "Current symbol table state: "
+                          ++ show curST
+                      )
+                    $ let ((newType, newST), curST') = case ftype of
+                            TypeStruct sid name -> do
+                              trace
+                                ( "\n=== Found struct field type ===\n"
+                                    ++ "Struct name: "
+                                    ++ name
+                                    ++ "\n"
+                                    ++ "Struct ID: "
+                                    ++ show sid
+                                )
+                              $ case lookupStruct sid curST of
+                                Just fieldDef
+                                  | not (null (structParams fieldDef)) ->
+                                      do
+                                        trace
+                                          ( "\n=== Found generic struct field ===\n"
+                                              ++ "Field definition: "
+                                              ++ show fieldDef
+                                              ++ "\n"
+                                              ++ "Type parameters: "
+                                              ++ show (structParams fieldDef)
+                                          )
+                                        $ let specName = name ++ "_" ++ typeToSuffix (snd $ head substitutions)
+                                              (_, newST) =
+                                                registerSpecializedStruct
+                                                  specName
+                                                  fieldDef
+                                                  [snd $ head substitutions]
+                                                  curST
+                                              _ =
+                                                trace
+                                                  ( "\n=== Created specialized struct ===\n"
+                                                      ++ "Specialized name: "
+                                                      ++ specName
+                                                      ++ "\n"
+                                                      ++ "Updated symbol table: "
+                                                      ++ show newST
+                                                  )
+                                              (subType, subST) =
+                                                substituteFieldType
+                                                  (S.singleton sid)
+                                                  fname
+                                                  ftype
+                                                  substitutions
+                                                  newST
+                                           in ((subType, subST), newST)
+                                _ ->
+                                  do
+                                    trace
+                                      ( "\n=== Processing non-generic struct field ===\n"
+                                          ++ "Using direct field type substitution"
+                                      )
+                                    $ let (subType, subST) =
+                                            substituteFieldType
+                                              (S.singleton sid)
+                                              fname
+                                              ftype
+                                              substitutions
+                                              curST
+                                       in ((subType, subST), curST)
+                            _ ->
+                              do
+                                trace
+                                  ( "\n=== Processing non-struct field ===\n"
+                                      ++ "Field type: "
+                                      ++ show ftype
+                                  )
+                                $ let (subType, subST) =
+                                        substituteFieldType
+                                          (S.singleton (structId def))
+                                          fname
+                                          ftype
+                                          substitutions
+                                          curST
+                                   in ((subType, subST), curST)
 
-        newDef =
-          StructDef
-            { structName = structName def, -- KEEP original name during substitution
-              structParams = [], -- Clear params
-              structFields = newFields,
-              structId = structId def
-            }
-     in trace ("Post-substitution def: " ++ show newDef) $
-          (newDef, finalST)
+                                  -- Field substitution result trace moved inside case expression
+                       in trace
+                            ( "\n=== Field substitution result ===\n"
+                                ++ "Field: "
+                                ++ fname
+                                ++ "\n"
+                                ++ "Original type: "
+                                ++ show ftype
+                                ++ "\n"
+                                ++ "New type: "
+                                ++ show newType
+                                ++ "\n"
+                                ++ "Updated symbol table state: "
+                                ++ show newST
+                            )
+                            $ (accFields ++ [(fname, newType)], newST)
+              )
+              ([], st)
+              (structFields def)
+
+          newDef =
+            def
+              { structName = structName def,
+                structParams = [], -- Clear params since we're specialized now
+                structFields = newFields,
+                structId = structId def
+              }
+       in trace
+            ( "\n=== substituteStructParams result ===\n"
+                ++ "Original struct: "
+                ++ show def
+                ++ "\n"
+                ++ "Specialized struct: "
+                ++ show newDef
+                ++ "\n"
+                ++ "Final symbol table state: "
+                ++ show finalST
+            )
+            $ (newDef, finalST)
 
 ----------------------------------------------------------------------
 -- Single field substitution => returns (Type, SymbolTable)
@@ -291,18 +399,30 @@ substituteFieldType ::
   (Type, SymbolTable)
 substituteFieldType seen fieldName fieldType substitutions st =
   trace
-    ( "\n=== substituteFieldType ==="
-        ++ "\nField name: "
+    ( "\n=== substituteFieldType ===\n"
+        ++ "Processing field: "
         ++ fieldName
-        ++ "\nOriginal type: "
+        ++ "\n"
+        ++ "With type: "
         ++ show fieldType
-        ++ "\nSubstitutions attempting: "
+        ++ "\n"
+        ++ "With substitutions: "
         ++ show substitutions
-        ++ "\nSeen structs: "
+        ++ "\n"
+        ++ "With seen structs: "
         ++ show seen
+        ++ "\n"
+        ++ "Current nextStructId: "
+        ++ show (nextStructId st)
     )
     $ let (newType, st2) = go fieldType st
-       in trace ("New field type: " ++ show newType) (newType, st2)
+       in trace
+            ( "Resulting type: "
+                ++ show newType
+                ++ "\nNew nextStructId: "
+                ++ show (nextStructId st2)
+            )
+            (newType, st2)
   where
     go :: Type -> SymbolTable -> (Type, SymbolTable)
     go t curST =
@@ -326,24 +446,66 @@ substituteFieldType seen fieldName fieldType substitutions st =
           ----------------------------------------------------------------
           TypeUnresolved name ->
             trace ("Resolving unresolved type: " ++ name) $
+              -- When resolving a struct name, see if we need to specialize it
               case M.lookup name (structNames curST) of
                 Just sid ->
                   let resolvedType = TypeStruct sid name
-                      -- Recursively apply substitution to resolved type
-                      (specType, st3) =
-                        substituteNestedType curST substitutions resolvedType
-                   in trace
-                        ( "Resolved unresolved type "
-                            ++ name
-                            ++ " => "
-                            ++ show specType
-                        )
-                        (specType, st3)
+                   in case lookupStruct sid curST of
+                        Just def ->
+                          trace
+                            ( "\nFound struct definition for "
+                                ++ name
+                                ++ ":"
+                                ++ "\n  Definition: "
+                                ++ show def
+                                ++ "\n  Has params: "
+                                ++ show (not $ null $ structParams def)
+                                ++ "\n  Current substitutions: "
+                                ++ show substitutions
+                            )
+                            $ if not (null (structParams def)) && not (null substitutions)
+                              then -- If the struct has type params and we have substitutions,
+                              -- create a specialized version
+
+                                let specializedName = name ++ "_" ++ typeToSuffix (snd $ head substitutions)
+                                    (sid', st') =
+                                      registerSpecializedStruct
+                                        specializedName
+                                        def
+                                        [snd $ head substitutions]
+                                        curST
+                                    specType = TypeStruct sid' specializedName
+                                 in trace
+                                      ( "\nSpecialized "
+                                          ++ name
+                                          ++ ":"
+                                          ++ "\n  Specialized name: "
+                                          ++ specializedName
+                                          ++ "\n  New struct ID: "
+                                          ++ show sid'
+                                          ++ "\n  Resulting type: "
+                                          ++ show specType
+                                      )
+                                      (specType, st')
+                              else
+                                trace
+                                  ("\nUsing unspecialized type: " ++ show resolvedType)
+                                  (resolvedType, curST)
+                        Nothing ->
+                          trace
+                            ( "No struct definition found for "
+                                ++ name
+                                ++ " (sid: "
+                                ++ show sid
+                                ++ "); using resolved type: "
+                                ++ show resolvedType
+                            )
+                            (resolvedType, curST)
                 Nothing ->
                   trace
                     ( "No struct named "
                         ++ name
-                        ++ " in structNames; leaving as is"
+                        ++ " in structNames; leaving as TypeUnresolved"
                     )
                     (t, curST)
           ----------------------------------------------------------------
@@ -391,6 +553,21 @@ substituteFieldType seen fieldName fieldType substitutions st =
                       ++ show replType
                   )
                   replType
+          -- Add this case:
+          TypeStruct sid name -> do
+            case lookupStruct sid st of
+              Just def -> do
+                -- If this struct has the parameter we're substituting, create specialized version
+                if paramType `elem` structParams def
+                  then
+                    let newFields =
+                          [ (fname, substituteOneTypeParam (paramType, replType) ftype)
+                            | (fname, ftype) <- structFields def
+                          ]
+                        specializedName = name ++ "_" ++ typeToSuffix replType
+                     in TypeStruct sid specializedName -- Use existing sid but specialized name
+                  else ty
+              Nothing -> ty
           _ -> ty
 
 ----------------------------------------------------------------------
@@ -734,93 +911,91 @@ substituteTypeParam paramType replacement = go
 ----------------------------------------------------------------------
 registerSpecializedStruct :: String -> StructDef -> [Type] -> SymbolTable -> (StructId, SymbolTable)
 registerSpecializedStruct specializationName baseDef paramTypes st = do
-  let sid = nextStructId st
   trace
     ( "\n=== registerSpecializedStruct ===\n"
-        ++ "Base struct: "
-        ++ show baseDef
+        ++ "Starting nextStructId: "
+        ++ show (nextStructId st)
         ++ "\n"
-        ++ "Specialization Name: "
+        ++ "Registering: "
         ++ specializationName
+        ++ "\n"
+        ++ "Base def:"
+        ++ show baseDef
         ++ "\n"
         ++ "Param types: "
         ++ show paramTypes
         ++ "\n"
-        ++ "Current symbol table: "
-        ++ show st
+        ++ "Current structNames: "
+        ++ show (M.keys $ structNames st)
         ++ "\n"
-        ++ "Will use nextStructId: "
-        ++ show sid
+        ++ "Current structDefs: "
+        ++ show (M.keys $ structDefs st)
     )
     $ case M.lookup specializationName (structNames st) of
       Just existingSid -> do
         trace
           ( "Found existing specialization: "
               ++ specializationName
-              ++ " with sid: "
+              ++ "\nSID: "
               ++ show existingSid
+              ++ "\nCurrently maps to: "
+              ++ show (M.lookup existingSid (structDefs st))
           )
           $ case M.lookup existingSid (structDefs st) of
             Just existingDef -> do
               trace ("Found definition: " ++ show existingDef) $
                 (existingSid, st)
-            Nothing -> do
-              let substitutions = zip (structParams baseDef) paramTypes
-                  (specializedDef, st1) = substituteStructParams baseDef substitutions st
-                  newDef =
-                    specializedDef
-                      { structName = specializationName,
-                        structId = sid,
-                        structParams = []
-                      }
-                  st2 =
-                    st1
-                      { nextStructId = incSid sid,
-                        structDefs = M.insert sid newDef (structDefs st1),
-                        structNames = M.insert specializationName sid (structNames st1)
-                      }
-              trace
-                ( "\n=== Creating new specialized struct ===\n"
-                    ++ "New SID: "
-                    ++ show sid
-                    ++ "\n"
-                    ++ "New def: "
-                    ++ show newDef
-                    ++ "\n"
-                    ++ "Updated nextStructId: "
-                    ++ show (nextStructId st2)
-                )
-                $ registerConstructor specializationName sid newDef st2
-      Nothing -> do
-        let substitutions = zip (structParams baseDef) paramTypes
-            (specializedDef, st1) = substituteStructParams baseDef substitutions st
-            newDef =
-              specializedDef
-                { structName = specializationName,
-                  structId = sid,
-                  structParams = []
-                }
-            st2 =
-              st1
-                { nextStructId = incSid sid,
-                  structDefs = M.insert sid newDef (structDefs st1),
-                  structNames = M.insert specializationName sid (structNames st1)
-                }
-        trace
-          ( "\n=== Creating fresh specialized struct ===\n"
-              ++ "Using SID: "
-              ++ show sid
-              ++ "\n"
-              ++ "Struct def: "
-              ++ show newDef
-              ++ "\n"
-              ++ "Current structDefs: "
-              ++ show (structDefs st2)
-              ++ "\n"
-              ++ "Current structNames: "
-              ++ show (structNames st2)
-          )
-          $ registerConstructor specializationName sid newDef st2
+            Nothing ->
+              -- Fall through to registration path with existingSid
+              registerNewSpecialization existingSid specializationName baseDef paramTypes st
+      Nothing ->
+        -- Fall through to registration path with next available ID
+        registerNewSpecialization (nextStructId st) specializationName baseDef paramTypes st
+
+-- Helper to handle the actual struct registration and symbol table updates
+registerNewSpecialization :: StructId -> String -> StructDef -> [Type] -> SymbolTable -> (StructId, SymbolTable)
+registerNewSpecialization sid specializationName baseDef paramTypes st = do
+  -- First increment the next ID to prevent reuse
+  let st0 = st {nextStructId = incSid sid}
+
+  -- Then substitute params and create specialized def
+  let substitutions = zip (structParams baseDef) paramTypes
+  let (specializedDef, st1) = substituteStructParams baseDef substitutions st0
+
+  let newDef =
+        specializedDef
+          { structName = specializationName,
+            structId = sid,
+            structParams = []
+          }
+
+  -- Create updated symbol table
+  let st2 =
+        st1
+          { structDefs = M.insert sid newDef (structDefs st1),
+            structNames = M.insert specializationName sid (structNames st1)
+          }
+
+  trace
+    ( "\n=== Registering new specialization ===\n"
+        ++ "Using SID: "
+        ++ show sid
+        ++ "\n"
+        ++ "For struct: "
+        ++ specializationName
+        ++ "\n"
+        ++ "Definition: "
+        ++ show newDef
+        ++ "\n"
+        ++ "Old nextStructId: "
+        ++ show (nextStructId st)
+        ++ "\n"
+        ++ "New nextStructId: "
+        ++ show (nextStructId st2)
+    )
+    $ case verifySymbolTable st2 of
+      Left err -> error $ "Invalid symbol table after specialization: " ++ err
+      Right () -> registerConstructor specializationName sid newDef st2
 
 registerConstructor :: String -> StructId -> StructDef -> SymbolTable -> (StructId, SymbolTable)
 registerConstructor name sid def st =
@@ -1002,34 +1177,57 @@ getMultiParamName base ts =
 verifySymbolTable :: SymbolTable -> Either String ()
 verifySymbolTable st = do
   trace "\n=== verifySymbolTable ===" $
-    trace ("Checking structNames: " ++ show (M.toList $ structNames st)) $
-      trace ("Against structDefs: " ++ show (M.toList $ structDefs st)) $
-        do
-          -- Check all names have valid defs
-          forM_ (M.toList $ structNames st) $ \(name, sid) -> do
-            trace ("\nChecking name " ++ name ++ " (sid: " ++ show sid ++ ")") $
-              case M.lookup sid (structDefs st) of
-                Nothing -> Left $ "Found name " ++ name ++ " with sid " ++ show sid ++ " but no matching def"
-                Just def -> do
-                  trace ("Found def: " ++ show def) $
-                    let baseMatch = structName def == name
-                        specMatch = case break (== '_') name of
-                          (base, '_' : _) -> structName def == base
-                          _ -> False
-                     in do
-                          trace ("baseMatch: " ++ show baseMatch ++ ", specMatch: " ++ show specMatch) $
-                            if not (baseMatch || specMatch)
-                              then Left $ "Name mismatch: " ++ name ++ " maps to def named " ++ structName def
-                              else Right ()
+    trace ("Checking consistency for " ++ show (M.size $ structNames st) ++ " structs") $
+      trace ("Checking structNames: " ++ show (M.toList $ structNames st)) $
+        trace ("Against structDefs: " ++ show (M.toList $ structDefs st)) $
+          trace ("Current nextStructId: " ++ show (nextStructId st)) $
+            do
+              -- Check nextStructId is greater than all used IDs
+              let StructId next = nextStructId st
+              let usedIds = map (\(StructId n) -> n) $ M.keys (structDefs st)
+              when (not $ null usedIds) $
+                when (next <= maximum usedIds) $
+                  Left $
+                    "nextStructId "
+                      ++ show next
+                      ++ " is not greater than max used id "
+                      ++ show (maximum usedIds)
 
-          -- Check all defs have valid names
-          forM_ (M.toList $ structDefs st) $ \(sid, def) ->
-            case M.lookup (structName def) (structNames st) of
-              Nothing -> Left $ "Found def for " ++ structName def ++ " but no name mapping"
-              Just mappedSid
-                | mappedSid /= sid ->
-                    Left $ "ID mismatch: def has " ++ show sid ++ " but name maps to " ++ show mappedSid
-                | otherwise -> Right ()
+              -- Check no ID is used by multiple defs
+              let idToNames =
+                    M.fromListWith
+                      (++)
+                      [(sid, [name]) | (name, sid) <- M.toList $ structNames st]
+              forM_ (M.toList idToNames) $ \(sid, names) ->
+                when (length names > 1) $
+                  Left $
+                    "StructId " ++ show sid ++ " maps to multiple names: " ++ show names
+
+              -- Existing name->def validation
+              forM_ (M.toList $ structNames st) $ \(name, sid) -> do
+                trace ("\nChecking name " ++ name ++ " (sid: " ++ show sid ++ ")") $
+                  case M.lookup sid (structDefs st) of
+                    Nothing -> Left $ "Found name " ++ name ++ " with sid " ++ show sid ++ " but no matching def"
+                    Just def -> do
+                      trace ("Found def: " ++ show def) $
+                        let baseMatch = structName def == name
+                            specMatch = case break (== '_') name of
+                              (base, '_' : _) -> structName def == base
+                              _ -> False
+                         in do
+                              trace ("baseMatch: " ++ show baseMatch ++ ", specMatch: " ++ show specMatch) $
+                                if not (baseMatch || specMatch)
+                                  then Left $ "Name mismatch: " ++ name ++ " maps to def named " ++ structName def
+                                  else Right ()
+
+              -- Existing def->name validation
+              forM_ (M.toList $ structDefs st) $ \(sid, def) ->
+                case M.lookup (structName def) (structNames st) of
+                  Nothing -> Left $ "Found def for " ++ structName def ++ " but no name mapping"
+                  Just mappedSid
+                    | mappedSid /= sid ->
+                        Left $ "ID mismatch: def has " ++ show sid ++ " but name maps to " ++ show mappedSid
+                    | otherwise -> Right ()
 
 -- Helper to check if a label is a function label
 isFunctionLabel :: String -> Bool

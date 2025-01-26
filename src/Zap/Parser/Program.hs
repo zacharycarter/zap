@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Zap.Parser.Program
@@ -456,7 +457,7 @@ parseStructFields = do
 
 parseStructField :: Parser (String, Type)
 parseStructField = do
-  traceM $ "\n=== parseStructField ==="
+  traceM "\n=== parseStructField ==="
   st <- get
   traceM $ "Current tokens: " ++ show (take 3 $ stateTokens st)
 
@@ -465,8 +466,38 @@ parseStructField = do
 
   _ <- matchToken (== TColon) "colon"
 
-  fieldType <- parseType
-  traceM $ "Parsed field type: " ++ show fieldType
+  fieldType <- do
+    -- Handle field type reference with type param list
+    tok <-
+      matchToken
+        ( \case
+            TWord _ -> True
+            TTypeParam _ -> True
+            _ -> False
+        )
+        "field type"
+    case locToken tok of
+      TWord typeName -> do
+        nextToks <- gets stateTokens
+        case nextToks of
+          (tok' : _) | locToken tok' == TLeftBracket -> do
+            -- Field type has type params, e.g. Box[T]
+            _ <- matchToken (== TLeftBracket) "["
+            params <- parseTypeParams
+            _ <- matchToken (== TRightBracket) "]"
+            case M.lookup typeName (structNames $ stateSymTable st) of
+              Just sid -> do
+                -- Look up base struct
+                case lookupStruct sid (stateSymTable st) of
+                  Just def -> do
+                    -- Use all type params
+                    let typeArgs = params
+                    return $ TypeStruct sid typeName
+                  Nothing -> throwError $ UnexpectedToken tok "struct type not found"
+              Nothing -> return $ TypeUnresolved typeName
+          _ -> parseTypeToken tok
+      TTypeParam param -> return $ TypeParam param
+      _ -> throwError $ UnexpectedToken tok "field type"
 
   let fieldName = case locToken name of
         TWord fn -> fn

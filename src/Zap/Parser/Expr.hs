@@ -19,6 +19,7 @@ module Zap.Parser.Expr
     parseWhileExpr,
     parseMaybeCall,
     parseType,
+    parseTypeToken,
     parseTypeParams,
     isPrint,
     isStringLit,

@@ -374,11 +374,15 @@ spec = do
         case M.lookup "Nested_i32" (structNames st) of
           Nothing -> expectationFailure "Specialized Nested not found"
           Just sid -> case lookupStruct sid st of
-            Just def ->
-              structFields def
-                `shouldBe` [ ("inner", TypeStruct (StructId 2) "Box_i32"), -- Should reference specialized Box
-                             ("value", TypeNum Int32)
-                           ]
+            Just def -> do
+              -- First lookup Box_i32's ID
+              case M.lookup "Box_i32" (structNames st) of
+                Nothing -> expectationFailure "Box_i32 not found when checking Nested_i32 fields"
+                Just boxSid ->
+                  structFields def
+                    `shouldBe` [ ("inner", TypeStruct boxSid "Box_i32"),
+                                 ("value", TypeNum Int32)
+                               ]
             Nothing -> expectationFailure "Could not lookup specialized Nested"
 
   describe "Field access type tracking" $ do
