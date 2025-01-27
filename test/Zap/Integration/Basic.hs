@@ -526,5 +526,16 @@ migratedTests =
             ],
         expectedOutput = "42\n",
         expectedExitCode = ExitSuccess
+      },
+    TestCase
+      { testName = "option_creation",
+        sourceCode =
+          T.unlines
+            [ "let x = Some(42'i32)",
+              "let y = None[i32]()",
+              "print 1" -- Just verify it compiles for now
+            ],
+        expectedOutput = "1\n",
+        expectedExitCode = ExitSuccess
       }
   ]

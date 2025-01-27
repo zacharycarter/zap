@@ -130,7 +130,7 @@ type SemCheck a = StateT Environment (Except SemanticError) a
 initialEnv :: SymbolTable -> Environment
 initialEnv symTable =
   Environment
-    { envSymbols = symTable,
+    { envSymbols = registerOptionConstructors symTable, -- Add option constructors
       envBlocks = [],
       envNextVar = 0,
       envConstraints = [],
@@ -147,15 +147,17 @@ parseSymTable (Program tops) = Just $ foldr collectStructs emptySymbolTable tops
        in newSt
     collectStructs _ st = st
 
--- | Main analysis entry points (keep existing API)
+-- | Main analysis entry points
 analyze :: Program -> Either SemanticError Program
-analyze prog@(Program _tops) = case parseSymTable prog of
-  Just symTable -> analyzeWithSymbols prog symTable
+analyze prog@(Program tops) = case parseSymTable prog of
+  Just symTable -> fmap fst $ analyzeWithSymbols prog symTable
   Nothing -> Left $ UndefinedStruct "Failed to get symbol table"
 
-analyzeWithSymbols :: Program -> SymbolTable -> Either SemanticError Program
-analyzeWithSymbols prog@(Program _tops) symTable =
-  runExcept $ evalStateT (analyzeProgramPhases prog) (initialEnv symTable)
+analyzeWithSymbols :: Program -> SymbolTable -> Either SemanticError (Program, SymbolTable)
+analyzeWithSymbols prog@(Program tops) symTable =
+  runExcept $ do
+    (prog', finalState) <- runStateT (analyzeProgramPhases prog) (initialEnv symTable)
+    return (prog', envSymbols finalState)
 
 -- | Phased program semantic analysis
 analyzeProgramPhases :: Program -> SemCheck Program
@@ -650,8 +652,21 @@ inferExpr e = do
       traceM $ "\n=== Let binding ==="
       traceM $ "Binding " ++ name ++ " with type " ++ show valType
 
-      -- For struct constructor calls, ensure we store the struct type
+      -- Check declared type if one exists
       st <- gets envSymbols
+      case lookupVarType name st of
+        Just declaredType -> do
+          traceM $ "Found declared type: " ++ show declaredType
+          addConstraint
+            ( CEquality declaredType valType $
+                "Type mismatch in let binding - expected "
+                  ++ show declaredType
+                  ++ " but got "
+                  ++ show valType
+            )
+        Nothing -> return ()
+
+      -- Store final type
       let finalType = case val of
             Call structName' _ ->
               case M.lookup structName' (structNames st) of
@@ -769,6 +784,21 @@ inferExpr e = do
 
       traceM $ "Print type check passed"
       return (TypeVoid, Call "print" [arg'])
+    Call "Some" [arg] -> do
+      (argType, arg') <- inferExpr arg
+      return (TypeOption argType, Call "Some" [arg'])
+    Call fname@('N' : 'o' : 'n' : 'e' : '_' : typeSuffix) [] -> do
+      traceM $ "\n=== Processing None call ==="
+      traceM $ "Function name: " ++ fname
+      traceM $ "Type suffix: " ++ typeSuffix
+      let paramType = case typeSuffix of
+            "i32" -> TypeNum Int32
+            "i64" -> TypeNum Int64
+            "f32" -> TypeNum Float32
+            "f64" -> TypeNum Float64
+            _ -> error $ "Invalid type suffix in None call: " ++ typeSuffix
+      traceM $ "Inferred parameter type: " ++ show paramType
+      return (TypeOption paramType, Call fname [])
     Call name args -> do
       -- For other function calls, look up function in symbol table
       syms <- gets envSymbols
@@ -1069,30 +1099,48 @@ inferExpr e = do
 
 -- | Constraint solving
 solveConstraints :: [Constraint] -> SemCheck Substitution
-solveConstraints = foldM solveConstraint emptySubst
+solveConstraints constraints = do
+  traceM $ "\n=== solveConstraints ==="
+  traceM $ "Solving constraints: " ++ show constraints
+  foldM solveConstraint emptySubst constraints
   where
     solveConstraint :: Substitution -> Constraint -> SemCheck Substitution
-    solveConstraint subst (CEquality t1 t2 src) = do
-      lift $
-        unifyTypes t1 t2 src >>= \s ->
-          return $ composeSubst s subst
-    solveConstraint subst (CTruthable t src) = do
-      case t of
-        TypeBool -> return subst
-        TypeNum _ -> return subst
-        TypeParam _ -> do
-          u <- lift $ unifyTruthable t src
-          return $ composeSubst u subst
-        _ -> throwError $ TypeError t TypeBool "Type is not truthable"
-    solveConstraint subst (CBreakable _) = return subst
+    solveConstraint subst constraint = do
+      traceM $ "\n=== solveConstraint ==="
+      traceM $ "Current substitution: " ++ show subst
+      traceM $ "Processing constraint: " ++ show constraint
+
+      result <- case constraint of
+        CEquality t1 t2 src -> do
+          traceM $ "Unifying types: " ++ show t1 ++ " = " ++ show t2
+          traceM $ "Source: " ++ src
+          lift $ do
+            s <- unifyTypes t1 t2 src False -- No implicit conversions in equality constraints
+            let composed = composeSubst s subst
+            traceM $ "Unification result: " ++ show composed
+            return composed
+        CTruthable t src -> do
+          traceM $ "Checking truthable constraint: " ++ show t
+          case t of
+            TypeBool -> return subst
+            TypeNum _ -> return subst
+            TypeParam _ -> do
+              u <- lift $ unifyTruthable t src
+              return $ composeSubst u subst
+            _ -> throwError $ TypeError t TypeBool "Type is not truthable"
+        CBreakable _ -> return subst
+
+      traceM $ "Result: " ++ show result
+      return result
 
 -- | Type unification
-unifyTypes :: Type -> Type -> String -> Except SemanticError Substitution
-unifyTypes t1 t2 src = do
+unifyTypes :: Type -> Type -> String -> Bool -> Except SemanticError Substitution
+unifyTypes t1 t2 src allowImplicit = do
   traceM $ "\n=== unifyTypes ==="
   traceM $ "t1: " ++ show t1
   traceM $ "t2: " ++ show t2
   traceM $ "source: " ++ src
+  traceM $ "allow implicit: " ++ show allowImplicit
 
   let result = case (t1, t2) of
         _ | t1 == t2 -> return emptySubst
@@ -1100,14 +1148,12 @@ unifyTypes t1 t2 src = do
           if occursCheck name t2
             then throwError $ TypeError t1 t2 ("Infinite type in " ++ src)
             else return $ singleSubst name t2
-        (_, TypeParam _) -> unifyTypes t2 t1 src
+        (_, TypeParam _) -> unifyTypes t2 t1 src allowImplicit
         (TypeNum n1, TypeNum n2) ->
-          if n1 == n2 || (isImplicitlyConvertible n1 n2)
+          if n1 == n2 || (allowImplicit && isImplicitlyConvertible n1 n2)
             then return emptySubst
             else throwError $ TypeError t1 t2 ("Numeric type mismatch in " ++ src)
-        -- New case: Handle specialized struct types
-        (TypeStruct _ name1, TypeStruct _ name2) -> do
-          -- Allow matching specialized version with generic version
+        (TypeStruct _ name1, TypeStruct _ name2) ->
           if stripSpecialization name1 == stripSpecialization name2
             then return emptySubst
             else throwError $ TypeError t1 t2 ("Struct type mismatch in " ++ src)
@@ -1139,11 +1185,12 @@ unifyTruthable t src
 -- | Helper functions
 isImplicitlyConvertible :: NumType -> NumType -> Bool
 isImplicitlyConvertible from to = case (from, to) of
-  (Int32, Int64) -> True -- Allow implicit widening
-  (Float32, Float64) -> True
-  (Int32, Float32) -> True
-  (Int32, Float64) -> True
-  (Int64, Float64) -> True
+  (Int32, Int64) -> True -- Allow widening from i32 to i64
+  (Float32, Float64) -> True -- Allow widening from f32 to f64
+  (Int32, Float32) -> True -- Allow int32 to float32 (safe)
+  (Int32, Float64) -> True -- Allow int32 to float64 (safe)
+  (Int64, Float64) -> True -- Allow int64 to float64 (safe)
+  (from', to') -> from' == to' -- Only allow exact matches otherwise
   _ -> False
 
 literalType :: Literal -> Type
@@ -1216,8 +1263,10 @@ isPrintableType t mbSt =
         trace ("Other type: " ++ show other ++ " -> False") False
 
 addConstraint :: Constraint -> SemCheck ()
-addConstraint constraint = modify $ \s ->
-  s {envConstraints = constraint : envConstraints s}
+addConstraint constraint = do
+  traceM $ "\n=== addConstraint ==="
+  traceM $ "Adding constraint: " ++ show constraint
+  modify $ \s -> s {envConstraints = constraint : envConstraints s}
 
 bindVar :: String -> Type -> SemCheck ()
 bindVar name typ = modify $ \s ->
@@ -1278,4 +1327,13 @@ specializedFuncDefToAST name def =
 
 isFnameStructConstructor :: String -> Bool
 isFnameStructConstructor "" = False
-isFnameStructConstructor (c : _) = C.isUpper c
+isFnameStructConstructor s =
+  -- Check first char is uppercase
+  C.isUpper (head s)
+    &&
+    -- Not an option constructor
+    not (isPrefixOf "Some_" s)
+    && not (isPrefixOf "None_" s)
+    &&
+    -- Not an option struct
+    not (isPrefixOf "__option_" s)

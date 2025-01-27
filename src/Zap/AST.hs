@@ -23,6 +23,7 @@ module Zap.AST
     getSpecializedStructName,
     lookupStruct,
     registerStruct,
+    registerOptionConstructors,
     registerParamStruct,
     registerSpecializedStruct,
     typeToSuffix,
@@ -78,6 +79,7 @@ data Type
   | TypeAny
   | TypeParam String
   | TypeUnresolved String
+  | TypeOption Type
   deriving (Show, Eq)
 
 data Op
@@ -122,6 +124,11 @@ data Literal
   | BooleanLit Bool
   deriving (Show, Eq)
 
+data Pattern
+  = PSome String -- Some(value)
+  | PNone -- None
+  deriving (Show, Eq)
+
 data Expr
   = Var String
   | Let String Expr
@@ -140,6 +147,7 @@ data Expr
   | Assign String Expr -- Assignment operator
   | AssignOp String Op Expr -- Assignment with operator (e.g. +=)
   | Lit Literal
+  | Case Expr [(Pattern, Expr)]
   deriving (Show, Eq)
 
 data VarType = VarType
@@ -180,6 +188,77 @@ emptySymbolTable =
       varTypes = M.empty,
       funcDefs = M.empty
     }
+
+optionType :: Type -> Type
+optionType t = TypeOption t
+
+-- Helper to register option constructors
+registerOptionConstructors :: SymbolTable -> SymbolTable
+registerOptionConstructors st =
+  let _ = trace "\n=== registerOptionConstructors ===" ()
+
+      -- Register Some/None generic functions
+      someFunc =
+        FunctionDef
+          { funcName = "Some",
+            funcTypeParams = [TypeParam "T"],
+            funcParams = [Param "value" (TypeParam "T")],
+            funcRetType = TypeOption (TypeParam "T"),
+            funcBody = Block "Some" [] Nothing
+          }
+      noneFunc =
+        FunctionDef
+          { funcName = "None",
+            funcTypeParams = [TypeParam "T"],
+            funcParams = [],
+            funcRetType = TypeOption (TypeParam "T"),
+            funcBody = Block "None" [] Nothing
+          }
+
+      -- Register option structs for built-in numeric types
+      (i32OptSid, st1) =
+        registerStruct
+          "__option_i32"
+          [ ("tag", TypeNum Int32),
+            ("value", TypeNum Int32)
+          ]
+          st
+
+      (i64OptSid, st2) =
+        registerStruct
+          "__option_i64"
+          [ ("tag", TypeNum Int32),
+            ("value", TypeNum Int64)
+          ]
+          st1
+
+      (f32OptSid, st3) =
+        registerStruct
+          "__option_f32"
+          [ ("tag", TypeNum Int32),
+            ("value", TypeNum Float32)
+          ]
+          st2
+
+      (f64OptSid, st4) =
+        registerStruct
+          "__option_f64"
+          [ ("tag", TypeNum Int32),
+            ("value", TypeNum Float64)
+          ]
+          st3
+
+      -- Register the option constructor functions
+      st5 = st4 {funcDefs = M.insert "Some" someFunc (funcDefs st4)}
+      st6 = st5 {funcDefs = M.insert "None" noneFunc (funcDefs st5)}
+
+      _ = trace "\n=== Registered option types ==="
+      _ = trace ("i32 option sid: " ++ show i32OptSid) ()
+      _ = trace ("i64 option sid: " ++ show i64OptSid) ()
+      _ = trace ("f32 option sid: " ++ show f32OptSid) ()
+      _ = trace ("f64 option sid: " ++ show f64OptSid) ()
+      _ = trace ("Final symbol table state: " ++ show st6) ()
+   in st6
 
 lookupStruct :: StructId -> SymbolTable -> Maybe StructDef
 lookupStruct sid st =
@@ -346,9 +425,8 @@ substituteStructParams def substitutions st =
                                           substitutions
                                           curST
                                    in ((subType, subST), curST)
-
-                                  -- Field substitution result trace moved inside case expression
-                       in trace
+                       in -- Field substitution result trace moved inside case expression
+                          trace
                             ( "\n=== Field substitution result ===\n"
                                 ++ "Field: "
                                 ++ fname

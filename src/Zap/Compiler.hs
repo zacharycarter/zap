@@ -103,8 +103,12 @@ compile' opts source = do
     if targetStage opts >= SemanticAnalysis
       then case (program astResult, symbolTable astResult) of
         (Just prog, Just symTable) -> do
-          a <- mapLeft AnalysisError $ analyzeWithSymbols prog symTable
-          return $ astResult {analyzed = Just a}
+          (analyzed, enrichedSymTable) <- mapLeft AnalysisError $ analyzeWithSymbols prog symTable
+          return $
+            astResult
+              { analyzed = Just analyzed,
+                symbolTable = Just enrichedSymTable -- Update with enriched table
+              }
         _ -> return astResult
       else return astResult
 

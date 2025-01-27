@@ -549,10 +549,16 @@ generateStmtWithState st (stmt, _) = do
     -- Regular variable declarations (unchanged)
     IRVarDecl name irType initExpr -> do
       traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
-      modify $ \s -> s {cgVarTypes = M.insert name irType (cgVarTypes s)}
-      exprCode <- generateExprWithState st initExpr
-      let typeStr = irTypeToC irType st
-      return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
+      case initExpr of
+        IRCall "struct_lit" (IRLit (IRStringLit structName) : _) -> do
+          modify $ \s -> s {cgVarTypes = M.insert name (IRTypeStruct structName (StructId 0)) (cgVarTypes s)}
+          exprCode <- generateExprWithState st initExpr
+          return $ T.concat ["    struct ", T.pack structName, " ", T.pack name, " = ", exprCode, ";"]
+        _ -> do
+          modify $ \s -> s {cgVarTypes = M.insert name irType (cgVarTypes s)}
+          exprCode <- generateExprWithState st initExpr
+          let typeStr = irTypeToC irType st
+          return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
 
     -- Return statements
     IRReturn Nothing -> do

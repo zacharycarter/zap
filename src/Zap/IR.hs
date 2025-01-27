@@ -1099,23 +1099,50 @@ convertToIRExprWithSymbols _ (Lit lit) = case lit of
   BooleanLit val -> Right $ IRLit $ IRBoolLit val
 convertToIRExprWithSymbols _ (Var name) =
   Right $ IRVar name
-convertToIRExprWithSymbols symTable (Call fname args)
-  | isFnameStructConstructor fname = do
-      traceM $ "\n=== convertToIRExprWithSymbols: struct constructor ==="
-      traceM $ "Constructor name: " ++ fname
-      traceM $ "Arguments: " ++ show args
-      convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
-      Right $
-        IRCall
-          "struct_lit"
-          (IRLit (IRStringLit fname) : convertedArgs)
-  | otherwise = do
-      traceM $ "\n=== convertToIRExprWithSymbols Call ==="
-      traceM $ "Function name: " ++ fname
-      traceM $ "Args: " ++ show args
-      convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
-      traceM $ "Converted args: " ++ show convertedArgs
-      Right $ IRCall fname convertedArgs
+convertToIRExprWithSymbols symTable (Call fname args) = do
+  traceM $ "\n=== convertToIRExprWithSymbols Call ==="
+  traceM $ "Function name: " ++ fname
+  traceM $ "Args: " ++ show args
+
+  case isOptionConstructor fname of
+    Just (ctor, paramType) -> do
+      traceM $ "Detected option constructor: " ++ ctor
+      traceM $ "Parameter type: " ++ show paramType
+      let structName = "__option_" ++ typeToSuffix paramType
+      traceM $ "Looking up option struct: " ++ structName
+      case M.lookup structName (structNames symTable) of
+        Just sid -> do
+          traceM $ "Found option struct ID: " ++ show sid
+          convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+          traceM $ "Converted args: " ++ show convertedArgs
+          let tag = case ctor of
+                "Some" -> 1
+                "None" -> 0
+          traceM $ "Using tag: " ++ show tag
+          Right $
+            IRCall
+              "struct_lit"
+              [ IRLit (IRStringLit structName),
+                IRLit (IRInt32Lit tag),
+                if null convertedArgs
+                  then IRLit (IRInt32Lit 0) -- None case
+                  else head convertedArgs -- Some case
+              ]
+        Nothing -> error $ "Option type not registered: " ++ structName
+    Nothing
+      | isFnameStructConstructor fname -> do
+          traceM $ "\n=== convertToIRExprWithSymbols: struct constructor ==="
+          traceM $ "Constructor name: " ++ fname
+          traceM $ "Arguments: " ++ show args
+          convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+          Right $
+            IRCall
+              "struct_lit"
+              (IRLit (IRStringLit fname) : convertedArgs)
+      | otherwise -> do
+          convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+          traceM $ "Converted args: " ++ show convertedArgs
+          Right $ IRCall fname convertedArgs
 convertToIRExprWithSymbols symTable (Block _ blockExprs _) = do
   traceM $ "\n=== convertToIRExprWithSymbols: Block ==="
   case blockExprs of
@@ -1173,3 +1200,18 @@ opToString Gt = "Gt"
 opToString Eq = "Eq"
 opToString NotEq = "NotEq"
 opToString op = error $ "Unsupported operator: " ++ show op
+
+-- Helper to detect option constructors
+isOptionConstructor :: String -> Maybe (String, Type)
+isOptionConstructor fname = case break (== '_') fname of
+  ("Some", '_' : suffix) -> Just ("Some", parseOptionType suffix)
+  ("None", '_' : suffix) -> Just ("None", parseOptionType suffix)
+  _ -> Nothing
+  where
+    parseOptionType :: String -> Type
+    parseOptionType = \case
+      "i32" -> TypeNum Int32
+      "i64" -> TypeNum Int64
+      "f32" -> TypeNum Float32
+      "f64" -> TypeNum Float64
+      other -> error $ "Invalid option type suffix: " ++ other
