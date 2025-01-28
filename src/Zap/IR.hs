@@ -326,8 +326,11 @@ convertExprToStmts ::
   Expr ->
   Either IRConversionError [(IRStmt, IRMetadata)]
 convertExprToStmts symTable ctx expr = do
-  traceM $ "=== Converting expression to statements: " ++ show expr
-  traceM $ "Expression: " ++ show expr
+  traceM $ "\n=== Converting expression to statements: " ++ show expr
+  traceM $ "Current symbol table state:"
+  traceM $ "  Available struct types: " ++ show (M.keys $ structNames symTable)
+  traceM $ "  Available functions: " ++ show (M.keys $ funcDefs symTable)
+  traceM $ "  Variable types: " ++ show (varTypes symTable)
   case expr of
     If cond thenExpr elseExpr -> do
       traceM "Converting if/else expression to statements"
@@ -1063,9 +1066,8 @@ convertToLiteral expr = case expr of
         "Unsupported literal: " ++ show expr
 
 --------------------------------------------------------------------------------
---      Convert Expression to IR (unchanged except for If skip)
+--      Convert Expression to IR
 --------------------------------------------------------------------------------
-
 convertToIRExpr :: Expr -> Either IRConversionError IRExpr
 convertToIRExpr expr = convertToIRExprWithSymbols emptySymbolTable expr
 
@@ -1103,13 +1105,33 @@ convertToIRExprWithSymbols symTable (Call fname args) = do
   traceM $ "\n=== convertToIRExprWithSymbols Call ==="
   traceM $ "Function name: " ++ fname
   traceM $ "Args: " ++ show args
+  traceM $ "Variable types: " ++ show (varTypes symTable)
 
-  case isOptionConstructor fname of
+  case args of
+    [arg@(Var name)] ->
+      traceM $
+        "Checking type for var "
+          ++ name
+          ++ ": "
+          ++ show (lookupVarType name symTable)
+    _ -> return ()
+
+  case isOptionConstructor fname symTable of
     Just (ctor, paramType) -> do
       traceM $ "Detected option constructor: " ++ ctor
-      traceM $ "Parameter type: " ++ show paramType
-      let structName = "__option_" ++ typeToSuffix paramType
-      traceM $ "Looking up option struct: " ++ structName
+      traceM $ "Parameter type from suffix: " ++ show paramType
+
+      -- Get the option struct name for this type
+      let structName = case paramType of
+            TypeNum Int32 -> "__option_i32"
+            TypeNum Int64 -> "__option_i64"
+            TypeNum Float32 -> "__option_f32"
+            TypeNum Float64 -> "__option_f64"
+            TypeStruct _ name -> "__option_" ++ name
+            _ -> error $ "Invalid option type: " ++ show paramType
+
+      traceM $ "Using option struct name: " ++ structName
+
       case M.lookup structName (structNames symTable) of
         Just sid -> do
           traceM $ "Found option struct ID: " ++ show sid
@@ -1119,14 +1141,15 @@ convertToIRExprWithSymbols symTable (Call fname args) = do
                 "Some" -> 1
                 "None" -> 0
           traceM $ "Using tag: " ++ show tag
+
           Right $
             IRCall
               "struct_lit"
               [ IRLit (IRStringLit structName),
                 IRLit (IRInt32Lit tag),
                 if null convertedArgs
-                  then IRLit (IRInt32Lit 0) -- None case
-                  else head convertedArgs -- Some case
+                  then IRLit (IRInt32Lit 0) -- Default for None
+                  else head convertedArgs -- Value for Some
               ]
         Nothing -> error $ "Option type not registered: " ++ structName
     Nothing
@@ -1202,16 +1225,22 @@ opToString NotEq = "NotEq"
 opToString op = error $ "Unsupported operator: " ++ show op
 
 -- Helper to detect option constructors
-isOptionConstructor :: String -> Maybe (String, Type)
-isOptionConstructor fname = case break (== '_') fname of
+isOptionConstructor :: String -> SymbolTable -> Maybe (String, Type)
+isOptionConstructor fname symTable = case break (== '_') fname of
   ("Some", '_' : suffix) -> Just ("Some", parseOptionType suffix)
   ("None", '_' : suffix) -> Just ("None", parseOptionType suffix)
   _ -> Nothing
   where
     parseOptionType :: String -> Type
-    parseOptionType = \case
+    parseOptionType suffix = case suffix of
       "i32" -> TypeNum Int32
       "i64" -> TypeNum Int64
       "f32" -> TypeNum Float32
       "f64" -> TypeNum Float64
-      other -> error $ "Invalid option type suffix: " ++ other
+      structName -> case M.lookup structName (structNames symTable) of
+        Just sid -> TypeStruct sid structName
+        Nothing -> error $ "Invalid option type suffix: " ++ suffix
+
+getVarName :: Expr -> String
+getVarName (Var n) = n
+getVarName e = error $ "Not a variable: " ++ show e

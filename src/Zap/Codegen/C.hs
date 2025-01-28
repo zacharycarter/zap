@@ -81,45 +81,6 @@ generateCWithState (IRProgram funcs) = do
     isMainFunc (IRFuncDecl {fnName = "main"}) = True
     isMainFunc _ = False
 
--- generateC :: IRProgram -> Either CGenError T.Text
--- generateC prog = evalStateT (generateCWithState prog) (CGState M.empty S.empty S.empty False)
-
--- generateCWithState :: IRProgram -> StateT CGState (Either CGenError) T.Text
--- generateCWithState (IRProgram funcs) = do
---     lift $ traceM $ "\n=== Starting C Code Generation for IR: " ++ show funcs ++ " ==="
-
---     -- Generate struct definitions (keep existing implementation)
---     let structDefs = case funcs of
---           (_, meta):_ -> generateStructDefinitions [(_,meta)]
---           [] -> ""
-
---     -- Add new: Generate function declarations
---     let declarations = map generateFunctionDeclaration $ filter (not . isMainFunc . fst) funcs
-
---     lift $ traceM $ "\nFunctions to generate: " ++ show (map (fnName . fst) funcs)
---     -- Generate each function with state
---     functionDefs <- mapM generateFunctionWithState funcs
-
---     let program = T.unlines
---           [ "#include <stdio.h>"
---           , "#include <stdint.h>"
---           , ""
---           , structDefs
---           , ""
---           , T.unlines declarations  -- Add function declarations
---           , ""
---           , T.unlines functionDefs
---           ]
-
---     lift $ traceM $ "\n=== Final Generated Program ===\n" ++ T.unpack program
-
---     checkUnusedLabels
-
---     return program
---   where
---     isMainFunc (IRFuncDecl {fnName = "main"}) = True
---     isMainFunc _ = False
-
 -- Debug helper for checking unused labels
 checkUnusedLabels :: StateT CGState (Either CGenError) ()
 checkUnusedLabels = do
@@ -165,15 +126,30 @@ generateStructDefinitions st funcs = do
   where
     genStructDef :: (String, [(String, IRType)]) -> T.Text
     genStructDef (name, fields) = do
-      let _ = trace ("\n=== genStructDef ===\nName: " ++ name ++ "\nFields: " ++ show fields) ()
-      T.unlines $
-        map rstrip $
-          map T.unpack $
-            [ T.concat ["struct ", T.pack name, " {"],
-              T.intercalate ";\n" $ map genField fields ++ [""],
-              "};",
-              ""
-            ]
+      let _ = trace ("\n=== genStructDef ===") ()
+          _ = trace ("Generating struct definition for struct with name: " ++ name) ()
+          _ = trace ("Fields before reordering: " ++ show fields)
+          reorderedFields =
+            if "__option_" `T.isPrefixOf` (T.pack name)
+              then reorderOptionFields fields
+              else fields
+          _ = trace ("Fields after reordering: " ++ show fields)
+          result =
+            T.unlines $
+              map rstrip $
+                map T.unpack $
+                  [ T.concat ["struct ", T.pack name, " {"],
+                    T.intercalate ";\n" $ map genField reorderedFields ++ [""],
+                    "};",
+                    ""
+                  ]
+          _ = trace ("genStructDef result: " ++ show result)
+      result
+      where
+        reorderOptionFields :: [(String, IRType)] -> [(String, IRType)]
+        reorderOptionFields fields =
+          let (tags, values) = L.partition (\(fname, _) -> fname == "tag") fields
+           in tags ++ values
 
     genField :: (String, IRType) -> T.Text
     genField (fname, ftype) = do
@@ -185,84 +161,119 @@ collectStructTypes :: [(IRFuncDecl, IRMetadata)] -> [(String, [(String, IRType)]
 collectStructTypes funcs = do
   traceM "\n=== collectStructTypes ==="
 
-  -- Get main metadata
-  let mainMeta = snd $ last funcs
+  let mainMeta = snd (last funcs)
   traceM $ "Main meta: " ++ show mainMeta
 
-  -- Extract structs from symbol table
-  let extractedStructs = case metaSymTable mainMeta of
+  -- Extract structs from the symbol table
+  let structs = case metaSymTable mainMeta of
+        Nothing -> []
         Just st -> do
           traceM $ "Found symbol table in main metadata: " ++ show st
-          let structs =
+          let allStructs =
                 [ (name, fields)
                   | (_, def) <- M.toList (structDefs st),
-                    null (structParams def), -- Only collect concrete structs
+                    null (structParams def), -- only “fully specialized” ones
                     let name = structName def,
+                    let defFields = structFields def,
                     let fields =
-                          [ (fname, IRTypeStruct refName sid) -- KEY CHANGE: Preserve the reference name
-                            | (fname, TypeStruct sid refName) <- structFields def
+                          [ (fname, IRTypeStruct subName subSid)
+                            | (fname, TypeStruct _ subName) <- defFields,
+                              let subSid =
+                                    case M.lookup subName (structNames st) of
+                                      Just sId -> sId
+                                      Nothing -> error ("Missing specialized struct: " ++ subName)
                           ]
                             ++ [ (fname, convertType ftype)
-                                 | (fname, ftype) <- structFields def,
-                                   not $ isStructType ftype
+                                 | (fname, ftype) <- defFields,
+                                   not (isStruct ftype)
                                ]
                 ]
-          traceM $ "Extracted structs: " ++ show structs
 
-          -- Build dependency graph
-          let deps =
-                [ (name, [n | (_, IRTypeStruct n _) <- fields])
-                  | (name, fields) <- structs
-                ]
-          traceM $ "Dependencies: " ++ show deps
+          traceM $ "All (structName, IR fields): " ++ show allStructs
 
-          -- Get ordered names through topological sort
-          let ordered = topologicalSort deps
-          traceM $ "Ordered names: " ++ show ordered
+          -- Build adjacency info: (thisStruct, [its dependencies])
+          let getDeps (thisName, fields) =
+                let directDeps =
+                      [ depName
+                        | (_, IRTypeStruct thatName _thatSid) <- fields,
+                          -- We just store the raw name as the dependency
+                          -- so that “thisName depends on thatName”
+                          let depName = thatName
+                      ]
+                 in (thisName, directDeps)
 
-          -- Create sorted struct list
+          let allDeps = map getDeps allStructs
+          traceM $ "Full dependency graph: " ++ show allDeps
+
+          -- Build edges in the order (dependency, dependent)!
+          traceM "\n=== Topological Sort Details ==="
+          let vertices = map fst allDeps
+          let edges =
+                [ (dep, this)
+                  | (this, deps) <- allDeps,
+                    dep <- deps
+                ] -- (flip here!)
+          traceM $ "Vertices: " ++ show vertices
+          traceM $ "Edges: " ++ show edges
+
+          let ordered = topologicalSort vertices edges
+          traceM $ "Sorted order: " ++ show ordered
+
           let sortedStructs =
-                [ s | name <- ordered, s@(n, _) <- structs, n == name
+                [ item
+                  | name <- ordered,
+                    item@(structName', _) <- allStructs,
+                    name == structName'
                 ]
-          traceM $ "Sorted structs: " ++ show sortedStructs
 
-          -- Ensure uniqueness while preserving order
-          let uniqueStructs = L.nubBy (\(n1, _) (n2, _) -> n1 == n2) sortedStructs
-          traceM $ "Final unique structs: " ++ show uniqueStructs
-          uniqueStructs
-        Nothing -> []
+          traceM $ "Final ordered structs after lookup: " ++ show sortedStructs
+          sortedStructs
 
-  traceM $ "Found structs from metadata: " ++ show extractedStructs
-  extractedStructs
+  traceM $ "Found structs from metadata: " ++ show structs
+  structs
   where
-    isStructType (TypeStruct _ _) = True
-    isStructType _ = False
+    isStruct :: Type -> Bool
+    isStruct (TypeStruct _ _) = True
+    isStruct _ = False
 
-    -- Topological sort implementation
-    topologicalSort :: [(String, [String])] -> [String]
-    topologicalSort deps =
-      let vertices = map fst deps
-          edges = [(from, to) | (from, tos) <- deps, to <- tos]
-       in reverse $ dfs S.empty vertices edges
-      where
-        dfs _ [] _ = []
-        dfs visited (v : vs) edges
-          | v `S.member` visited = dfs visited vs edges
-          | otherwise =
-              let visited' = S.insert v visited
-                  deps' = [u | (_, u) <- edges, u == v]
-                  rest = dfs visited' (deps' ++ vs) edges
-               in v : rest
-
-    -- Type conversion helper
     convertType :: Type -> IRType
     convertType (TypeNum Int32) = IRTypeInt32
     convertType (TypeNum Int64) = IRTypeInt64
     convertType (TypeNum Float32) = IRTypeFloat32
     convertType (TypeNum Float64) = IRTypeFloat64
-    convertType (TypeParam _) = IRTypeInt32 -- Should never happen for specialized structs
-    convertType (TypeStruct sid name) = IRTypeStruct name sid
-    convertType t = error $ "Unexpected type in struct field: " ++ show t
+    convertType (TypeStruct sid nm) = IRTypeStruct nm sid
+    convertType (TypeParam _) = IRTypeInt32 -- or error ...
+    convertType t = error ("Unexpected type in struct field: " ++ show t)
+
+    -- A simple adjacency‐list topological sort:
+    topologicalSort ::
+      [String] -> -- all vertices
+      [(String, String)] -> -- edges as (from, to)
+      [String]
+    topologicalSort verts edges = dfsAll S.empty [] verts
+      where
+        dfsAll _ acc [] = acc
+        dfsAll seen acc (v : vs)
+          | v `S.member` seen = dfsAll seen acc vs
+          | otherwise =
+              let (seen', stack) = dfsOne seen [] v
+               in dfsAll seen' (stack ++ acc) vs
+
+        -- Normal “post‐order” DFS
+        dfsOne seen acc v
+          | v `S.member` seen = (seen, acc)
+          | otherwise =
+              let seen' = S.insert v seen
+                  outEdges = [y | (x, y) <- edges, x == v]
+                  (seenF, accF) =
+                    foldl
+                      ( \(s, a) node ->
+                          let (s2, a2) = dfsOne s a node
+                           in (s2, a2)
+                      )
+                      (seen', acc)
+                      outEdges
+               in (seenF, v : accF)
 
 -- Helper to convert IR types to C types
 irTypeToC :: IRType -> SymbolTable -> T.Text
@@ -708,6 +719,26 @@ generateExprWithState st expr = do
       let result = T.concat [base, ".", T.pack field]
       traceM $ "Generated field access: " ++ T.unpack result
       return result
+    IRCall "struct_lit" (IRLit (IRStringLit name) : args)
+      | "__option_" `T.isPrefixOf` T.pack name -> do
+          traceM $ "\n=== Generating option struct literal ==="
+          traceM $ "Option name: " ++ name
+          traceM $ "Original args: " ++ show args
+          args' <- mapM (generateExprWithState st) args
+          case args' of
+            [tag, value] -> do
+              -- Look up struct definition to check value type
+              case M.lookup name (structNames st) of
+                Just sid -> do
+                  traceM $ "Found struct ID: " ++ show sid
+                  case lookupStruct sid st of
+                    Just def -> do
+                      traceM $ "Struct definition: " ++ show def
+                      traceM $ "Field types: " ++ show (structFields def)
+                      return $ T.concat ["(struct ", T.pack name, ") {", tag, ", ", value, "}"]
+                    Nothing -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unknown struct: " ++ name
+                Nothing -> lift $ Left $ UnsupportedOperation $ T.pack $ "Unknown struct: " ++ name
+            _ -> lift $ Left $ UnsupportedOperation "Invalid option struct initialization"
     IRCall "struct_lit" (IRLit (IRStringLit name) : fields) -> do
       traceM $ "Generating struct literal for: " ++ name
       fieldVals <- mapM (generateExprWithState st) fields

@@ -537,5 +537,21 @@ migratedTests =
             ],
         expectedOutput = "1\n",
         expectedExitCode = ExitSuccess
+      },
+    TestCase
+      { testName = "user_defined_option_type",
+        sourceCode =
+          T.unlines
+            [ "type Point = struct",
+              "  x: i32",
+              "  y: i32",
+              "",
+              "let p = Point(1, 2)",
+              "let some_p = Some(p)",
+              "let none_p = None[Point]()",
+              "print 1" -- For now just verify compilation
+            ],
+        expectedOutput = "1\n",
+        expectedExitCode = ExitSuccess
       }
   ]

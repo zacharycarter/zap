@@ -527,7 +527,14 @@ parseTypeArg = do
         "i64" -> return $ TypeNum Int64
         "f32" -> return $ TypeNum Float32
         "f64" -> return $ TypeNum Float64
-        _ -> throwError $ UnexpectedToken tok "valid type specialization"
+        _ -> do
+          -- Check if it's a defined struct type
+          st' <- get
+          case M.lookup spec (structNames $ stateSymTable st') of
+            Just sid -> do
+              traceM $ "Found struct " ++ spec ++ " with sid " ++ show sid
+              return $ TypeStruct sid spec
+            Nothing -> throwError $ UnexpectedToken tok "valid type"
     TTypeParam param -> do
       traceM $ "Found type parameter: " ++ param
       return $ TypeParam param
@@ -602,6 +609,9 @@ parseMaybeCall fname = do
   traceM $ "Called with fname: " ++ fname
   st <- get
   traceM $ "Current tokens: " ++ show (take 5 $ stateTokens st)
+  traceM $ "Current symbol table state: " ++ show (stateSymTable st)
+  traceM $ "Available struct types: " ++ show (M.keys $ structNames $ stateSymTable st)
+  traceM $ "Available functions: " ++ show (M.keys $ funcDefs $ stateSymTable st)
   case stateTokens st of
     (tok : _) -> do
       traceM $ "First token: " ++ show tok
@@ -672,18 +682,21 @@ parseMaybeCall fname = do
               Nothing -> throwError $ UnexpectedToken tok "valid struct definition"
             Nothing -> throwError $ UnexpectedToken tok "defined struct"
         TLeftParen -> do
-          traceM "Found constructor/function call with parens"
+          traceM "\n=== Constructor/function call parsing ==="
+          traceM $ "Looking up function: " ++ fname
           _ <- matchToken (== TLeftParen) "("
 
           -- Look up expected type from struct fields
           symTable <- gets stateSymTable
           let expectedType = case M.lookup fname (funcDefs symTable) of
-                Just funcDef ->
+                Just funcDef -> do
                   -- Get the type of the first parameter
                   case funcParams funcDef of
                     (Param _ typ) : _ -> Just typ
                     [] -> Nothing
                 Nothing -> Nothing
+
+          traceM $ "Function definition: " ++ show expectedType
 
           -- If not a function, check if it's a struct constructor
           let expectedType' =
@@ -694,10 +707,13 @@ parseMaybeCall fname = do
                         (_, TypeNum t) : _ -> Just (TypeNum t)
                         _ -> Nothing
                       Nothing -> Nothing
+                    Nothing -> Nothing
                   else expectedType
 
           args <- parseCallArgsWithType expectedType
           _ <- matchToken (== TRightParen) ")"
+          traceM $ "Inferred expected type: " ++ show expectedType
+          traceM $ "Final expected type: " ++ show expectedType'
           return (Call fname args)
         TComma -> do
           traceM "Found constructor/function call with args"

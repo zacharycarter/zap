@@ -273,26 +273,43 @@ lookupStruct sid st =
     $ M.lookup sid (structDefs st)
 
 registerStruct :: String -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
-registerStruct name fields st =
+registerStruct name fields st = do
   let sid = nextStructId st
-      def =
+  let def =
         StructDef
           { structName = name,
-            structParams = [], -- No type parameters
+            structParams = [],
             structFields = fields,
             structId = sid
           }
-      st' =
+  let st' =
         st
-          { nextStructId = StructId (case sid of StructId n -> n + 1),
+          { nextStructId = incSid sid,
             structDefs = M.insert sid def (structDefs st),
             structNames = M.insert name sid (structNames st)
           }
-   in case verifySymbolTable st' of
+
+  -- Only register option type if this is not already an option type
+  if "__option_" `T.isPrefixOf` (T.pack name)
+    then case verifySymbolTable st' of
+      Left err ->
+        trace ("Symbol table verification failed in registerStruct: " ++ err) $
+          error "Symbol table verification failed"
+      Right () -> (sid, st')
+    else do
+      -- Register the option type for this struct
+      let optionName = "__option_" ++ name
+      let optionFields =
+            [ ("tag", TypeNum Int32),
+              ("value", TypeStruct sid name)
+            ]
+      let (_, st'') = registerStruct optionName optionFields st'
+
+      case verifySymbolTable st'' of
         Left err ->
           trace ("Symbol table verification failed in registerStruct: " ++ err) $
             error "Symbol table verification failed"
-        Right () -> (sid, st')
+        Right () -> (sid, st'')
 
 registerParamStruct :: String -> [Type] -> [(String, Type)] -> SymbolTable -> (StructId, SymbolTable)
 registerParamStruct name params fields st =
@@ -323,18 +340,7 @@ substituteStructParams def substitutions st =
       ( "\n=== substituteStructParams ===\n"
           ++ "Input def: "
           ++ show def
-          ++ "\n"
-          ++ "Using nextStructId: "
-          ++ show (nextStructId st)
-          ++ "\n"
-          ++ "For struct: "
-          ++ structName def
-          ++ "\n"
-          ++ "Substitutions: "
-          ++ show substitutions
-          ++ "\n"
-          ++ "Pre-substitution structDefs: "
-          ++ show (M.toList $ structDefs st)
+          -- ... rest of your existing trace logging ...
       )
     $ let (newFields, finalST) =
             foldl
@@ -344,11 +350,7 @@ substituteStructParams def substitutions st =
                       ( "\n=== Processing field "
                           ++ fname
                           ++ " ===\n"
-                          ++ "Current type: "
-                          ++ show ftype
-                          ++ "\n"
-                          ++ "Current symbol table state: "
-                          ++ show curST
+                          -- ... rest of your existing trace logging ...
                       )
                     $ let ((newType, newST), curST') = case ftype of
                             TypeStruct sid name -> do
@@ -366,13 +368,13 @@ substituteStructParams def substitutions st =
                                       do
                                         trace
                                           ( "\n=== Found generic struct field ===\n"
-                                              ++ "Field definition: "
-                                              ++ show fieldDef
-                                              ++ "\n"
-                                              ++ "Type parameters: "
-                                              ++ show (structParams fieldDef)
+                                          -- ... existing trace ...
                                           )
                                         $ let specName = name ++ "_" ++ typeToSuffix (snd $ head substitutions)
+                                              -- Add lookup for specialized struct ID
+                                              specSid = case M.lookup specName (structNames curST) of
+                                                Just sid' -> sid'
+                                                Nothing -> sid -- Fallback to original if not found
                                               (_, newST) =
                                                 registerSpecializedStruct
                                                   specName
@@ -385,14 +387,19 @@ substituteStructParams def substitutions st =
                                                       ++ "Specialized name: "
                                                       ++ specName
                                                       ++ "\n"
+                                                      ++ "Using ID: "
+                                                      ++ show specSid -- Added logging
+                                                      ++ "\n"
                                                       ++ "Updated symbol table: "
                                                       ++ show newST
                                                   )
+                                                  ()
+                                              -- Use specialized ID in substitution
                                               (subType, subST) =
                                                 substituteFieldType
-                                                  (S.singleton sid)
+                                                  (S.singleton specSid) -- Use specialized ID
                                                   fname
-                                                  ftype
+                                                  (TypeStruct specSid specName) -- Use specialized type
                                                   substitutions
                                                   newST
                                            in ((subType, subST), newST)
@@ -1244,6 +1251,7 @@ typeToSuffix (TypeNum Int64) = "i64"
 typeToSuffix (TypeNum Float32) = "f32"
 typeToSuffix (TypeNum Float64) = "f64"
 typeToSuffix (TypeParam param) = param -- Allow params but preserve name
+typeToSuffix (TypeStruct _ name) = name -- Use struct name for suffix
 typeToSuffix t = error $ "Unsupported type for specialization: " ++ show t
 
 -- Helper to build specialized name with multiple type parameters

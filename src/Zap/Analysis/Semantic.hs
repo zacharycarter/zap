@@ -501,7 +501,7 @@ registerAllSpecializations st tops = do
               traceM $ "Current state: " ++ show st''
 
               -- Only specialize if we have concrete types
-              if any isTypeParam paramTypes
+              if null paramTypes || any isTypeParam paramTypes
                 then do
                   traceM "Skipping specialization with type parameters"
                   return st''
@@ -785,18 +785,45 @@ inferExpr e = do
       traceM $ "Print type check passed"
       return (TypeVoid, Call "print" [arg'])
     Call "Some" [arg] -> do
+      traceM $ "\n=== inferExpr: Some call ==="
+      traceM $ "Analyzing Some constructor with argument: " ++ show arg
       (argType, arg') <- inferExpr arg
-      return (TypeOption argType, Call "Some" [arg'])
+      traceM $ "Argument evaluated to type: " ++ show argType
+      traceM $ "Looking up available option types in symbol table"
+      st <- gets envSymbols
+      traceM $ "Current symbol table structs: " ++ show (M.keys $ structDefs st)
+      traceM $ "Current symbol table names: " ++ show (M.keys $ structNames st)
+      case argType of
+        TypeStruct sid name -> do
+          let optionStructName = "__option_" ++ name
+          case M.lookup optionStructName (structNames st) of
+            Just optionSid -> do
+              let result = (TypeOption (TypeStruct sid name), Call ("Some_" ++ name) [arg'])
+              traceM $ "Result: " ++ show result
+              return result
+            Nothing -> throwError $ UndefinedStruct optionStructName
+        _ -> do
+          let result = (TypeOption argType, Call "Some" [arg'])
+          traceM $ "Result: " ++ show result
+          return result
     Call fname@('N' : 'o' : 'n' : 'e' : '_' : typeSuffix) [] -> do
       traceM $ "\n=== Processing None call ==="
       traceM $ "Function name: " ++ fname
       traceM $ "Type suffix: " ++ typeSuffix
-      let paramType = case typeSuffix of
-            "i32" -> TypeNum Int32
-            "i64" -> TypeNum Int64
-            "f32" -> TypeNum Float32
-            "f64" -> TypeNum Float64
-            _ -> error $ "Invalid type suffix in None call: " ++ typeSuffix
+
+      -- Get current symbol table
+      st <- gets envSymbols
+
+      -- Look up parameter type
+      paramType <- case typeSuffix of
+        "i32" -> return $ TypeNum Int32
+        "i64" -> return $ TypeNum Int64
+        "f32" -> return $ TypeNum Float32
+        "f64" -> return $ TypeNum Float64
+        structName -> case M.lookup structName (structNames st) of
+          Just sid -> return $ TypeStruct sid structName
+          Nothing -> throwError $ UndefinedStruct structName
+
       traceM $ "Inferred parameter type: " ++ show paramType
       return (TypeOption paramType, Call fname [])
     Call name args -> do
