@@ -640,8 +640,10 @@ fixType TypeAny _ =
   trace "\n=== fixType => TypeAny" TypeAny
 fixType (TypeParam p) _ =
   trace ("\n=== fixType => TypeParam => " ++ p) (TypeParam p)
+fixType (TypeOption inner) sym =
+  trace ("\n=== fixType => TypeOption => " ++ show inner) TypeOption (fixType inner sym) -- Recursively fix inner type
+  --------------------------------------------------------------------------------
 
---------------------------------------------------------------------------------
 fixExpr :: Expr -> SymbolTable -> Expr
 fixExpr (ArrayLit ty es) sym =
   let newTy = fixType ty sym

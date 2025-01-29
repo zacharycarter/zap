@@ -55,7 +55,7 @@ isValidName (TWord name) = do
         [] -> '_'
         hd : _ -> hd
   traceShow ("Validating name: " ++ name) $
-    not (name `elem` ["break", "result", "block", "let", "var", "fn", "print", "if", "else", "while"])
+    not (name `elem` ["break", "result", "block", "let", "var", "fn", "print", "if", "else", "while", "case"])
       && not (null name)
       && (isAlpha nameHd)
 isValidName _ = False
@@ -394,6 +394,7 @@ parseTerm expectedType = do
           parseFieldOrCallChain (Var name)
         TWord "print" -> parsePrintStatement
         TWord "var" -> parseVarDecl
+        TWord "case" -> parseCaseExpr
         _ -> parseBaseTerm >>= parseFieldAccess
     [] -> throwError $ EndOfInput "term"
 
@@ -1492,16 +1493,36 @@ parseTypeToken tok = do
         "f32" -> return $ TypeNum Float32
         "f64" -> return $ TypeNum Float64
         _ -> throwError $ UnexpectedToken tok "valid type specialization"
-    TWord w -> do
-      traceM $ "Found word type: " ++ w
-      case w of
-        "i32" -> return $ TypeNum Int32
-        "i64" -> return $ TypeNum Int64
-        "f32" -> return $ TypeNum Float32
-        "f64" -> return $ TypeNum Float64
-        (c : _) | isUpper c -> return $ TypeParam [c]
-        _ -> throwError $ UnexpectedToken tok "valid type"
-    _ -> throwError $ UnexpectedToken tok "valid type"
+    TWord typeName -> do
+      -- Preserve existing word token handling
+      st <- get
+      traceM $ "Found type word: " ++ typeName
+      traceM $ "Current symbol table: " ++ show st
+      case stateTokens st of
+        (next : _) | locToken next == TLeftBracket -> do
+          -- Type application like Option[i32]
+          traceM $ "Found generic type application: " ++ typeName
+          _ <- matchToken (== TLeftBracket) "["
+          typeArgs <- parseTypeArgsInExpr
+          traceM $ "Parsed type arguments: " ++ show typeArgs
+          _ <- matchToken (== TRightBracket) "]"
+          case typeName of
+            "Option" -> return $ TypeOption (head typeArgs) -- Option is built-in
+            _ -> case M.lookup typeName (structNames $ stateSymTable st) of
+              Just sid -> do
+                traceM $ "Found struct " ++ typeName ++ " with sid " ++ show sid
+                return $ TypeStruct sid typeName
+              Nothing -> do
+                traceM $ "No struct named " ++ typeName ++ " yet; returning unresolved placeholder"
+                return $ TypeUnresolved typeName
+        _ -> case typeName of
+          "i32" -> return $ TypeNum Int32
+          "i64" -> return $ TypeNum Int64
+          "f32" -> return $ TypeNum Float32
+          "f64" -> return $ TypeNum Float64
+          [c] | isUpper c -> return $ TypeParam [c] -- Single uppercase letter like T
+          _ -> throwError $ UnexpectedToken tok "valid type"
+    _ -> throwError $ UnexpectedToken tok "type name"
 
 parseVarDecl :: Parser Expr
 parseVarDecl = do
@@ -1538,6 +1559,84 @@ parseVarDecl = do
 
       return $ VarDecl name value
     _ -> throwError $ UnexpectedToken nameTok "identifier"
+
+parseCaseExpr :: Parser Expr
+parseCaseExpr = do
+  traceM $ "\n=== parseCaseExpr ==="
+  -- Get the actual case token first to check its position
+  caseTok <- matchToken (\t -> t == TWord "case") "case"
+  let caseCol = locCol caseTok
+  traceM $ "Case token column: " ++ show caseCol
+
+  expr <- parseExpression
+  _ <- matchToken (\t -> t == TWord "of") "of"
+  _ <- matchToken isColon ":"
+
+  -- Calculate pattern indent level based on case token's actual column
+  let patternBaseIndent = caseCol + 2
+  traceM $ "Pattern base indent: " ++ show patternBaseIndent
+
+  patterns <- parsePatterns patternBaseIndent
+
+  return $ Case expr patterns
+
+-- Helper to parse case patterns
+parsePatterns :: Int -> Parser [(Pattern, Expr)]
+parsePatterns baseIndent = do
+  traceM "\n=== parsePatterns ==="
+  traceM $ "Parsing at indent level: " ++ show baseIndent
+  st <- get
+  traceM $ "Current tokens:" ++ show (take 3 $ stateTokens st)
+  case stateTokens st of
+    [] -> return []
+    (tok : _) -> do
+      let tokCol = locCol tok
+      traceM $ "Pattern token: " ++ show tok
+      traceM $ "Pattern column: " ++ show tokCol
+      traceM $ "Required indent: " ++ show baseIndent
+
+      -- Properly handle both EOF and indentation check
+      if locToken tok == TEOF
+        then return []
+        else
+          if tokCol < baseIndent
+            then
+              throwError $
+                IndentationError $
+                  IndentationErrorDetails baseIndent tokCol GreaterEq
+            else do
+              pattern <- parsePattern
+              _ <- matchToken (== TColon) ":"
+              expr <- parseExpression
+              rest <- parsePatterns baseIndent
+              return $ (pattern, expr) : rest
+
+parsePattern :: Parser Pattern
+parsePattern = do
+  traceM $ "\n=== parsePattern ==="
+  st <- get
+  case stateTokens st of
+    (tok : _) -> case locToken tok of
+      TWord "Some" -> do
+        _ <- matchToken (\t -> t == TWord "Some") "Some"
+        _ <- matchToken (== TLeftParen) "("
+        subPattern <- parsePattern -- Parse nested pattern
+        _ <- matchToken (== TRightParen) ")"
+        return $ PConstructor "Some" [subPattern]
+      TWord "None" -> do
+        _ <- matchToken (\t -> t == TWord "None") "None"
+        return $ PConstructor "None" []
+      TWord "_" -> do
+        _ <- matchToken (\t -> t == TWord "_") "_"
+        return PWildcard
+      TNumber n -> do
+        _ <- matchToken isNumber "number"
+        return $ PLiteral (IntLit n (Just Int32))
+      TWord name -> do
+        _ <- matchToken isValidName "identifier"
+        return $ PVar name
+      _ -> throwError $ UnexpectedToken tok "pattern"
+    [] -> throwError $ EndOfInput "pattern"
 
 parseType :: Parser Type
 parseType = do

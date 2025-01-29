@@ -17,6 +17,7 @@ module Zap.AST
     StructId (..),
     StructDef (..),
     FunctionDef (..),
+    Pattern (..),
     emptySymbolTable,
     getSpecializedName,
     getSpecializedFuncName,
@@ -125,8 +126,10 @@ data Literal
   deriving (Show, Eq)
 
 data Pattern
-  = PSome String -- Some(value)
-  | PNone -- None
+  = PConstructor String [Pattern] -- e.g. Some(subpattern)
+  | PLiteral Literal -- e.g. 0, "string", etc.
+  | PVar String -- Variable binding e.g. Some(n)
+  | PWildcard -- _ wildcard pattern
   deriving (Show, Eq)
 
 data Expr

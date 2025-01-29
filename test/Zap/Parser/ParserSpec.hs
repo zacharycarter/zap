@@ -440,3 +440,74 @@ spec = do
               TLType _ typ ->
                 expectationFailure $ "Expected Nested to be a struct type, got: " ++ show typ
           _ -> expectationFailure $ "Expected two type declarations, got: " ++ show tops
+
+  describe "Pattern matching" $ do
+    it "parses basic case expression with Some pattern" $ do
+      let input =
+            T.unlines
+              [ "fn test(x: Option[i32]): i32 =",
+                "  case x of:",
+                "    Some(value): value"
+              ]
+      expectParseSuccess input $ \tops ->
+        case tops of
+          [TLDecl (DFunc "test" [] [Param "x" (TypeOption (TypeNum Int32))] (TypeNum Int32) body)] ->
+            case body of
+              Block _ [Case (Var "x") [(PConstructor "Some" [PVar "value"], Var "value")]] _ -> return ()
+              other -> expectationFailure $ "Unexpected body: " ++ show other
+          other -> expectationFailure $ "Unexpected top level: " ++ show other
+
+    it "parses case expression with multiple patterns" $ do
+      let input =
+            T.unlines
+              [ "fn test(x: Option[i32]): i32 =",
+                "  case x of:",
+                "    Some(0): 1",
+                "    Some(n): n",
+                "    None: 0"
+              ]
+      expectParseSuccess input $ \tops ->
+        case tops of
+          [TLDecl (DFunc "test" [] [Param "x" (TypeOption (TypeNum Int32))] (TypeNum Int32) body)] ->
+            case body of
+              Block _ [Case (Var "x") patterns] _ -> do
+                length patterns `shouldBe` 3
+                case patterns of
+                  [ (PConstructor "Some" [PLiteral (IntLit "0" (Just Int32))], Lit (IntLit "1" _)),
+                    (PConstructor "Some" [PVar "n"], Var "n"),
+                    (PConstructor "None" [], Lit (IntLit "0" _))
+                    ] -> return ()
+                  other -> expectationFailure $ "Unexpected patterns: " ++ show other
+              other -> expectationFailure $ "Unexpected body: " ++ show other
+          other -> expectationFailure $ "Unexpected top level: " ++ show other
+
+    it "parses wildcard pattern" $ do
+      let input =
+            T.unlines
+              [ "fn test(x: Option[i32]): i32 =",
+                "  case x of:",
+                "    Some(_): 1",
+                "    None: 0"
+              ]
+      expectParseSuccess input $ \tops ->
+        case tops of
+          [TLDecl (DFunc "test" [] [Param "x" (TypeOption (TypeNum Int32))] (TypeNum Int32) body)] ->
+            case body of
+              Block _ [Case (Var "x") patterns] _ -> do
+                length patterns `shouldBe` 2
+                case patterns of
+                  [ (PConstructor "Some" [PWildcard], Lit (IntLit "1" _)),
+                    (PConstructor "None" [], Lit (IntLit "0" _))
+                    ] -> return ()
+                  other -> expectationFailure $ "Unexpected patterns: " ++ show other
+              other -> expectationFailure $ "Unexpected body: " ++ show other
+          other -> expectationFailure $ "Unexpected top level: " ++ show other
+
+    it "requires consistent indentation in case patterns" $ do
+      let input =
+            T.unlines
+              [ "fn test(x: Option[i32]): i32 =",
+                "  case x of:",
+                "  Some(n): n" -- Wrong indentation
+              ]
+      parseProgram input `shouldSatisfy` isLeft

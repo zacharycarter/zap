@@ -219,3 +219,61 @@ spec = do
                 Located TEOF 11 1
               ]
         tokenize input `shouldBe` Right expected
+
+  describe "Pattern matching lexical analysis" $ do
+    it "tokenizes basic case expression" $ do
+      let input = "case x of:\n  Some(value): 42"
+      let expected =
+            [ Located (TWord "case") 1 1,
+              Located (TWord "x") 6 1,
+              Located (TWord "of") 8 1,
+              Located TColon 10 1,
+              Located (TWord "Some") 3 2,
+              Located TLeftParen 7 2,
+              Located (TWord "value") 8 2,
+              Located TRightParen 13 2,
+              Located TColon 14 2,
+              Located (TNumber "42") 16 2,
+              Located TEOF 18 2
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "tokenizes None pattern" $ do
+      let input = "case x of:\n  None: 0"
+      let expected =
+            [ Located (TWord "case") 1 1,
+              Located (TWord "x") 6 1,
+              Located (TWord "of") 8 1,
+              Located TColon 10 1,
+              Located (TWord "None") 3 2,
+              Located TColon 7 2,
+              Located (TNumber "0") 9 2,
+              Located TEOF 10 2
+            ]
+      tokenize input `shouldBe` Right expected
+
+    it "tokenizes multiple patterns" $ do
+      let input = "case x of:\n  Some(0): 1\n  Some(n): 2\n  None: 3"
+      let expected =
+            [ Located (TWord "case") 1 1,
+              Located (TWord "x") 6 1,
+              Located (TWord "of") 8 1,
+              Located TColon 10 1,
+              Located (TWord "Some") 3 2,
+              Located TLeftParen 7 2,
+              Located (TNumber "0") 8 2,
+              Located TRightParen 9 2,
+              Located TColon 10 2,
+              Located (TNumber "1") 12 2,
+              Located (TWord "Some") 3 3,
+              Located TLeftParen 7 3,
+              Located (TWord "n") 8 3,
+              Located TRightParen 9 3,
+              Located TColon 10 3,
+              Located (TNumber "2") 12 3,
+              Located (TWord "None") 3 4,
+              Located TColon 7 4,
+              Located (TNumber "3") 9 4,
+              Located TEOF 10 4
+            ]
+      tokenize input `shouldBe` Right expected
