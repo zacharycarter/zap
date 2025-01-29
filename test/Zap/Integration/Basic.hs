@@ -547,8 +547,8 @@ migratedTests =
               "  y: i32",
               "",
               "let p = Point(1, 2)",
-              "let some_p = Some(p)",
-              "let none_p = None[Point]()",
+              "let someP = Some(p)",
+              "let noneP = None[Point]()",
               "print 1" -- For now just verify compilation
             ],
         expectedOutput = "1\n",

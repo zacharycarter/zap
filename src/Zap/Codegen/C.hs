@@ -351,12 +351,28 @@ generateFunctionWithState st (func, _) = do
                   T.concat
                     [ case typ of
                         -- Use specialized type name for struct parameters
-                        IRTypeStruct structName' _ ->
-                          let specializedName =
-                                if "Box" == structName'
-                                  then "Box_i32" -- Use concrete type
-                                  else structName'
-                           in T.concat ["struct ", T.pack specializedName, " ", T.pack name']
+                        IRTypeStruct structName' sid ->
+                          case lookupStruct sid st of
+                            Just def ->
+                              -- If this is a generic struct, look for a specialized version
+                              if not (null (structParams def))
+                                then -- For parameters of generic structs, we need the specialized version
+                                -- Search for any specialization by prefix
+
+                                  let prefix = T.pack (structName' ++ "_")
+                                      specialized =
+                                        filter
+                                          (\(n, _) -> prefix `T.isPrefixOf` n)
+                                          (M.toList $ M.mapKeys T.pack $ structNames st)
+                                   in case specialized of
+                                        (specializedName, _) : _ ->
+                                          T.concat ["struct ", specializedName, " ", T.pack name']
+                                        [] -> T.concat ["struct ", T.pack structName', " ", T.pack name']
+                                else -- Non-generic struct - use name directly
+                                  T.concat ["struct ", T.pack structName', " ", T.pack name']
+                            Nothing ->
+                              -- Fallback if struct not found
+                              T.concat ["struct ", T.pack structName', " ", T.pack name']
                         _ -> T.concat [irTypeToC typ st, " ", T.pack name']
                     ]
               )
