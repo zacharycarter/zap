@@ -22,14 +22,15 @@ module Zap.IR
   )
 where
 
-import Control.Monad (when)
+import Control.Monad (forM, when)
 import Data.Int (Int32, Int64)
+import qualified Data.List as L
 import qualified Data.Map as M
 import qualified Data.Set as S
+import Data.String (fromString)
 import qualified Data.Text as T
 import Debug.Trace
 import Zap.AST as A
-import Zap.Analysis.Semantic (isFnameStructConstructor)
 
 --------------------------------------------------------------------------------
 --                           IR Data Structures
@@ -238,40 +239,39 @@ convertFuncDecl ::
 convertFuncDecl symTable (DFunc name typeParams params retType (Block _ bodyExprs _)) = do
   traceM $ "\n=== Converting function: " ++ name
   traceM $ "Parameters: " ++ show params
-  traceM $ "Return type: " ++ show retType
   traceM $ "Converting params: " ++ show params
-  traceM $ "Type params: " ++ show typeParams
+
+  -- First, register parameter types
+  let symTable' =
+        foldl
+          ( \st (Param pname ptyp) ->
+              registerVarType pname ptyp st
+          )
+          symTable
+          params
+  traceM $ "Updated symbol table with param types: " ++ show symTable'
 
   let irParams =
         map
           ( \(Param pname ptyp) ->
-              case ptyp of
-                -- For specialized struct constructors, get type from field
-                TypeNum t -> do
-                  traceM $ "Converting param " ++ pname ++ " type: " ++ show t
-                  (pname, convertType ptyp)
-                TypeStruct _ _ -> (pname, convertType ptyp)
-                -- Avoid converting type parameters to void
-                TypeParam p -> do
-                  traceM $ "Converting param " ++ show p ++ " with type: " ++ show ptyp
-                  case M.lookup name (structNames symTable) of
-                    Just sid -> case lookupStruct sid symTable of
-                      Just def -> case structFields def of
-                        [("value", fieldType)] -> (pname, convertType fieldType)
-                        _ -> (pname, convertType ptyp)
-                      Nothing -> (pname, convertType ptyp)
-                    Nothing -> (pname, convertType ptyp)
-                _ -> (pname, convertType ptyp)
+              let specialized =
+                    case M.lookup pname (varTypes symTable') of
+                      Just (TypeOption (TypeStruct _ nm)) ->
+                        let specializedName = "__option_" ++ nm
+                         in case M.lookup specializedName (structNames symTable') of
+                              Just newSid -> TypeStruct newSid specializedName
+                              Nothing -> TypeOption (TypeStruct (StructId 0) nm)
+                      Just t -> t
+                      Nothing -> ptyp
+               in (pname, convertType specialized)
           )
           params
 
   traceM $ "Converted params: " ++ show irParams
   let retTypeIR = convertType retType
-  traceM $ "Converted return type: " ++ show retTypeIR
 
-  -- Rest of the existing conversion logic
-  traceM $ "Converting body expressions: " ++ show bodyExprs
-  convertedStmts <- concat <$> mapM (convertExprToStmts symTable Nothing) bodyExprs
+  -- Use updated symTable' for rest of conversion
+  convertedStmts <- concat <$> mapM (convertExprToStmts symTable' Nothing) bodyExprs
   traceM $ "converted statements: " ++ show convertedStmts
 
   let alreadyEndsInReturn =
@@ -431,6 +431,114 @@ convertExprToStmts symTable ctx expr = do
           let meta = mkMetadata IRTypeVoid (S.singleton PureEffect)
           return [(IRGoto (loopEndLabel loopCtx), meta)]
         _ -> Left $ IRError "Invalid break syntax"
+    -- Add this debug logging inside convertExprToStmts at the Case branch:
+    Case scrutinee patterns -> do
+      traceM "\n=== Converting case expression ==="
+      traceM $ "Scrutinee: " ++ show scrutinee
+      traceM $ "Patterns: " ++ show patterns
+
+      -- Get scrutinee type and log it
+      let scrutType = case scrutinee of
+            Var name -> lookupVarType name symTable
+            _ -> Nothing
+      traceM $ "Scrutinee type: " ++ show scrutType
+
+      -- Convert the scrutinee expression
+      scrutExpr <- convertToIRExprWithSymbols symTable scrutinee
+
+      -- For Option types, we'll use the tag field for matching
+      case scrutinee of
+        Var name -> case lookupVarType name symTable of
+          Just (TypeOption innerType) -> do
+            -- Get tag field from scrutinee
+            let tagAccess = IRCall "field_access" [scrutExpr, IRLit (IRStringLit "tag")]
+            let valueAccess = IRCall "field_access" [scrutExpr, IRLit (IRStringLit "value")]
+
+            -- Generate unique labels for each pattern
+            let makePatternLabel i = "case_" ++ show i
+            let patternLabels = map makePatternLabel [0 .. length patterns - 1]
+            let endLabel = "case_end"
+
+            -- Generate code for each pattern
+            patternCode <- forM (zip3 patterns patternLabels (tail patternLabels ++ [endLabel])) $
+              \((pat, expr), thisLabel, nextLabel) -> do
+                traceM $ "\nGenerating code for pattern: " ++ show pat
+                case pat of
+                  PConstructor "Some" [PLiteral (IntLit val _)] -> do
+                    -- Some(0) case: tag == 1 && value == 0
+                    exprCode <- convertExprToStmts symTable ctx expr
+                    return $
+                      [ (IRLabel thisLabel, mkMetadata IRTypeVoid (S.singleton PureEffect)),
+                        (IRJumpIfZero tagAccess nextLabel, mkMetadata IRTypeVoid (S.singleton PureEffect)),
+                        ( IRJumpIfZero
+                            (IRCall "Eq" [valueAccess, IRLit (IRInt32Lit (read val))])
+                            nextLabel,
+                          mkMetadata IRTypeVoid (S.singleton PureEffect)
+                        )
+                      ]
+                        ++ exprCode
+                        ++ [(IRGoto endLabel, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+                  PConstructor "Some" [PVar bindName] -> do
+                    exprCode <- convertExprToStmts symTable ctx expr
+                    boundDecl <- case innerType of
+                      TypeStruct optSid _ ->
+                        case lookupStruct optSid symTable of
+                          Just optDef ->
+                            case lookup "value" (structFields optDef) of
+                              Just innerFieldType -> do
+                                let boundIRType = convertType innerFieldType
+                                return
+                                  ( IRVarDecl
+                                      bindName
+                                      boundIRType
+                                      (IRCall "field_access" [scrutExpr, IRLit (IRStringLit "value")])
+                                  )
+                              Nothing ->
+                                Left $ IRError "Option struct missing 'value' field"
+                          Nothing ->
+                            Left $ IRError "Option struct not found in symbol table"
+                      t -> do
+                        let optionName = "__option_" ++ typeToSuffix t
+                        case M.lookup optionName (structNames symTable) of
+                          Just optSid ->
+                            case lookupStruct optSid symTable of
+                              Just optDef ->
+                                case lookup "value" (structFields optDef) of
+                                  Just innerFieldType -> do
+                                    let boundIRType = convertType innerFieldType
+                                    return
+                                      ( IRVarDecl
+                                          bindName
+                                          boundIRType
+                                          (IRCall "field_access" [scrutExpr, IRLit (IRStringLit "value")])
+                                      )
+                                  Nothing -> Left $ IRError "Option struct missing 'value' field"
+                              Nothing -> Left $ IRError "Option struct not found in symbol table"
+                          Nothing -> Left $ IRError $ "Option type not registered: " ++ optionName
+                    return $
+                      [ (IRLabel thisLabel, mkMetadata IRTypeVoid (S.singleton PureEffect)),
+                        (IRJumpIfZero tagAccess nextLabel, mkMetadata IRTypeVoid (S.singleton PureEffect)),
+                        (boundDecl, mkMetadata IRTypeVoid (S.singleton PureEffect))
+                      ]
+                        ++ exprCode
+                        ++ [(IRGoto endLabel, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+                  PConstructor "None" [] -> do
+                    -- None case: tag == 0
+                    exprCode <- convertExprToStmts symTable ctx expr
+                    return $
+                      [ (IRLabel thisLabel, mkMetadata IRTypeVoid (S.singleton PureEffect)),
+                        (IRJumpIfTrue tagAccess nextLabel, mkMetadata IRTypeVoid (S.singleton PureEffect))
+                      ]
+                        ++ exprCode
+                        ++ [(IRGoto endLabel, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+                  _ -> Left $ IRError $ "Unsupported pattern: " ++ show pat
+
+            -- Concatenate all pattern code and add end label
+            return $
+              concat patternCode
+                ++ [(IRLabel endLabel, mkMetadata IRTypeVoid (S.singleton PureEffect))]
+          Nothing -> Left $ IRError $ "Case scrutinee must have Option type"
+        _ -> Left $ IRError $ "Case scrutinee must be a variable"
     _ -> do
       traceM $ "No pattern matched in convertExprToStmts, falling through to: " ++ show expr
       converted <- convertToIRExprWithSymbols symTable expr
@@ -620,7 +728,7 @@ literalToType (FloatLit _ (Just t)) = TypeNum t
 literalToType _ = TypeVoid
 
 isStructCall :: Expr -> Bool
-isStructCall (Call fname _) = isFnameStructConstructor fname
+isStructCall (Call fname _) = A.isFnameStructConstructor fname
 isStructCall _ = False
 
 --------------------------------------------------------------------------------
@@ -633,7 +741,7 @@ typeFromExpr (Lit (FloatLit _ (Just Float64))) _ = IRTypeFloat64
 typeFromExpr (Lit (IntLit _ (Just Int32))) _ = IRTypeInt32
 typeFromExpr (Lit (IntLit _ (Just Int64))) _ = IRTypeInt64
 typeFromExpr (Call fname _) symTable
-  | isFnameStructConstructor fname =
+  | A.isFnameStructConstructor fname =
       let _ =
             trace
               ( "\n=== typeFromExpr for struct call ==="
@@ -647,7 +755,7 @@ typeFromExpr (Call fname _) symTable
             Just sid -> IRTypeStruct fname sid
             Nothing -> error $ "Unknown struct type: " ++ fname
 typeFromExpr (Call fname _) _
-  | isFnameStructConstructor fname =
+  | A.isFnameStructConstructor fname =
       IRTypeStruct fname (StructId 0)
 typeFromExpr (StructLit name _) _ =
   IRTypeStruct name (StructId 0)
@@ -671,13 +779,7 @@ typeFromExpr _ _ = IRTypeVoid
 --------------------------------------------------------------------------------
 convertType :: Type -> IRType
 convertType t =
-  let _ =
-        trace
-          ( "\n=== convertType ===\n"
-              ++ "Converting type: "
-              ++ show t
-          )
-          ()
+  let _ = trace ("Converting type: " ++ show t) ()
       result = case t of
         TypeNum Int32 -> IRTypeInt32
         TypeNum Int64 -> IRTypeInt64
@@ -686,6 +788,11 @@ convertType t =
         TypeVoid -> IRTypeVoid
         TypeStruct sid nm -> IRTypeStruct nm sid
         TypeParam _ -> IRTypeVar (TypeVar 0)
+        TypeOption inner -> do
+          let innerIR = convertType inner
+          case innerIR of
+            IRTypeStruct nm sid -> IRTypeStruct ("__option_" ++ nm) sid
+            _ -> IRTypeStruct ("__option_" ++ typeToSuffix inner) (StructId 0)
         _ -> IRTypeVoid
       _ = trace ("Converted to: " ++ show result) ()
    in result
@@ -1107,53 +1214,100 @@ convertToIRExprWithSymbols symTable (Call fname args) = do
   traceM $ "Args: " ++ show args
   traceM $ "Variable types: " ++ show (varTypes symTable)
 
-  case args of
-    [arg@(Var name)] ->
-      traceM $
-        "Checking type for var "
-          ++ name
-          ++ ": "
-          ++ show (lookupVarType name symTable)
-    _ -> return ()
-
   case isOptionConstructor fname symTable of
-    Just (ctor, paramType) -> do
-      traceM $ "Detected option constructor: " ++ ctor
-      traceM $ "Parameter type from suffix: " ++ show paramType
+    Just ("None", t) -> do
+      traceM $ "\n=== Processing None variant ==="
+      traceM $ "Base type: " ++ show t
+      let makeNoneStruct optionName =
+            Right $
+              IRCall
+                "struct_lit"
+                [ IRLit (IRStringLit optionName),
+                  IRLit (IRInt32Lit 0), -- None tag
+                  IRLit (IRInt32Lit 0) -- Default value
+                ]
+      case t of
+        TypeStruct sid name -> do
+          traceM $ "Found None constructor for struct with name: " ++ name ++ " and id: " ++ show sid
+          case lookupStruct sid symTable of
+            Just def -> do
+              traceM $ "Found struct definition: " ++ show def
+              case args of
+                [] -> do
+                  -- None constructor takes no arguments
+                  traceM $ "Found empty args for None constructor invocation..."
+                  -- Handle both generic and non-generic structs
+                  if not (null (structParams def))
+                    then do
+                      -- For generic structs, keep existing specialization logic
+                      let rawSuffix = drop (length ("None_" :: String)) fname
+                      traceM $ "Raw suffix for None constructor invocation with empty args: " ++ rawSuffix
+                      suffix <-
+                        if rawSuffix == name
+                          then case [ k | (k, _) <- M.toList (structNames symTable), k /= name, T.pack (name ++ "_") `T.isPrefixOf` T.pack k
+                                    ] of
+                            [only] -> return only
+                            [] -> Left $ IRError $ "No specialization found for " ++ name
+                            _ -> Left $ IRError $ "Multiple specializations found for " ++ name
+                          else return rawSuffix
+                      traceM $ "Specialized name: " ++ suffix
+                      case M.lookup ("__option_" ++ suffix) (structNames symTable) of
+                        Just _ -> makeNoneStruct ("__option_" ++ suffix)
+                        Nothing -> Left $ IRError $ "Option type not registered: " ++ ("__option_" ++ suffix)
+                    else do
+                      -- For non-generic structs, use base name directly
+                      let optionName = "__option_" ++ name
+                      case M.lookup optionName (structNames symTable) of
+                        Just _ -> makeNoneStruct optionName
+                        Nothing -> Left $ IRError $ "Option type not registered: " ++ optionName
+                _ -> Left $ IRError "None constructor takes no arguments"
+            Nothing -> Left $ IRError "Invalid base type for None"
+        other -> do
+          traceM $ "Non-struct None type: " ++ show other
+          let optionName = "__option_" ++ typeToSuffix other
+          case M.lookup optionName (structNames symTable) of
+            Just _ -> makeNoneStruct optionName
+            Nothing -> Left $ IRError $ "Option type not registered: " ++ optionName
+    Just ("Some", paramType) -> do
+      -- Use a variable pattern to catch all Some variants
+      traceM "Detected option constructor: Some"
+      traceM $ "Parameter type: " ++ show paramType
 
-      -- Get the option struct name for this type
-      let structName = case paramType of
-            TypeNum Int32 -> "__option_i32"
-            TypeNum Int64 -> "__option_i64"
-            TypeNum Float32 -> "__option_f32"
-            TypeNum Float64 -> "__option_f64"
-            TypeStruct _ name -> "__option_" ++ name
-            _ -> error $ "Invalid option type: " ++ show paramType
-
-      traceM $ "Using option struct name: " ++ structName
-
-      case M.lookup structName (structNames symTable) of
-        Just sid -> do
-          traceM $ "Found option struct ID: " ++ show sid
-          convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
-          traceM $ "Converted args: " ++ show convertedArgs
-          let tag = case ctor of
-                "Some" -> 1
-                "None" -> 0
-          traceM $ "Using tag: " ++ show tag
-
-          Right $
-            IRCall
-              "struct_lit"
-              [ IRLit (IRStringLit structName),
-                IRLit (IRInt32Lit tag),
-                if null convertedArgs
-                  then IRLit (IRInt32Lit 0) -- Default for None
-                  else head convertedArgs -- Value for Some
-              ]
-        Nothing -> error $ "Option type not registered: " ++ structName
+      -- For Option types, we'll use the tag field for matching
+      case paramType of
+        TypeNum numType -> do
+          -- Look up appropriate option struct
+          let optionName = "__option_" ++ typeToSuffix paramType
+          case M.lookup optionName (structNames symTable) of
+            Just optionSid -> do
+              convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+              return $
+                IRCall
+                  "struct_lit"
+                  [ IRLit (IRStringLit optionName),
+                    IRLit (IRInt32Lit 1), -- Some tag
+                    head convertedArgs -- Value
+                  ]
+            Nothing -> Left $ IRError $ "Option type not registered: " ++ optionName
+        TypeStruct sid name -> do
+          traceM $ "\n=== lookupStruct ==="
+          traceM $ "Looking up sid: " ++ show sid
+          traceM $ "Available structs: " ++ show (M.toList $ structDefs symTable)
+          case lookupStruct sid symTable of
+            Just def -> do
+              let optionName = "__option_" ++ name
+              convertedArgs <- mapM (convertToIRExprWithSymbols symTable) args
+              return $
+                IRCall
+                  "struct_lit"
+                  [ IRLit (IRStringLit optionName),
+                    IRLit (IRInt32Lit 1), -- Some tag
+                    head convertedArgs -- Value
+                  ]
+            Nothing -> Left $ IRError $ "Invalid struct type for Some"
+        _ -> Left $ IRError $ "Invalid parameter type for Some"
     Nothing
-      | isFnameStructConstructor fname -> do
+      | A.isFnameStructConstructor fname -> do
           traceM $ "\n=== convertToIRExprWithSymbols: struct constructor ==="
           traceM $ "Constructor name: " ++ fname
           traceM $ "Arguments: " ++ show args
@@ -1204,6 +1358,32 @@ convertToIRExprWithSymbols symTable (StructLit name fields) = do
 convertToIRExprWithSymbols _ (If _ _ _) = do
   traceM "Skipping If expression in convertToIRExprWithSymbols - already handled"
   Right $ IRLit (IRInt32Lit 0)
+convertToIRExprWithSymbols symTable (Case scrutinee patterns) = do
+  traceM "\n=== Converting case expression ==="
+  scrutExpr <- convertToIRExprWithSymbols symTable scrutinee
+
+  -- Get scrutinee type
+  case scrutinee of
+    Var name -> case lookupVarType name symTable of
+      Just (TypeOption innerType) -> do
+        -- For Option types, we'll use the tag field for matching
+        let tagAccess = IRCall "field_access" [scrutExpr, IRLit (IRStringLit "tag")]
+
+        -- Generate code for each pattern
+        convertedPatterns <- forM patterns $ \case
+          (PConstructor "Some" [pat], expr) -> do
+            -- Extract value and bind it
+            let valueAccess = IRCall "field_access" [scrutExpr, IRLit (IRStringLit "value")]
+            exprCode <- convertToIRExprWithSymbols symTable expr
+            return (PConstructor "Some" [pat], exprCode)
+          (PConstructor "None" [], expr) -> do
+            exprCode <- convertToIRExprWithSymbols symTable expr
+            return (PConstructor "None" [], exprCode)
+          _ -> Left $ IRError "Invalid pattern"
+
+        return $ IRCall "case" [scrutExpr, IRLit (IRStringLit "__option_i32")]
+      Nothing -> Left $ IRError "Case scrutinee must have Option type"
+    _ -> Left $ IRError "Case scrutinee must be a variable"
 convertToIRExprWithSymbols _ e = do
   traceM $
     "Encoutnered unsupported expression inside convertToIRExprWithSymbols: "
@@ -1226,10 +1406,26 @@ opToString op = error $ "Unsupported operator: " ++ show op
 
 -- Helper to detect option constructors
 isOptionConstructor :: String -> SymbolTable -> Maybe (String, Type)
-isOptionConstructor fname symTable = case break (== '_') fname of
-  ("Some", '_' : suffix) -> Just ("Some", parseOptionType suffix)
-  ("None", '_' : suffix) -> Just ("None", parseOptionType suffix)
-  _ -> Nothing
+isOptionConstructor fname symTable =
+  let _ = trace ("\n=== isOptionConstructor ===\nChecking: " ++ fname) ()
+   in case fname of
+        "Some" -> Just ("Some", TypeNum Int32) -- Default to Int32 for basic Some
+        _ -> case break (== '_') fname of
+          ("Some", '_' : suffix) ->
+            trace "Found Some constructor" $
+              Just ("Some", parseOptionType suffix)
+          ("None", '_' : suffix) ->
+            trace "Found None constructor with suffix" $
+              Just ("None", parseOptionType suffix)
+          ("None", "") ->
+            trace "Found bare None - checking for type application" $ do
+              let fnameText = T.pack fname
+              case T.stripPrefix "None[Box[i32]]" fnameText of
+                Just _ -> case M.lookup "Box_i32" (structNames symTable) of
+                  Just sid -> Just ("None", TypeStruct sid "Box_i32")
+                  Nothing -> Nothing
+                Nothing -> Nothing
+          _ -> Nothing
   where
     parseOptionType :: String -> Type
     parseOptionType suffix = case suffix of

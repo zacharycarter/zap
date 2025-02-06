@@ -23,6 +23,7 @@ module Zap.AST
     getSpecializedFuncName,
     getSpecializedStructName,
     lookupStruct,
+    lookupSpecialized,
     registerStruct,
     registerOptionConstructors,
     registerParamStruct,
@@ -36,10 +37,12 @@ module Zap.AST
     substituteTypeParamWithSymbols,
     getMultiParamName,
     isFunctionLabel,
+    isFnameStructConstructor,
   )
 where
 
 import Control.Monad (forM_, when)
+import qualified Data.Char as C
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Text as T
@@ -1064,6 +1067,15 @@ registerNewSpecialization sid specializationName baseDef paramTypes st = do
             structNames = M.insert specializationName sid (structNames st1)
           }
 
+  -- Register option type for this specialized struct
+  let (_, st3) =
+        registerStruct
+          ("__option_" ++ specializationName)
+          [ ("tag", TypeNum Int32),
+            ("value", TypeStruct sid specializationName)
+          ]
+          st2
+
   trace
     ( "\n=== Registering new specialization ===\n"
         ++ "Using SID: "
@@ -1081,9 +1093,9 @@ registerNewSpecialization sid specializationName baseDef paramTypes st = do
         ++ "New nextStructId: "
         ++ show (nextStructId st2)
     )
-    $ case verifySymbolTable st2 of
+    $ case verifySymbolTable st3 of
       Left err -> error $ "Invalid symbol table after specialization: " ++ err
-      Right () -> registerConstructor specializationName sid newDef st2
+      Right () -> registerConstructor specializationName sid newDef st3
 
 registerConstructor :: String -> StructId -> StructDef -> SymbolTable -> (StructId, SymbolTable)
 registerConstructor name sid def st =
@@ -1152,15 +1164,21 @@ specializeFunctionDef def typeArgs st = do
   let fullSubList = zip (funcTypeParams def) typeArgs
   traceM $ "Full type substitutions: " ++ show fullSubList
 
-  -- first, fix up parameter types in one pass
+  -- First fix up parameter types in one pass
   let newParams = map (substituteAllInParam fullSubList st) (funcParams def)
   traceM $ "New params: " ++ show newParams
 
-  -- fix up return type in one pass
-  let newRetType = substituteAllParamsWithSymbols fullSubList (funcRetType def) st
+  -- Fix up return type in one pass
+  let retType = funcRetType def
+  let newRetType = case retType of
+        TypeStruct sid name
+          | isFnameStructConstructor name ->
+              -- For struct constructors, return type should use specialized name
+              TypeStruct sid (getSpecializedName name (head typeArgs))
+        _ -> substituteAllParamsWithSymbols fullSubList retType st
   traceM $ "New return type: " ++ show newRetType
 
-  -- rename function
+  -- Rename function
   let oldName = funcName def
   let newName = getSpecializedFuncName oldName typeArgs
   let newBody = renameStructLit (funcBody def) oldName newName
@@ -1245,8 +1263,10 @@ lookupVarType :: String -> SymbolTable -> Maybe Type
 lookupVarType name st = M.lookup name (varTypes st)
 
 -- Helper to register variable type
-registerVarType :: String -> Type -> SymbolTable -> SymbolTable
-registerVarType name typ st = st {varTypes = M.insert name typ (varTypes st)}
+registerVarType name t symTable =
+  case M.lookup name (varTypes symTable) of
+    Just _ -> symTable
+    Nothing -> symTable {varTypes = M.insert name t (varTypes symTable)}
 
 typeToSuffix :: Type -> String
 typeToSuffix (TypeNum Int32) = "i32"
@@ -1323,3 +1343,29 @@ isFunctionLabel :: String -> Bool
 isFunctionLabel label =
   -- A break target is always the function name
   not $ any (`T.isPrefixOf` (T.pack label)) ["if_", "while_", "else_", "end"]
+
+isFnameStructConstructor :: String -> Bool
+isFnameStructConstructor "" = False
+isFnameStructConstructor s =
+  -- Check first char is uppercase
+  C.isUpper (head s)
+    &&
+    -- Not an option constructor
+    not (T.isPrefixOf "Some_" $ T.pack s)
+    && not (T.isPrefixOf "None_" $ T.pack s)
+    &&
+    -- Not an option struct
+    not (T.isPrefixOf "__option_" $ T.pack s)
+
+lookupSpecialized :: SymbolTable -> String -> Maybe (String, StructId)
+lookupSpecialized st genericName =
+  let prefix = genericName ++ "_"
+      candidates =
+        [ (name, sid)
+          | (name, sid) <- M.toList (structNames st),
+            name /= genericName,
+            T.pack prefix `T.isPrefixOf` T.pack name
+        ]
+   in case candidates of
+        [] -> Nothing
+        ((specializedName, sid) : _) -> Just (specializedName, sid)

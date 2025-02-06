@@ -4,7 +4,6 @@
 module Zap.Analysis.Semantic
   ( analyze,
     analyzeWithSymbols,
-    isFnameStructConstructor,
     parseSymTable,
     initialEnv,
     Environment (..),
@@ -113,6 +112,10 @@ instance Substitutable Expr where
         (map (applySubstTo subst) exprs)
     Index arr idx -> Index (applySubstTo subst arr) (applySubstTo subst idx)
     While cond body -> While (applySubstTo subst cond) (applySubstTo subst body)
+    Case scrutinee patterns ->
+      Case
+        (applySubstTo subst scrutinee)
+        [(pat, applySubstTo subst expr) | (pat, expr) <- patterns]
 
 instance Substitutable Decl where
   applySubstTo subst (DFunc name params typeParams retType body) =
@@ -123,6 +126,13 @@ instance Substitutable Decl where
       (applySubstTo subst retType)
       (applySubstTo subst body)
   applySubstTo _ decl = decl
+
+instance Substitutable Pattern where
+  applySubstTo subst = \case
+    PConstructor name pats -> PConstructor name (map (applySubstTo subst) pats)
+    PLiteral lit -> PLiteral lit -- Literals don't get substituted
+    PVar name -> PVar name -- Variable patterns don't get substituted
+    PWildcard -> PWildcard -- Wildcards don't get substituted
 
 type SemCheck a = StateT Environment (Except SemanticError) a
 
@@ -177,21 +187,26 @@ analyzeProgramPhases (Program tops) = do
   st2 <- registerAllSpecializations st1 collectedTops
   verifySpecializedStructs st2
   modify $ \s -> s {envSymbols = st2}
-  st <- gets envSymbols
-  traceM $ "After specializations: " ++ show st
-  traceM $ "Function definitions: " ++ show (M.keys $ funcDefs st)
-  traceM $ "Struct definitions: " ++ show (M.keys $ structNames st)
+  st3 <- gets envSymbols
+  traceM $ "After specializations: " ++ show st3
+  traceM $ "Function definitions: " ++ show (M.keys $ funcDefs st3)
+  traceM $ "Struct definitions: " ++ show (M.keys $ structNames st3)
+
+  -- \**New: Immediately update function definitions with specialized types**
+  modify $ \s -> s {envSymbols = updateAllFunctionDefs st3}
+  st4 <- gets envSymbols
+  traceM $ "Symbol table after updateAllFunctionDefs: " ++ show st4
 
   -- Convert both specialized structs and functions back to AST
   traceM $ "Converting specializations back to AST"
 
   -- Find specialized functions
-  let specFuncs = [name | (name, _) <- M.toList (funcDefs st2), isSpecialized name]
+  let specFuncs = [name | (name, _) <- M.toList (funcDefs st4), isSpecialized name]
   traceM $ "Found specialized function names: " ++ show specFuncs
 
   -- Find specialized structs
   let specStructs =
-        [ (name, sid) | (name, sid) <- M.toList (structNames st2), isSpecialized name
+        [ (name, sid) | (name, sid) <- M.toList (structNames st4), isSpecialized name
         ]
   traceM $ "Found specialized struct names: " ++ show specStructs
 
@@ -201,23 +216,35 @@ analyzeProgramPhases (Program tops) = do
         [TLType name (TypeStruct sid name) | (name, sid) <- specStructs]
           -- Then add function declarations using existing helper
           ++ [ TLDecl $ specializedFuncDefToAST name def
-               | (name, def) <- M.toList (funcDefs st2),
+               | (name, def) <- M.toList (funcDefs st4),
                  isSpecialized name
              ]
 
   traceM $ "Generated specialized tops: " ++ show specTops
+
+  traceM $ "Sym table before collecting type constraints: " ++ show st4
 
   -- Third step: Collect type constraints
   constrainedTops <- mapM collectConstraints (tops ++ specTops) -- Include specializations
   constraints <- gets envConstraints
   traceM $ "Collected constraints: " ++ show constraints
 
+  st5 <- gets envSymbols
+
+  traceM $ "Sym table after collecting type constraints: " ++ show st5
+
   subst <- solveConstraints constraints
   traceM $ "Solved substitution: " ++ show subst
 
-  let finalTops = map (applySubstTo subst) constrainedTops
-  traceM $ "Final tops: " ++ show finalTops
+  st6 <- gets envSymbols
 
+  traceM $ "Sym table after solving constraints: " ++ show st6
+
+  let finalTops = map (applySubstTo subst) constrainedTops
+  traceM $ "Final tops before final func update: " ++ show finalTops
+  -- Update all function definitions using our updateFuncDef helper.
+  finalSyms <- gets envSymbols
+  traceM $ "Final symbol table after final func update: " ++ show finalSyms
   return $ Program finalTops
 
 -- | Basic declaration registration (first phase)
@@ -228,21 +255,31 @@ collectBasicDeclarations tl = do
     TLDecl (DFunc name typeParams params retType body) -> do
       traceM $ "\n=== collectBasicDeclarations: Function ==="
       traceM $ "Registering function: " ++ name
+      traceM $ "Parameters before specialization: " ++ show params
+      traceM $ "Struct definitions: " ++ show (M.toList $ structDefs st)
+      traceM $ "Struct names: " ++ show (M.toList $ structNames st)
+
+      -- Specialize parameter types
+      let specializedParams =
+            map
+              ( \(Param pname ptyp) ->
+                  Param pname (updateTypeWithSpecialization ptyp st)
+              )
+              params
+
+      traceM $ "Parameters after specialization: " ++ show specializedParams
 
       let funcDef =
             FunctionDef
               { funcName = name,
                 funcTypeParams = typeParams,
-                funcParams = params,
+                funcParams = specializedParams, -- Use specialized params
                 funcRetType = retType,
                 funcBody = body
               }
 
       modify $ \s ->
-        s
-          { envSymbols =
-              st {funcDefs = M.insert name funcDef (funcDefs st)}
-          }
+        s {envSymbols = st {funcDefs = M.insert name funcDef (funcDefs st)}}
       return st
     TLType name (TypeStruct sid _) -> do
       traceM $ "\n=== collectBasicDeclarations: Struct ==="
@@ -414,132 +451,129 @@ registerAllSpecializations st tops = do
       traceM $ "- Function defs: " ++ show (M.keys $ funcDefs st')
       traceM $ "- Base constructor function: " ++ show (M.lookup baseName (funcDefs st'))
 
-      -- First check if this is a function that needs specialization
-      case M.lookup baseName (funcDefs st') of
+      -- First handle struct path if applicable
+      stWithStructs <- case M.lookup baseName (structNames st') of
+        Just sid -> case lookupStruct sid st' of
+          Just def -> do
+            traceM $ "Found base struct: " ++ show def
+            let specializedVersions =
+                  [ parseTypeArgs (drop (length baseName + 1) name)
+                    | (name, _) <- M.toList (structNames st'),
+                      name /= baseName,
+                      stripSuffixIfAny name == baseName
+                  ]
+            traceM $ "Found specialized versions from names: " ++ show specializedVersions
+
+            -- Find all implied specializations for this base type
+            let thisBaseSpecs = [(ts, nm) | (nm, ts) <- implicitSpecs, nm == baseName]
+            traceM $ "Specs for " ++ baseName ++ ": " ++ show thisBaseSpecs
+
+            -- Also look for nested uses in other types' fields
+            let nestedSpecs = findNestedSpecializations baseName st'
+            traceM $ "Found nested uses: " ++ show nestedSpecs
+
+            -- Combine all specializations
+            let allSpecs = nub $ specializedVersions ++ map fst thisBaseSpecs ++ nestedSpecs
+            traceM $ "All struct specializations to create: " ++ show allSpecs
+
+            foldM (registerSpecialization def baseName) st' allSpecs
+          Nothing -> return st'
+        Nothing -> return st'
+
+      -- Then handle function specializations if applicable
+      case M.lookup baseName (funcDefs stWithStructs) of
         Just baseFuncDef | not (null (funcTypeParams baseFuncDef)) -> do
           traceM $ "Found generic function: " ++ show baseFuncDef
-          let thisBaseSpecs = [(ts, nm) | (nm, ts) <- implicitSpecs, nm == baseName, not (null ts)] -- Skip empty type lists
+          let thisBaseSpecs = [(ts, nm) | (nm, ts) <- implicitSpecs, nm == baseName, not (null ts)]
           traceM $ "Function specializations needed: " ++ show thisBaseSpecs
 
-          -- Use existing registerSpecializedFunc to create specializations
-          foldM (\s (types, name) -> registerSpecializedFunc baseFuncDef s (name ++ "_" ++ concatMap typeToSuffix types, [])) st' thisBaseSpecs
+          foldM (\s (types, name) -> registerSpecializedFunc baseFuncDef s (name ++ "_" ++ concatMap typeToSuffix types, [])) stWithStructs thisBaseSpecs
+        _ -> return stWithStructs
+      where
+        -- \| Find places where a type is used in other structs' fields
+        findNestedSpecializations :: String -> SymbolTable -> [[Type]]
+        findNestedSpecializations baseName' st'' = do
+          traceM $ "\n=== findNestedSpecializations for " ++ baseName' ++ " ==="
+          let specs = [paramType | StructDef {structFields = fields} <- M.elems (structDefs st''), (_, fieldType) <- fields, paramType <- extractTypeParams baseName' fieldType]
+          traceM $ "Found nested usages: " ++ show specs
+          return specs
 
-        -- If not a function or not generic, try struct path (existing code)
-        _ -> do
-          let specializedVersions =
-                [ parseTypeArgs (drop (length baseName + 1) name)
-                  | (name, _) <- M.toList (structNames st'),
-                    name /= baseName,
-                    stripSuffixIfAny name == baseName
-                ]
-          traceM $ "Found specialized versions from names: " ++ show specializedVersions
+        -- \| Extract type parameters when a type is used in a field
+        extractTypeParams :: String -> Type -> [Type]
+        extractTypeParams baseName' = \case
+          TypeStruct _ name
+            | name == baseName' ->
+                -- If this is a parameter field like Box[T], grab T from context
+                case name of
+                  n
+                    | '_' `elem` n ->
+                        -- Already specialized, extract concrete type
+                        parseTypeArgs $ dropWhile (/= '_') n
+                  _ -> []
+            | takeWhile (/= '_') name == baseName' ->
+                -- Found specialized version like Box_i32
+                parseTypeArgs $ dropWhile (/= '_') name
+          TypeParam param ->
+            -- Found a type parameter usage like Box[T]
+            [TypeParam param]
+          _ -> []
 
-          -- Find all implied specializations for this base type
-          let thisBaseSpecs = [(ts, nm) | (nm, ts) <- implicitSpecs, nm == baseName]
-          traceM $ "Specs for " ++ baseName ++ ": " ++ show thisBaseSpecs
+        registerSpecialization ::
+          StructDef ->
+          String ->
+          SymbolTable ->
+          [Type] ->
+          StateT Environment (Except SemanticError) SymbolTable
+        registerSpecialization baseDef baseNm st'' paramTypes = do
+          traceM $ "\n=== registerSpecialization ==="
+          traceM $ "Base name: " ++ show baseNm
+          traceM $ "Base struct: " ++ show baseDef
+          traceM $ "Param types: " ++ show paramTypes
+          traceM $ "Current state: " ++ show st''
 
-          -- Also look for nested uses in other types' fields
-          let nestedSpecs = findNestedSpecializations baseName st'
-          traceM $ "Found nested uses: " ++ show nestedSpecs
+          if null paramTypes || any isTypeParam paramTypes
+            then do
+              traceM "Skipping specialization with type parameters"
+              return st''
+            else do
+              let specName = getMultiParamName baseNm paramTypes
+              traceM $ "  specialized struct name: " ++ specName
 
-          -- Combine both sources of specializations
-          let allSpecs = nub $ specializedVersions ++ map fst thisBaseSpecs ++ nestedSpecs
-          traceM $ "All specializations to create: " ++ show allSpecs
+              -- 1) Register the specialized struct:
+              let (newSid, stWithStruct) = registerSpecializedStruct specName baseDef paramTypes st''
+              traceM $ "  registerSpecializedStruct done, new struct id = " ++ show newSid
 
-          case M.lookup baseName (structNames st') of
-            Just sid ->
-              case lookupStruct sid st' of
-                Just def -> do
-                  traceM $ "Found base struct def: " ++ show def
-                  foldM (registerSpecialization def baseName) st' allSpecs
+              -- 2) Now specialize the constructor function.
+              case M.lookup baseNm (funcDefs stWithStruct) of
+                Just baseFuncDef -> do
+                  traceM $ "  Found base constructor func: " ++ baseNm
+                  traceM $ "  specializing function with paramTypes = " ++ show paramTypes
+                  case specializeFunctionDef baseFuncDef paramTypes stWithStruct of
+                    Right specFuncDef -> do
+                      let specFuncDef' =
+                            specFuncDef
+                              { funcParams =
+                                  map
+                                    (\(Param n t) -> Param n (updateTypeWithSpecialization t stWithStruct))
+                                    (funcParams specFuncDef),
+                                funcRetType = updateTypeWithSpecialization (funcRetType specFuncDef) stWithStruct
+                              }
+                      traceM $ "  function specialization success => " ++ specName
+                      let updatedFuncs = M.insert specName specFuncDef' (funcDefs stWithStruct)
+                      let finalSt = stWithStruct {funcDefs = updatedFuncs}
+                      traceM $ "  updated symbol table with specialized func => " ++ specName
+                      return finalSt
+                    Left errMsg -> do
+                      traceM $ "  function specialization error => " ++ errMsg
+                      -- Skip adding the specialized function if it fails
+                      return stWithStruct
                 Nothing -> do
-                  traceM $ "No structDef found for " ++ baseName ++ " (sid=" ++ show sid ++ "), skipping..."
-                  return st'
-            Nothing -> do
-              traceM $ "No struct name found for baseName " ++ baseName ++ ", skipping..."
-              return st'
+                  traceM $ "  no base constructor func found for " ++ baseNm
+                  return stWithStruct
           where
-            -- \| Find places where a type is used in other structs' fields
-            findNestedSpecializations :: String -> SymbolTable -> [[Type]]
-            findNestedSpecializations baseName' st'' = do
-              traceM $ "\n=== findNestedSpecializations for " ++ baseName' ++ " ==="
-              let specs = [paramType | StructDef {structFields = fields} <- M.elems (structDefs st''), (_, fieldType) <- fields, paramType <- extractTypeParams baseName' fieldType]
-              traceM $ "Found nested usages: " ++ show specs
-              return specs
-
-            -- \| Extract type parameters when a type is used in a field
-            extractTypeParams :: String -> Type -> [Type]
-            extractTypeParams baseName' = \case
-              TypeStruct _ name
-                | name == baseName' ->
-                    -- If this is a parameter field like Box[T], grab T from context
-                    case name of
-                      n
-                        | '_' `elem` n ->
-                            -- Already specialized, extract concrete type
-                            parseTypeArgs $ dropWhile (/= '_') n
-                      _ -> []
-                | takeWhile (/= '_') name == baseName' ->
-                    -- Found specialized version like Box_i32
-                    parseTypeArgs $ dropWhile (/= '_') name
-              TypeParam param ->
-                -- Found a type parameter usage like Box[T]
-                [TypeParam param]
-              _ -> []
-
-            registerSpecialization ::
-              StructDef ->
-              String ->
-              SymbolTable ->
-              [Type] ->
-              StateT Environment (Except SemanticError) SymbolTable
-            registerSpecialization baseDef baseNm st'' paramTypes = do
-              traceM $ "\n=== registerSpecialization ==="
-              traceM $ "Base name: " ++ show baseNm
-              traceM $ "Base struct: " ++ show baseDef
-              traceM $ "Param types: " ++ show paramTypes
-              traceM $ "Current state: " ++ show st''
-
-              -- Only specialize if we have concrete types
-              if null paramTypes || any isTypeParam paramTypes
-                then do
-                  traceM "Skipping specialization with type parameters"
-                  return st''
-                else do
-                  let specName = getMultiParamName baseNm paramTypes
-                  traceM $ "  specialized struct name: " ++ specName
-
-                  -----------------------------------------
-                  -- 1) Register specialized struct
-                  -----------------------------------------
-                  let (sid, newSt) = registerSpecializedStruct specName baseDef paramTypes st''
-                  traceM $ "  registerSpecializedStruct done, sid=" ++ show sid
-
-                  -----------------------------------------
-                  -- 2) Create specialized constructor func
-                  -----------------------------------------
-                  case M.lookup baseNm (funcDefs newSt) of
-                    Just baseFuncDef -> do
-                      traceM $ "  Found base constructor func: " ++ baseNm
-                      traceM $ "  specializing function with paramTypes=" ++ show paramTypes
-                      case specializeFunctionDef baseFuncDef paramTypes newSt of
-                        Right specFuncDef -> do
-                          traceM $ "  function specialization success => " ++ specName
-                          let updatedFuncs = M.insert specName specFuncDef (funcDefs newSt)
-                          let finalSt = newSt {funcDefs = updatedFuncs}
-                          traceM $ "  updated symbol table with specialized func => " ++ specName
-                          return finalSt
-                        Left errMsg -> do
-                          traceM $ "  function specialization error => " ++ errMsg
-                          -- We'll skip adding the specialized function if it fails
-                          return newSt
-                    Nothing -> do
-                      traceM $ "  no base constructor func found for " ++ baseNm
-                      return newSt
-              where
-                isTypeParam :: Type -> Bool
-                isTypeParam (TypeParam _) = True
-                isTypeParam _ = False
+            isTypeParam :: Type -> Bool
+            isTypeParam (TypeParam _) = True
+            isTypeParam _ = False
 
 registerSpecializedFunc :: FunctionDef -> SymbolTable -> (String, [Expr]) -> SemCheck SymbolTable
 registerSpecializedFunc baseDef st (specName, _) = do
@@ -559,7 +593,15 @@ registerSpecializedFunc baseDef st (specName, _) = do
   case specializeFunctionDef baseDef [paramType] st of
     Right specDef -> do
       traceM $ "Created specialized definition: " ++ show specDef
-      return $ st {funcDefs = M.insert specName specDef (funcDefs st)}
+      let updatedDef =
+            specDef
+              { funcParams =
+                  map
+                    (\(Param n t) -> Param n (updateTypeWithSpecialization t st))
+                    (funcParams specDef),
+                funcRetType = updateTypeWithSpecialization (funcRetType specDef) st
+              }
+      return $ st {funcDefs = M.insert specName updatedDef (funcDefs st)}
     Left err -> do
       traceM $ "Failed to create specialized definition: " ++ show err
       return st
@@ -794,11 +836,11 @@ inferExpr e = do
       traceM $ "Current symbol table structs: " ++ show (M.keys $ structDefs st)
       traceM $ "Current symbol table names: " ++ show (M.keys $ structNames st)
       case argType of
-        TypeStruct sid name -> do
+        TypeStruct _ name -> do
           let optionStructName = "__option_" ++ name
           case M.lookup optionStructName (structNames st) of
             Just optionSid -> do
-              let result = (TypeOption (TypeStruct sid name), Call ("Some_" ++ name) [arg'])
+              let result = (TypeOption (TypeStruct optionSid optionStructName), Call ("Some_" ++ name) [arg'])
               traceM $ "Result: " ++ show result
               return result
             Nothing -> throwError $ UndefinedStruct optionStructName
@@ -811,26 +853,34 @@ inferExpr e = do
       traceM $ "Function name: " ++ fname
       traceM $ "Type suffix: " ++ typeSuffix
 
-      -- Get current symbol table
       st <- gets envSymbols
 
-      -- Look up parameter type
       paramType <- case typeSuffix of
         "i32" -> return $ TypeNum Int32
         "i64" -> return $ TypeNum Int64
         "f32" -> return $ TypeNum Float32
         "f64" -> return $ TypeNum Float64
-        structName -> case M.lookup structName (structNames st) of
-          Just sid -> return $ TypeStruct sid structName
-          Nothing -> throwError $ UndefinedStruct structName
+        structName -> do
+          -- First look up the generic type for the given struct name.
+          genericType <- case M.lookup structName (structNames st) of
+            Just sid -> return $ TypeStruct sid structName
+            Nothing -> throwError $ UndefinedStruct structName
+          -- Now update it with any available specialization.
+          let specializedType = updateTypeWithSpecialization genericType st
+          return specializedType
 
       traceM $ "Inferred parameter type: " ++ show paramType
       return (TypeOption paramType, Call fname [])
     Call name args -> do
-      -- For other function calls, look up function in symbol table
+      traceM $ "\n=== inferExpr: Call ==="
+      traceM $ "Name: " ++ name
+      traceM $ "Args: " ++ show args
       syms <- gets envSymbols
+      traceM $ "Current symbol table: " ++ show syms
+      traceM $ "Looking up function definition in symbol table: " ++ name
       case M.lookup name (funcDefs syms) of
         Just def -> do
+          traceM $ "Found function definition in symbol table: " ++ show def
           -- Check argument count matches
           when (length args /= length (funcParams def)) $
             throwError $
@@ -838,25 +888,22 @@ inferExpr e = do
                 name
                 (length (funcParams def))
                 (length args)
-
           -- Infer types of arguments
           (argTypes, args') <- unzip <$> mapM inferExpr args
-
-          -- Extract parameter types and add constraints
-          let paramTypes = [t | Param _ t <- funcParams def]
+          -- Update the function’s parameter types and return type using updateTypeWithSpecialization
+          let updatedParams = map (\(Param n t) -> Param n (updateTypeWithSpecialization t syms)) (funcParams def)
+              paramTypes = [t | Param _ t <- updatedParams]
+              newRetType = updateTypeWithSpecialization (funcRetType def) syms
+          -- Add constraints using the updated parameter types
           zipWithM_
             ( \paramType argType ->
-                addConstraint
-                  ( CEquality
-                      paramType
-                      argType
-                      ("Argument to " ++ name)
-                  )
+                addConstraint (CEquality paramType argType ("Argument to " ++ name))
             )
             paramTypes
             argTypes
-
-          return (funcRetType def, Call name args')
+          let result = (newRetType, Call name args')
+          traceM $ "Result: " ++ show result
+          return result
         Nothing -> throwError $ UndefinedFunction name
     While cond body -> do
       (condType, cond') <- inferExpr cond
@@ -1079,6 +1126,40 @@ inferExpr e = do
               arrType
               (TypeArray TypeAny)
               "Cannot index non-array type"
+    Case scrutinee patterns -> do
+      traceM "\n=== inferExpr: Case expression ==="
+      -- First infer type of scrutinee
+      (scrutType, scrutExpr) <- inferExpr scrutinee
+      traceM $ "Scrutinee type: " ++ show scrutType
+
+      -- Infer types of all patterns and their expressions
+      typedPatterns <- forM patterns $ \(pat, expr) -> do
+        traceM $ "\n=== Checking pattern: " ++ show pat
+        -- Enter new scope for pattern variables
+        (patType, boundVars) <- inferPattern pat scrutType
+        traceM $ "Pattern type: " ++ show patType
+        traceM $ "Bound variables: " ++ show boundVars
+
+        -- Add pattern bindings to scope
+        withNewScope $ do
+          forM_ boundVars $ \(name, typ) ->
+            bindVar name typ
+
+          -- Infer expression with pattern bindings
+          (exprType, exprExpr) <- inferExpr expr
+          traceM $ "Pattern clause expr type: " ++ show exprType
+
+          return (pat, exprExpr, exprType)
+
+      -- All expressions must have same type
+      let exprTypes = [t | (_, _, t) <- typedPatterns]
+      case exprTypes of
+        [] -> throwError $ TypeError scrutType TypeVoid "Empty case expression"
+        (t : ts) -> do
+          forM_ ts $ \t' ->
+            addConstraint (CEquality t t' "All case branches must return same type")
+
+          return (t, Case scrutExpr [(p, e) | (p, e, _) <- typedPatterns])
   where
     getBaseType :: Expr -> SymbolTable -> SemCheck Type
     getBaseType expr symTable = do
@@ -1124,6 +1205,57 @@ inferExpr e = do
             _ -> throwError $ InvalidStruct "Field access requires struct type"
         _ -> throwError $ InvalidStruct "Invalid base expression for field access"
 
+    inferPattern :: Pattern -> Type -> SemCheck (Type, [(String, Type)])
+    inferPattern pat scrutType = do
+      traceM $ "\n=== inferPattern ==="
+      traceM $ "Pattern: " ++ show pat
+      traceM $ "Scrutinee type: " ++ show scrutType
+
+      case pat of
+        PConstructor name args -> do
+          traceM $ "Checking constructor pattern: " ++ name
+
+          -- For Option types
+          case name of
+            "Some" -> case scrutType of
+              TypeOption innerType -> do
+                -- Infer argument patterns
+                boundVars <-
+                  concat
+                    <$> forM
+                      args
+                      ( \argPat -> do
+                          (argType, argVars) <- inferPattern argPat innerType
+                          addConstraint (CEquality argType innerType "Constructor argument type")
+                          return argVars
+                      )
+                return (scrutType, boundVars)
+              _ -> throwError $ TypeError scrutType (TypeOption TypeAny) "Expected Option type"
+            "None" -> case scrutType of
+              TypeOption _ -> return (scrutType, [])
+              _ -> throwError $ TypeError scrutType (TypeOption TypeAny) "Expected Option type"
+            _ -> throwError $ TypeError scrutType TypeAny ("Unknown constructor: " ++ name)
+        PLiteral lit -> do
+          -- Add this case to handle literals
+          traceM $ "Literal pattern: " ++ show lit
+          let litType = case lit of
+                IntLit _ (Just t) -> TypeNum t
+                IntLit _ Nothing -> TypeNum Int32 -- Default to Int32
+                FloatLit _ (Just t) -> TypeNum t
+                FloatLit _ Nothing -> TypeNum Float32
+                StringLit _ -> TypeString
+                BooleanLit _ -> TypeBool
+
+          -- Add constraint that literal type matches scrutinee type
+          addConstraint (CEquality litType scrutType "Literal pattern type match")
+          return (litType, []) -- Literals don't bind variables
+        PVar name -> do
+          traceM $ "Variable pattern: " ++ name
+          return (scrutType, [(name, scrutType)])
+        PWildcard -> do
+          traceM "Wildcard pattern"
+          return (scrutType, []) -- Wildcards don't bind variables
+
 -- | Constraint solving
 solveConstraints :: [Constraint] -> SemCheck Substitution
 solveConstraints constraints = do
@@ -1166,7 +1298,7 @@ unifyTypes t1 t2 src allowImplicit = do
   traceM $ "\n=== unifyTypes ==="
   traceM $ "t1: " ++ show t1
   traceM $ "t2: " ++ show t2
-  traceM $ "source: " ++ src
+  traceM $ "source: " ++ show src
   traceM $ "allow implicit: " ++ show allowImplicit
 
   let result = case (t1, t2) of
@@ -1180,8 +1312,18 @@ unifyTypes t1 t2 src allowImplicit = do
           if n1 == n2 || (allowImplicit && isImplicitlyConvertible n1 n2)
             then return emptySubst
             else throwError $ TypeError t1 t2 ("Numeric type mismatch in " ++ src)
-        (TypeStruct _ name1, TypeStruct _ name2) ->
-          if stripSpecialization name1 == stripSpecialization name2
+        -- Handle option type unification
+        (TypeOption inner1, TypeOption inner2) -> do
+          traceM $ "Unifying option types - inner1: " ++ show inner1 ++ ", inner2: " ++ show inner2
+          unifyTypes inner1 inner2 src allowImplicit
+
+        -- Handle struct type unification considering specialization
+        (TypeStruct sid1 name1, TypeStruct sid2 name2) -> do
+          let base1 = stripSpecialization name1
+              base2 = stripSpecialization name2
+          traceM $ "Unifying structs: " ++ base1 ++ " vs " ++ base2
+          -- Allow specialized type to unify with its base type if params match
+          if base1 == base2
             then return emptySubst
             else throwError $ TypeError t1 t2 ("Struct type mismatch in " ++ src)
         _ -> throwError $ TypeError t1 t2 ("Type mismatch in " ++ src)
@@ -1191,10 +1333,14 @@ unifyTypes t1 t2 src allowImplicit = do
 
 -- Helper to strip type specialization suffix
 stripSpecialization :: String -> String
-stripSpecialization name =
-  case break (== '_') name of
-    (base, "") -> base -- No specialization
-    (base, _) -> base -- Strip specialization suffix
+stripSpecialization name
+  | "__option_" `isPrefixOf` name =
+      let rest = drop (length ("__option_" :: String)) name
+       in case break (== '_') rest of
+            (base, _) -> base
+  | otherwise =
+      case break (== '_') name of
+        (base, _) -> base
 
 -- | Type unification for truthable types
 unifyTruthable :: Type -> String -> Except SemanticError Substitution
@@ -1307,7 +1453,12 @@ lookupVar name = do
     Nothing -> throwError $ UndefinedVariable name
 
 bindParam :: Param -> SemCheck ()
-bindParam (Param name typ) = bindVar name typ
+bindParam (Param name typ) = do
+  st <- gets envSymbols
+  let specializedType = case lookupVarType name st of
+        Just newType -> newType
+        Nothing -> typ
+  bindVar name specializedType
 
 withNewScope :: SemCheck a -> SemCheck a
 withNewScope m = do
@@ -1352,15 +1503,94 @@ specializedFuncDefToAST name def =
     (funcRetType def)
     (funcBody def)
 
-isFnameStructConstructor :: String -> Bool
-isFnameStructConstructor "" = False
-isFnameStructConstructor s =
-  -- Check first char is uppercase
-  C.isUpper (head s)
-    &&
-    -- Not an option constructor
-    not (isPrefixOf "Some_" s)
-    && not (isPrefixOf "None_" s)
-    &&
-    -- Not an option struct
-    not (isPrefixOf "__option_" s)
+-- | Returns True if the given string begins with the option prefix.
+isOptionPrefix :: String -> Bool
+isOptionPrefix s = "__option_" `T.isPrefixOf` T.pack s
+
+-- | Given a type and the current symbol table, if the type is a struct (or
+-- an option over a struct) and a specialized version exists, return the specialized type.
+updateTypeWithSpecialization :: Type -> SymbolTable -> Type
+updateTypeWithSpecialization t syms = do
+  let _ = trace ("\n=== updateTypeWithSpecialization ===") ()
+  let _ = trace ("Input type: " ++ show t) ()
+  let _ = trace ("Available structs: " ++ show (M.keys $ structDefs syms)) ()
+  let _ = trace ("Available names: " ++ show (M.keys $ structNames syms)) ()
+
+  case t of
+    TypeOption (TypeStruct sid name) -> do
+      let base = stripSpecialization name
+      let _ = trace ("Found option of struct, base name: " ++ base) ()
+      -- First look for a specialized option type candidate.
+      let candidateOption =
+            [ (n, specSid)
+              | (n, specSid) <- M.toList (structNames syms),
+                isOptionPrefix n,
+                let stripped = drop (length ("__option_" :: String)) n,
+                stripped == base || stripSpecialization stripped == base
+            ]
+      let _ = trace ("Option candidates: " ++ show candidateOption) ()
+      -- Otherwise look for a specialized version of the underlying type.
+      let candidateGeneric =
+            [ (n, specSid)
+              | (n, specSid) <- M.toList (structNames syms),
+                not (isOptionPrefix n),
+                stripSpecialization n == base,
+                n /= base
+            ]
+      let _ = trace ("Generic candidates: " ++ show candidateGeneric) ()
+
+      case candidateOption of
+        ((specName, specSid) : _) -> do
+          let result = TypeOption (TypeStruct specSid specName)
+          trace ("Using specialized option type: " ++ show result) result
+        [] -> case candidateGeneric of
+          ((specName, specSid) : _) -> do
+            let result = TypeOption (TypeStruct specSid specName)
+            trace ("Using generic specialized type: " ++ show result) result
+          [] -> TypeOption (TypeStruct sid name)
+    TypeOption inner -> do
+      let _ = trace ("Found nested option type") ()
+      -- Recursively update inner type
+      let updated = updateTypeWithSpecialization inner syms
+      let result = TypeOption updated
+      trace ("Updated nested option type: " ++ show result) result
+    TypeStruct sid name -> do
+      let base = stripSpecialization name
+      let _ = trace ("Found struct, base name: " ++ base) ()
+      let candidate =
+            [ (n, specSid)
+              | (n, specSid) <- M.toList (structNames syms),
+                not (isOptionPrefix n),
+                stripSpecialization n == base,
+                n /= base
+            ]
+      let _ = trace ("Struct candidates: " ++ show candidate) ()
+      case candidate of
+        ((specName, specSid) : _) -> do
+          let result = TypeStruct specSid specName
+          trace ("Using specialized struct: " ++ show result) result
+        [] -> TypeStruct sid name
+    _ -> do
+      trace ("No specialization needed for type: " ++ show t) t
+
+-- | Update a function definition’s parameter and return types using updateTypeWithSpecialization.
+updateFuncDef :: FunctionDef -> SymbolTable -> FunctionDef
+updateFuncDef fd syms = do
+  let _ = trace ("\n=== updateFuncDef ===") ()
+  let _ = trace ("Function: " ++ funcName fd) ()
+  let _ = trace ("Original params: " ++ show (funcParams fd)) ()
+  let _ = trace ("Available specialized structs: " ++ show (structNames syms)) ()
+  let newFd =
+        fd
+          { funcParams = map (\(Param n t) -> Param n (updateTypeWithSpecialization t syms)) (funcParams fd),
+            funcRetType = updateTypeWithSpecialization (funcRetType fd) syms
+          }
+  let _ = trace ("Updated params: " ++ show (funcParams newFd)) ()
+  newFd
+
+-- | A final pass to update all function definitions in the symbol table.
+updateAllFunctionDefs :: SymbolTable -> SymbolTable
+updateAllFunctionDefs syms = do
+  let _ = trace ("== updateAllFunctionDefs ===") ()
+  let _ = trace ("Current funcDefs in sym table: " ++ show (funcDefs syms)) ()
+  syms {funcDefs = M.map (\fd -> updateFuncDef fd syms) (funcDefs syms)}

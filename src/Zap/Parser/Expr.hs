@@ -531,11 +531,25 @@ parseTypeArg = do
         _ -> do
           -- Check if it's a defined struct type
           st' <- get
-          case M.lookup spec (structNames $ stateSymTable st') of
-            Just sid -> do
-              traceM $ "Found struct " ++ spec ++ " with sid " ++ show sid
-              return $ TypeStruct sid spec
-            Nothing -> throwError $ UnexpectedToken tok "valid type"
+          -- Add check for nested type parameters
+          nextTok <- gets stateTokens
+          case nextTok of
+            (next : _) | locToken next == TLeftBracket -> do
+              traceM $ "Found nested type parameters for " ++ spec
+              _ <- matchToken (== TLeftBracket) "["
+              innerParams <- parseTypeArgsInExpr
+              _ <- matchToken (== TRightBracket) "]"
+              -- Look up struct type after parsing parameters
+              case M.lookup spec (structNames $ stateSymTable st') of
+                Just sid -> do
+                  traceM $ "Found struct " ++ spec ++ " with sid " ++ show sid ++ " and type params " ++ show innerParams
+                  return $ TypeStruct sid spec
+                Nothing -> throwError $ UnexpectedToken tok "valid type"
+            _ -> case M.lookup spec (structNames $ stateSymTable st') of
+              Just sid -> do
+                traceM $ "Found struct " ++ spec ++ " with sid " ++ show sid
+                return $ TypeStruct sid spec
+              Nothing -> throwError $ UnexpectedToken tok "valid type"
     TTypeParam param -> do
       traceM $ "Found type parameter: " ++ param
       return $ TypeParam param
@@ -1595,21 +1609,36 @@ parsePatterns baseIndent = do
       traceM $ "Pattern column: " ++ show tokCol
       traceM $ "Required indent: " ++ show baseIndent
 
-      -- Properly handle both EOF and indentation check
+      -- First handle EOF as before
       if locToken tok == TEOF
         then return []
         else
           if tokCol < baseIndent
-            then
-              throwError $
-                IndentationError $
-                  IndentationErrorDetails baseIndent tokCol GreaterEq
+            then -- Check if this is a new top-level expression
+
+              if isTopLevelToken (locToken tok)
+                then do
+                  traceM $ "Found top-level token at column " ++ show tokCol
+                  traceM "Ending pattern matching block"
+                  return []
+                else
+                  throwError $
+                    IndentationError $
+                      IndentationErrorDetails baseIndent tokCol GreaterEq
             else do
               pattern <- parsePattern
               _ <- matchToken (== TColon) ":"
               expr <- parseExpression
               rest <- parsePatterns baseIndent
               return $ (pattern, expr) : rest
+
+-- Helper to identify tokens that begin top-level expressions
+isTopLevelToken :: Token -> Bool
+isTopLevelToken (TWord "let") = True
+isTopLevelToken (TWord "fn") = True
+isTopLevelToken (TWord "type") = True
+isTopLevelToken (TWord "print") = True
+isTopLevelToken _ = False
 
 parsePattern :: Parser Pattern
 parsePattern = do

@@ -553,5 +553,42 @@ migratedTests =
             ],
         expectedOutput = "1\n",
         expectedExitCode = ExitSuccess
+      },
+    TestCase
+      { testName = "nested_pattern_matching",
+        sourceCode =
+          T.unlines
+            [ "type Box[T] = struct",
+              "  value: T",
+              "",
+              "fn unwrapOrZero(x: Option[Box[i32]]): i32 =",
+              "  case x of:",
+              "    Some(box): box.value",
+              "    None: 0",
+              "",
+              "let x = Some(Box[i32](42))",
+              "let y = None[Box[i32]]()",
+              "print unwrapOrZero(x)", -- Should print 42
+              "print unwrapOrZero(y)" -- Should print 0
+            ],
+        expectedOutput = "42\n0\n",
+        expectedExitCode = ExitSuccess
+      },
+    TestCase
+      { testName = "multi_case_patterns",
+        sourceCode =
+          T.unlines
+            [ "fn describe(x: Option[i32]): i32 =",
+              "  case x of:",
+              "    Some(0): 1", -- Match specific value
+              "    Some(n): 2", -- Match and bind any other value
+              "    None: 3", -- Match None
+              "",
+              "print describe(Some(0'i32))", -- Should print 1
+              "print describe(Some(42'i32))", -- Should print 2
+              "print describe(None[i32]())" -- Should print 3
+            ],
+        expectedOutput = "1\n2\n3\n",
+        expectedExitCode = ExitSuccess
       }
   ]

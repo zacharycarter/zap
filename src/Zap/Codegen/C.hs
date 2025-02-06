@@ -95,22 +95,24 @@ checkUnusedLabels = do
 
 -- Helper for generating function declarations
 generateFunctionDeclaration :: SymbolTable -> (IRFuncDecl, IRMetadata) -> T.Text
-generateFunctionDeclaration st (func, _) = do
+generateFunctionDeclaration st (func, _) =
   let _ = trace "\n=== generateFunctionDeclaration ===" ()
       _ = trace ("Function: " ++ show func) ()
-      typeStr = irTypeToC (fnRetType func) st
+      strippedRet = stripSpecializationType st (fnRetType func)
+      typeStr = irTypeToC strippedRet st
       _ = trace ("Return type: " ++ T.unpack typeStr) ()
       params =
         T.intercalate ", " $
           map
-            ( \(name, irType) -> do
-                let paramType = irTypeToC irType st
-                let _ = trace ("Parameter " ++ name ++ " type: " ++ T.unpack paramType) ()
-                T.concat [paramType, " ", T.pack name]
+            ( \(name, t) ->
+                let stt = stripSpecializationType st t
+                    paramType = irTypeToC stt st
+                    _ = trace ("Parameter " ++ name ++ " type: " ++ T.unpack paramType) ()
+                 in T.concat [paramType, " ", T.pack name]
             )
             (fnParams func)
       _ = trace ("Final declaration: " ++ T.unpack (T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]))
-  T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]
+   in T.concat [typeStr, " ", T.pack (fnName func), "(", params, ");"]
 
 -- Helper to generate struct definitions
 generateStructDefinitions :: SymbolTable -> [(IRFuncDecl, IRMetadata)] -> T.Text
@@ -183,7 +185,7 @@ collectStructTypes funcs = do
                                       Just sId -> sId
                                       Nothing -> error ("Missing specialized struct: " ++ subName)
                           ]
-                            ++ [ (fname, convertType ftype)
+                            ++ [ (fname, convertType st ftype)
                                  | (fname, ftype) <- defFields,
                                    not (isStruct ftype)
                                ]
@@ -236,15 +238,6 @@ collectStructTypes funcs = do
     isStruct (TypeStruct _ _) = True
     isStruct _ = False
 
-    convertType :: Type -> IRType
-    convertType (TypeNum Int32) = IRTypeInt32
-    convertType (TypeNum Int64) = IRTypeInt64
-    convertType (TypeNum Float32) = IRTypeFloat32
-    convertType (TypeNum Float64) = IRTypeFloat64
-    convertType (TypeStruct sid nm) = IRTypeStruct nm sid
-    convertType (TypeParam _) = IRTypeInt32 -- or error ...
-    convertType t = error ("Unexpected type in struct field: " ++ show t)
-
     -- A simple adjacency‐list topological sort:
     topologicalSort ::
       [String] -> -- all vertices
@@ -275,7 +268,20 @@ collectStructTypes funcs = do
                       outEdges
                in (seenF, v : accF)
 
--- Helper to convert IR types to C types
+-- | Helper to convvert C types to IR types
+convertType :: SymbolTable -> Type -> IRType
+convertType st (TypeNum Int32) = IRTypeInt32
+convertType st (TypeNum Int64) = IRTypeInt64
+convertType st (TypeNum Float32) = IRTypeFloat32
+convertType st (TypeNum Float64) = IRTypeFloat64
+convertType st (TypeStruct sid nm) =
+  IRTypeStruct (getSpecializedStructName nm sid st) sid
+convertType st (TypeParam p) =
+  IRTypeVar (TypeVar 0) -- or, if you prefer, error ("Unimplemented type parameter: " ++ p)
+convertType st t =
+  error ("Unexpected type in struct field: " ++ show t)
+
+-- | Helper to convert IR types to C types
 irTypeToC :: IRType -> SymbolTable -> T.Text
 irTypeToC irType st = do
   let _ = trace ("\n=== irTypeToC ===\nType: " ++ show irType ++ "\nSymbol table: " ++ show st) ()
@@ -335,30 +341,43 @@ generateFunctionWithState :: SymbolTable -> (IRFuncDecl, IRMetadata) -> StateT C
 generateFunctionWithState st (func, _) = do
   traceM $ "\n=== generateFunctionWithState: " ++ show func ++ " ==="
 
-  case fnRetType func of
+  -- \*** NEW: update the function's parameter and return types using our specialization stripping ***
+  let newParams = map (\(name, t) -> (name, stripSpecializationType st t)) (fnParams func)
+      newRetType = stripSpecializationType st (fnRetType func)
+      func' = func {fnParams = newParams, fnRetType = newRetType}
+  traceM $ "After stripSpecialization: " ++ show func'
+
+  -- (Also, if you haven't already, insert the function parameters into cgVarTypes)
+  modify $ \s ->
+    s
+      { cgVarTypes =
+          foldr
+            (\(name, ty) acc -> M.insert name ty acc)
+            (cgVarTypes s)
+            (fnParams func')
+      }
+  updatedVars <- gets cgVarTypes
+  traceM $ "Updated cgVarTypes: " ++ show updatedVars
+
+  case fnRetType func' of
     IRTypeVar _ -> do
       traceM $ "Skipping generic function"
       return ""
     IRTypeStruct name _ -> do
       -- For struct constructor functions, ensure we return an initialized struct
-      let params = fnParams func
+      let params = fnParams func'
       let paramNames = map fst params
-      -- Extract the actual parameter type instead of defaulting to int
       let paramTypes = map snd params
       let paramDecls =
             zipWith
               ( \name' typ ->
                   T.concat
                     [ case typ of
-                        -- Use specialized type name for struct parameters
                         IRTypeStruct structName' sid ->
                           case lookupStruct sid st of
                             Just def ->
-                              -- If this is a generic struct, look for a specialized version
                               if not (null (structParams def))
-                                then -- For parameters of generic structs, we need the specialized version
-                                -- Search for any specialization by prefix
-
+                                then
                                   let prefix = T.pack (structName' ++ "_")
                                       specialized =
                                         filter
@@ -368,10 +387,8 @@ generateFunctionWithState st (func, _) = do
                                         (specializedName, _) : _ ->
                                           T.concat ["struct ", specializedName, " ", T.pack name']
                                         [] -> T.concat ["struct ", T.pack structName', " ", T.pack name']
-                                else -- Non-generic struct - use name directly
-                                  T.concat ["struct ", T.pack structName', " ", T.pack name']
+                                else T.concat ["struct ", T.pack structName', " ", T.pack name']
                             Nothing ->
-                              -- Fallback if struct not found
                               T.concat ["struct ", T.pack structName', " ", T.pack name']
                         _ -> T.concat [irTypeToC typ st, " ", T.pack name']
                     ]
@@ -392,21 +409,20 @@ generateFunctionWithState st (func, _) = do
               [ "struct ",
                 T.pack name,
                 " ",
-                T.pack (fnName func),
+                T.pack (fnName func'),
                 "(",
                 T.intercalate ", " paramDecls,
                 ")"
               ]
       return $ T.unlines [signature <> " {", structInit, "}"]
     _ -> do
-      body <- generateBlockWithState st (fnBody func)
+      body <- generateBlockWithState st (fnBody func')
       traceM $ "Converted body: " ++ show body
 
-      -- NEW: Check if this is a specialized function
-      let isSpecialized = '_' `elem` fnName func
+      let isSpecialized = '_' `elem` fnName func'
       let specializedType =
             if isSpecialized
-              then case drop 1 $ dropWhile (/= '_') $ fnName func of
+              then case drop 1 $ dropWhile (/= '_') $ fnName func' of
                 "i32" -> Just IRTypeInt32
                 "i64" -> Just IRTypeInt64
                 "f32" -> Just IRTypeFloat32
@@ -415,57 +431,36 @@ generateFunctionWithState st (func, _) = do
               else Nothing
       traceM $ "Specialized type: " ++ show specializedType
 
-      -- Determine return type (extended)
-      let typeStr = case fnRetType func of
+      let typeStr = case fnRetType func' of
             IRTypeInt32 -> "int32_t"
             IRTypeVoid -> "void"
-            _ -> "int" -- Default to int for now
+            _ -> "int"
       traceM $ "Type str: " ++ show typeStr
 
-      -- Add implicit return for main if needed
-      let needsImplicitReturn = fnName func == "main" && not (any isReturnStmt (irBlockStmts $ fnBody func))
+      let needsImplicitReturn = fnName func' == "main" && not (any isReturnStmt (irBlockStmts $ fnBody func'))
 
       let finalBody = if needsImplicitReturn then body <> "    return 0;\n" else body
 
       traceM $ "Final function body: " ++ show finalBody
 
-      -- Generate function signature (unchanged)
-      let signature = case fnName func of
+      let signature = case fnName func' of
             "main" -> T.pack "int main(void)"
-            _ -> T.concat [typeStr, " ", T.pack (fnName func), "(", generateParams specializedType (fnParams func), ")"]
+            _ -> T.concat [typeStr, " ", T.pack (fnName func'), "(", generateParams st specializedType (fnParams func'), ")"]
 
       traceM $ "Signature: " ++ show signature
 
-      -- Return function text (unchanged)
       let result = T.unlines $ map rstrip $ map T.unpack $ [signature <> T.pack " {", finalBody, "}"]
 
       traceM $ "Final generated function: " ++ show result
 
       return $ result
   where
-    -- Helper to check if statement is a return
-    isReturnStmt :: (IRStmt, IRMetadata) -> Bool
     isReturnStmt (IRReturn _, _) = True
     isReturnStmt _ = False
 
-    -- Helper to generate parameter list (modified to handle specialization)
-    generateParams :: Maybe IRType -> [(String, IRType)] -> T.Text
-    generateParams _ [] = T.pack "void"
-    generateParams mSpecType params = T.intercalate ", " $ map (formatParam mSpecType) params
-
-    -- Helper to format individual parameters (modified)
-    formatParam :: Maybe IRType -> (String, IRType) -> T.Text
-    formatParam mSpecType (name, typ) = case typ of
-      IRTypeVar _ -> case mSpecType of
-        Just concrete -> T.concat [irTypeToC concrete st, " ", T.pack name]
-        Nothing -> T.concat ["void ", T.pack name]
-      _ -> T.concat [paramTypeToC typ, " ", T.pack name]
-
-    -- Helper to convert IR types to C types (unchanged)
-    paramTypeToC :: IRType -> T.Text
-    paramTypeToC IRTypeInt32 = "int32_t"
-    paramTypeToC IRTypeVoid = "void"
-    paramTypeToC _ = "int" -- Default to int for now
+generateParams :: SymbolTable -> Maybe IRType -> [(String, IRType)] -> T.Text
+generateParams st _ params =
+  T.intercalate ", " $ map (\(name, typ) -> T.concat [irTypeToC typ st, " ", T.pack name]) params
 
 generateBlockWithState :: SymbolTable -> IRBlock -> StateT CGState (Either CGenError) T.Text
 generateBlockWithState st (IRBlock _ stmts) = do
@@ -559,20 +554,48 @@ generateStmtWithState :: SymbolTable -> (IRStmt, IRMetadata) -> StateT CGState (
 generateStmtWithState st (stmt, _) = do
   traceM $ "\n=== generateStmtWithState: " ++ show stmt ++ " ==="
   case stmt of
+    IRVarDecl name IRTypeVoid initExpr@(IRCall "field_access" [base, IRLit (IRStringLit fieldName)]) -> do
+      traceM $ "\n=== generateStmtWithState: IRVarDecl (field_access case) for variable " ++ name ++ " ==="
+      case base of
+        IRVar baseName -> do
+          traceM $ "\n=== generateStmtWithState: IRVar for base " ++ baseName ++ " ==="
+          st' <- get
+          case M.lookup baseName (cgVarTypes st') of
+            Just (IRTypeStruct structName sid) -> do
+              traceM $ "\n=== generateStmtWithState: Just IRTypeStruct case for struct " ++ structName ++ " with sid " ++ show sid ++ " ==="
+              case lookupStruct sid st of
+                Just def ->
+                  case lookup fieldName (structFields def) of
+                    Just astFieldType -> do
+                      let fieldIRType = convertType st astFieldType
+                          typeStr = irTypeToC fieldIRType st
+                      exprCode <- generateExprWithState st initExpr
+                      modify $ \s -> s {cgVarTypes = M.insert name fieldIRType (cgVarTypes s)}
+                      return $ T.concat ["    ", typeStr, " ", T.pack name, " = ", exprCode, ";"]
+                    Nothing ->
+                      lift $ Left $ UnsupportedOperation ("Field not found: " <> T.pack fieldName)
+                Nothing ->
+                  lift $ Left $ UnsupportedOperation ("Struct definition not found for " <> T.pack structName)
+            _ ->
+              lift $ Left $ UnsupportedOperation ("Base variable not found or not a struct: " <> T.pack baseName)
+        _ -> do
+          -- fallback: just generate the expression as is, though this is unexpected
+          exprCode <- generateExprWithState st initExpr
+          return $ T.concat ["    void ", T.pack name, " = ", exprCode, ";"]
     -- Struct handling (unchanged)
-    IRVarDecl name irType@(IRTypeStruct structName' _) initExpr -> do
+    IRVarDecl name irType@(IRTypeStruct _ _) initExpr -> do
       traceM $ "\n=== generateStmtWithState: IRVarDecl | IRTypeStruct ==="
+      let stripped = stripSpecializationType st irType
       modify $ \s ->
         s
           { cgVarTypes =
-              M.insert "current_struct_type" irType $
-                M.insert name irType $
+              M.insert "current_struct_type" stripped $
+                M.insert name stripped $
                   cgVarTypes s
           }
       exprCode <- generateExprWithState st initExpr
       modify $ \s -> s {cgVarTypes = M.delete "current_struct_type" (cgVarTypes s)}
-      return $ T.concat ["    struct ", T.pack structName', " ", T.pack name, " = ", exprCode, ";"]
-
+      return $ T.concat ["    ", irTypeToC stripped st, " ", T.pack name, " = ", exprCode, ";"]
     -- Regular variable declarations (unchanged)
     IRVarDecl name irType initExpr -> do
       traceM $ "\n=== generateStmtWithState: IRVarDecl ==="
@@ -990,3 +1013,18 @@ isIfElsePattern s = do
 
 rstrip :: String -> T.Text
 rstrip = T.pack . reverse . dropWhile isSpace . reverse
+
+-- Add or replace the definition of stripSpecializationType in your Codegen module:
+stripSpecializationType :: SymbolTable -> IRType -> IRType
+stripSpecializationType st (IRTypeStruct nm sid)
+  -- If the name begins with a double option prefix, remove one copy.
+  | "__option___option_" `T.isPrefixOf` T.pack nm =
+      let newName = "__option_" ++ drop (length ("__option___option_" :: String)) nm
+       in case M.lookup newName (structNames st) of
+            Just newSid -> IRTypeStruct newName newSid
+            Nothing -> IRTypeStruct newName sid
+  | otherwise =
+      case M.lookup nm (structNames st) of
+        Just newSid -> IRTypeStruct nm newSid
+        Nothing -> IRTypeStruct nm sid
+stripSpecializationType _ t = t
